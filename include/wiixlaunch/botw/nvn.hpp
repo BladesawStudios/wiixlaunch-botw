@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstddef>
 #include "shaders/default_ui_shader.hpp"
+#include "shaders/normals_sead_bin.hpp"
 
 // ===========================================================================
 // WiiXLaunch::BotW::NVN - High-Level NVN Graphics Injection Framework
@@ -351,6 +352,21 @@ inline NVNcolorState        g_OverlayColorState{};
 inline NVNblendState        g_OverlayBlendState{};
 inline NVNchannelMaskState  g_OverlayChannelMaskState{};
 
+// Debug-normals mesh pipeline (position+normal, unlit, no texture) - see
+// NVN::DrawMesh below.
+inline NVNmemoryPool g_MeshCodePool{};
+inline NVNbuffer g_MeshCodeBuffer{};
+alignas(4096) inline uint8_t g_MeshCodeMemory[0x4000]{}; // Normals shader is ~5.4KB
+inline Program g_MeshProgram{};
+
+inline NVNmemoryPool g_MeshDataPool{};
+inline NVNbuffer g_MeshDataBuffer{};
+// Sized for the Fish mesh (2556 verts x 32B = 0x13f80) plus headroom.
+alignas(4096) inline uint8_t g_MeshDataMemory[0x18000]{};
+inline NVNvertexAttribState g_MeshAttribStates[2]{};
+inline NVNvertexStreamState g_MeshStreamState{};
+inline bool g_MeshPipelineReady = false;
+
 inline FnCommandBufferEndRecording g_OrigCommandBufferEndRecording = nullptr;
 
 inline void EnsureDescriptorPools(Device* device) {
@@ -574,6 +590,80 @@ inline void EnsureDefaultUiSpritePipeline() {
 
     g_DefaultUiProgramReady = true;
     WIIXL_LOG("WiiXLaunch: NVN EnsureDefaultUiSpritePipeline OK");
+}
+
+// Lazily builds the debug-normals mesh pipeline: one program (position + normal
+// in, normal-as-color out, no texture) plus one vertex data buffer big enough
+// to hold whatever mesh the caller passes to NVN::DrawMesh. Mirrors
+// EnsureDefaultUiSpritePipeline's structure but with a 2-attribute (no UV)
+// layout, since this pipeline never samples a texture.
+inline void EnsureMeshPipeline() {
+    if (g_MeshPipelineReady) return;
+    void* gn = GetGraphicsNvn();
+    Device* dev = GetDevice();
+    if (!gn || !dev) return;
+
+    Program* prog = LoadSeadBinaryProgram(
+        gn, g_NormalsSeadBin, kNormalsSeadBinSize,
+        g_MeshCodeMemory, sizeof(g_MeshCodeMemory),
+        &g_MeshCodePool, &g_MeshCodeBuffer,
+        &g_MeshProgram, "Mesh");
+    if (!prog) return;
+
+    auto poolBuilderSetDefaults = NvnFn<FnMemoryPoolBuilderSetDefaults>(Offset::kMemoryPoolBuilderSetDefaults);
+    auto poolBuilderSetDevice   = NvnFn<FnMemoryPoolBuilderSetDevice>(Offset::kMemoryPoolBuilderSetDevice);
+    auto poolBuilderSetFlags    = NvnFn<FnMemoryPoolBuilderSetFlags>(Offset::kMemoryPoolBuilderSetFlags);
+    auto poolBuilderSetStorage  = NvnFn<FnMemoryPoolBuilderSetStorage>(Offset::kMemoryPoolBuilderSetStorage);
+    auto poolInitialize         = NvnFn<FnMemoryPoolInitialize>(Offset::kMemoryPoolInitialize);
+
+    auto bufBuilderSetDefaults  = NvnFn<FnBufferBuilderSetDefaults>(Offset::kBufferBuilderSetDefaults);
+    auto bufBuilderSetDevice    = NvnFn<FnBufferBuilderSetDevice>(Offset::kBufferBuilderSetDevice);
+    auto bufBuilderSetStorage   = NvnFn<FnBufferBuilderSetStorage>(Offset::kBufferBuilderSetStorage);
+    auto bufferInitialize       = NvnFn<FnBufferInitialize>(Offset::kBufferInitialize);
+
+    auto vaDefaults = NvnFn<FnVertexAttribStateSetDefaults>(Offset::kVertexAttribStateSetDefaults);
+    auto vaFormat   = NvnFn<FnVertexAttribStateSetFormat>(Offset::kVertexAttribStateSetFormat);
+    auto vaStream   = NvnFn<FnVertexAttribStateSetStreamIndex>(Offset::kVertexAttribStateSetStreamIndex);
+    auto vsDefaults = NvnFn<FnVertexStreamStateSetDefaults>(Offset::kVertexStreamStateSetDefaults);
+    auto vsStride   = NvnFn<FnVertexStreamStateSetStride>(Offset::kVertexStreamStateSetStride);
+
+    if (!poolBuilderSetDefaults || !poolBuilderSetDevice || !poolBuilderSetFlags || !poolBuilderSetStorage ||
+        !poolInitialize || !bufBuilderSetDefaults || !bufBuilderSetDevice || !bufBuilderSetStorage ||
+        !bufferInitialize || !vaDefaults || !vaFormat || !vaStream || !vsDefaults || !vsStride) {
+        return;
+    }
+
+    NVNmemoryPoolBuilder dataPoolBuilder{};
+    poolBuilderSetDefaults(&dataPoolBuilder);
+    poolBuilderSetDevice(&dataPoolBuilder, dev);
+    poolBuilderSetFlags(&dataPoolBuilder, 0x22);
+    poolBuilderSetStorage(&dataPoolBuilder, g_MeshDataMemory, sizeof(g_MeshDataMemory));
+    poolInitialize(&g_MeshDataPool, &dataPoolBuilder);
+
+    NVNbufferBuilder dataBufferBuilder{};
+    bufBuilderSetDefaults(&dataBufferBuilder);
+    bufBuilderSetDevice(&dataBufferBuilder, dev);
+    bufBuilderSetStorage(&dataBufferBuilder, &g_MeshDataPool, 0, sizeof(g_MeshDataMemory));
+    bufferInitialize(&g_MeshDataBuffer, &dataBufferBuilder);
+
+    // Layout: position (vec4, loc 0) + normal (vec4, loc 1), stride 32 bytes.
+    // Both attributes reuse Format::Float4 (0x2e) deliberately - it's the one
+    // vertex format value this project has independently confirmed against
+    // real game code (see docs/switch-nvn-findings.md); a 3-component format
+    // for the normal would be unverified guesswork.
+    vaDefaults(&g_MeshAttribStates[0]);
+    vaFormat(&g_MeshAttribStates[0], Format::Float4, 0);
+    vaStream(&g_MeshAttribStates[0], 0);
+
+    vaDefaults(&g_MeshAttribStates[1]);
+    vaFormat(&g_MeshAttribStates[1], Format::Float4, 16);
+    vaStream(&g_MeshAttribStates[1], 0);
+
+    vsDefaults(&g_MeshStreamState);
+    vsStride(&g_MeshStreamState, 32);
+
+    g_MeshPipelineReady = true;
+    WIIXL_LOG("WiiXLaunch: NVN EnsureMeshPipeline OK");
 }
 
 inline void InitializeAllPipelines(void* gameFramework) {
@@ -875,6 +965,80 @@ inline void DrawSprite(
     drawArrays(cmdBuf, Topology::Triangles, 0, 6);
 }
 
+struct MeshVertex {
+    float x, y, z, w;
+    float nx, ny, nz, nw;
+};
+
+// Draws an arbitrary, caller-supplied triangle list (non-indexed) through the
+// debug-normals shader - no texture, no lighting, color comes purely from
+// each vertex's normal (see shaders/normals.frag). Intended for a
+// caller that recomputes `vertices` CPU-side every frame (e.g. to rotate a
+// static model-space mesh) and hands the already-transformed result in here;
+// this function only uploads and draws it.
+inline void DrawMesh(CommandBuffer* cmdBuf, void* dstTexture, const MeshVertex* vertices, size_t vertexCount) {
+    impl::EnsureMeshPipeline();
+    if (!impl::g_MeshPipelineReady || !vertices || vertexCount == 0) return;
+
+    size_t byteSize = vertexCount * sizeof(MeshVertex);
+    if (byteSize > sizeof(impl::g_MeshDataMemory)) return;
+
+    auto mapBuf                = impl::NvnFn<impl::FnBufferMap>(impl::Offset::kBufferMap);
+    auto getBufAddr            = impl::NvnFn<impl::FnBufferGetAddress>(impl::Offset::kBufferGetAddress);
+    auto setRenderTargets      = impl::NvnFn<impl::FnCommandBufferSetRenderTargets>(impl::Offset::kCommandBufferSetRenderTargets);
+    auto setViewport           = impl::NvnFn<impl::FnCommandBufferSetViewport>(impl::Offset::kCommandBufferSetViewport);
+    auto setScissor            = impl::NvnFn<impl::FnCommandBufferSetScissor>(impl::Offset::kCommandBufferSetScissor);
+    auto bindProgram           = impl::NvnFn<impl::FnCommandBufferBindProgram>(impl::Offset::kCommandBufferBindProgram);
+    auto bindVertexAttribState = impl::NvnFn<impl::FnCommandBufferBindVertexAttribState>(impl::Offset::kCommandBufferBindVertexAttribState);
+    auto bindVertexStreamState = impl::NvnFn<impl::FnCommandBufferBindVertexStreamState>(impl::Offset::kCommandBufferBindVertexStreamState);
+    auto bindVertexBuffer      = impl::NvnFn<impl::FnCommandBufferBindVertexBuffer>(impl::Offset::kCommandBufferBindVertexBuffer);
+    auto drawArrays             = impl::NvnFn<impl::FnCommandBufferDrawArrays>(impl::Offset::kCommandBufferDrawArrays);
+
+    if (!mapBuf || !getBufAddr || !bindProgram || !bindVertexAttribState ||
+        !bindVertexStreamState || !bindVertexBuffer || !drawArrays) {
+        return;
+    }
+
+    void* mapped = mapBuf(&impl::g_MeshDataBuffer);
+    if (!mapped) return;
+    __builtin_memcpy(mapped, vertices, byteSize);
+    impl::armDCacheFlush(mapped, byteSize);
+
+    uint64_t gpuBase = getBufAddr(&impl::g_MeshDataBuffer);
+
+    const void* colorTargets[1] = { dstTexture };
+    if (setRenderTargets) setRenderTargets(cmdBuf, 1, colorTargets, nullptr, nullptr, nullptr);
+
+    int dispWidth = 1280;
+    int dispHeight = 720;
+    void* gn = impl::GetGraphicsNvn();
+    if (gn) {
+        void* displayBuffer = *reinterpret_cast<void**>(static_cast<uint8_t*>(gn) + 0x50);
+        if (displayBuffer) {
+            float fW = *reinterpret_cast<float*>(static_cast<uint8_t*>(displayBuffer) + 8);
+            float fH = *reinterpret_cast<float*>(static_cast<uint8_t*>(displayBuffer) + 12);
+            if (fW > 0.0f && fH > 0.0f) {
+                dispWidth = static_cast<int>(fW);
+                dispHeight = static_cast<int>(fH);
+            }
+        }
+    }
+
+    if (setViewport) setViewport(cmdBuf, 0, 0, dispWidth, dispHeight);
+    if (setScissor)  setScissor(cmdBuf, 0, 0, dispWidth, dispHeight);
+
+    // Same "inherit the game's last-bound state" approach as DrawSprite above
+    // - no depth/polygon/color/blend/channel-mask binds. Both triangle
+    // windings are already baked into `vertices` (see scripts/pack_mesh.py)
+    // specifically so whatever cull-face state is inherited still shows the
+    // model instead of silently culling half of it.
+    bindProgram(cmdBuf, &impl::g_MeshProgram, StageMask::VertexFragment);
+    bindVertexAttribState(cmdBuf, 2, impl::g_MeshAttribStates);
+    bindVertexStreamState(cmdBuf, 1, &impl::g_MeshStreamState);
+    bindVertexBuffer(cmdBuf, 0, gpuBase, byteSize);
+    drawArrays(cmdBuf, Topology::Triangles, 0, static_cast<int>(vertexCount));
+}
+
 } // namespace WiiXLaunch::BotW::NVN
 
 #else
@@ -894,6 +1058,12 @@ inline Device* GetDevice() { return nullptr; }
 inline void* GetGraphicsNvn() { return nullptr; }
 inline TextureHandle CreateTexture(const void*, size_t, int = 0, int = 0, int = 0) { return 0; }
 inline void DrawSprite(void*, void*, TextureHandle, float, float, float, float, float = 1, float = 1, float = 1, float = 1) {}
+
+struct MeshVertex {
+    float x, y, z, w;
+    float nx, ny, nz, nw;
+};
+inline void DrawMesh(void*, void*, const MeshVertex*, size_t) {}
 
 } // namespace WiiXLaunch::BotW::NVN
 
