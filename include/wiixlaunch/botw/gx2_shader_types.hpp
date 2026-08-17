@@ -231,27 +231,67 @@ struct ColorBuffer {
 static_assert(sizeof(ColorBuffer) == 0x9C);
 static_assert(offsetof(ColorBuffer, regs) == 0x88);
 
+struct Texture {
+    Surface surface;
+    uint32_t viewFirstMip;
+    uint32_t viewNumMips;
+    uint32_t viewFirstSlice;
+    uint32_t viewNumSlices;
+    uint32_t compMap;
+    uint32_t regs[5];
+};
+static_assert(sizeof(Texture) == 0x9C);
+
+struct Sampler {
+    uint32_t regs[3];
+};
+static_assert(sizeof(Sampler) == 0x0C);
+
+struct DepthBuffer {
+    Surface surface;
+    uint32_t viewMip;
+    uint32_t viewFirstSlice;
+    uint32_t viewNumSlices;
+    void* hiZPtr;
+    uint32_t hiZSize;
+    float depthClear;
+    uint32_t stencilClear;
+    uint32_t regs[7];
+};
+static_assert(sizeof(DepthBuffer) == 0xAC);
+
 // Real GX2 constants this project actually uses (values confirmed against
 // vendor/wut/include/gx2/enum.h, not guessed).
 constexpr uint32_t kShaderProgramAlignment = 0x100;
 constexpr uint32_t kAttribFormatFloat32x4 = 0x813; // FLAG_SCALED(0x800) | TYPE_32_32_32_32_FLOAT(0x13)
+constexpr uint32_t kAttribFormatFloat32x2 = 0x80f; // FLAG_SCALED(0x800) | TYPE_32_32_FLOAT(0x0f)
 constexpr uint32_t kAttribIndexPerVertex = 0;
 constexpr uint32_t kEndianSwapDefault = 3;
 constexpr uint32_t kFetchShaderTessellationNone = 0;
 constexpr uint32_t kTessellationModeDiscrete = 0;
 constexpr uint32_t kShaderModeUniformRegister = 0;
+constexpr uint32_t kPrimitiveModeTriangles = 4;
 constexpr uint32_t kPrimitiveModeTriangleStrip = 6;
 constexpr uint32_t kInvalidateModeCpuAttributeBuffer = (1 << 6) | (1 << 0);
+constexpr uint32_t kInvalidateModeCpuTexture = (1 << 6) | (1 << 2);
 constexpr uint32_t kInvalidateModeCpuShader = (1 << 6) | (1 << 3);
+constexpr uint32_t kCompareFuncLessEqual = 3;
 constexpr uint32_t kCompareFuncAlways = 7;
 constexpr uint32_t kFrontFaceCcw = 0;
 constexpr uint32_t kSurfaceDimTexture2D = 1;
 constexpr uint32_t kSurfaceFormatUnormR8G8B8A8 = 0x01a;
+constexpr uint32_t kSurfaceFormatFloatD32 = 0x11;
 constexpr uint32_t kAaMode1x = 0;
-constexpr uint32_t kSurfaceUseColorBufferTexture = (1 << 0) | (1 << 1); // TEXTURE | COLOR_BUFFER
+constexpr uint32_t kSurfaceUseTexture = 1;
+constexpr uint32_t kSurfaceUseDepthBuffer = 4;
 constexpr uint32_t kTileModeLinearAligned = 1;
+constexpr uint32_t kTileModeTiled1DThin1 = 2;
+constexpr uint32_t kTileModeTiled2DThin1 = 4;
 constexpr uint32_t kScanTargetTv = 1;
 constexpr uint32_t kLogicOpCopy = 0xCC;
+constexpr uint32_t kTexClampModeClamp = 0;
+constexpr uint32_t kTexXYFilterModeLinear = 1;
+constexpr uint32_t kClearFlagsDepth = 1;
 
 }
 

@@ -17,6 +17,8 @@
 
 wiixlaunch_cemu_logging_shim_table:
   .int wiixlaunch_cemu_logging_shim_OSReport
+  .int wiixlaunch_cemu_logging_shim_MEMAllocFromDefaultHeapEx
+  .int wiixlaunch_cemu_logging_shim_MEMFreeToDefaultHeap
 
 wiixlaunch_cemu_logging_shim_OSReport:
   # OSReport is variadic - the PowerPC EABI varargs convention requires the
@@ -36,3 +38,9 @@ wiixlaunch_cemu_logging_shim_OSReport:
   # - keeping it clears real garbage, it just wasn't the whole story.
   crxor 4*cr1+eq, 4*cr1+eq, 4*cr1+eq
   b import.coreinit.OSReport
+
+wiixlaunch_cemu_logging_shim_MEMAllocFromDefaultHeapEx:
+  b import.coreinit.OSAllocFromMEM2Arena
+
+wiixlaunch_cemu_logging_shim_MEMFreeToDefaultHeap:
+  b import.coreinit.OSFreeToMEM2Arena

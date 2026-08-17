@@ -46,7 +46,7 @@
 extern "C" {
     // Patched by scripts/deploy.py at deploy time - left at 0 in the actual
     // compiled ELF, never meant to be read before that patch has happened.
-    inline uint32_t g_Gx2ShimTableOffset = 0;
+    __attribute__((section(".data"))) inline uint32_t g_Gx2ShimTableOffset = 0;
 }
 
 namespace WiiXLaunch::Backend {
@@ -83,6 +83,16 @@ enum class Gx2Import : uint32_t {
     SetTargetChannelMasks,
     SetBlendControl,
     Flush,
+    // --- Added for full parity texture and mesh pipeline ---
+    InitTextureRegs,
+    InitSampler,
+    InitSamplerClamping,
+    InitSamplerFilter,
+    SetPixelTexture,
+    SetPixelSampler,
+    InitDepthBufferRegs,
+    SetDepthBuffer,
+    ClearDepthStencilEx,
     Count
 };
 

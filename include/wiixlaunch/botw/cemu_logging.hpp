@@ -26,7 +26,7 @@
 extern "C" {
     // Patched by scripts/deploy.py at deploy time - left at 0 in the actual
     // compiled ELF, never meant to be read before that patch has happened.
-    inline uint32_t g_CemuLoggingShimTableOffset = 0;
+    __attribute__((section(".data"))) inline uint32_t g_CemuLoggingShimTableOffset = 0;
 }
 
 namespace WiiXLaunch::Backend {
@@ -35,6 +35,8 @@ namespace WiiXLaunch::Backend {
 // in src/cemu/cemu_logging.asm - each entry here is that table's Nth slot.
 enum class CemuLogImport : uint32_t {
     OSReport = 0,
+    MEMAllocFromDefaultHeapEx,
+    MEMFreeToDefaultHeap,
     Count
 };
 

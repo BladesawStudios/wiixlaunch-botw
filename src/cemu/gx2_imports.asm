@@ -47,6 +47,15 @@ wiixlaunch_gx2_shim_table:
   .int wiixlaunch_gx2_shim_SetTargetChannelMasks
   .int wiixlaunch_gx2_shim_SetBlendControl
   .int wiixlaunch_gx2_shim_Flush
+  .int wiixlaunch_gx2_shim_InitTextureRegs
+  .int wiixlaunch_gx2_shim_InitSampler
+  .int wiixlaunch_gx2_shim_InitSamplerClamping
+  .int wiixlaunch_gx2_shim_InitSamplerFilter
+  .int wiixlaunch_gx2_shim_SetPixelTexture
+  .int wiixlaunch_gx2_shim_SetPixelSampler
+  .int wiixlaunch_gx2_shim_InitDepthBufferRegs
+  .int wiixlaunch_gx2_shim_SetDepthBuffer
+  .int wiixlaunch_gx2_shim_ClearDepthStencilEx
 
 wiixlaunch_gx2_shim_Init:
   b import.gx2.GX2Init
@@ -104,3 +113,21 @@ wiixlaunch_gx2_shim_SetBlendControl:
   b import.gx2.GX2SetBlendControl
 wiixlaunch_gx2_shim_Flush:
   b import.gx2.GX2Flush
+wiixlaunch_gx2_shim_InitTextureRegs:
+  b import.gx2.GX2InitTextureRegs
+wiixlaunch_gx2_shim_InitSampler:
+  b import.gx2.GX2InitSampler
+wiixlaunch_gx2_shim_InitSamplerClamping:
+  b import.gx2.GX2InitSamplerClamping
+wiixlaunch_gx2_shim_InitSamplerFilter:
+  b import.gx2.GX2InitSamplerFilter
+wiixlaunch_gx2_shim_SetPixelTexture:
+  b import.gx2.GX2SetPixelTexture
+wiixlaunch_gx2_shim_SetPixelSampler:
+  b import.gx2.GX2SetPixelSampler
+wiixlaunch_gx2_shim_InitDepthBufferRegs:
+  b import.gx2.GX2InitDepthBufferRegs
+wiixlaunch_gx2_shim_SetDepthBuffer:
+  b import.gx2.GX2SetDepthBuffer
+wiixlaunch_gx2_shim_ClearDepthStencilEx:
+  b import.gx2.GX2ClearDepthStencilEx
