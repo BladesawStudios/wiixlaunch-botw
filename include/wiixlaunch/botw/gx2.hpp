@@ -6,9 +6,9 @@
 
 #if WIIXL_CEMU || WIIXL_WIIU
 
+#include "fs.hpp"
 #include "gfd.hpp"
 #include "gx2_shader_types.hpp"
-#include "shaders/gx2_default_ui_shader.hpp"
 #include "shaders/spriteui_gsh_bytes.hpp"
 #include "shaders/gx2_normals_shader.hpp"
 
@@ -59,6 +59,15 @@ struct TextureVertex {
 struct MeshVertex {
     float x, y, z, w;
     float nx, ny, nz, nw;
+};
+
+// Returned by LoadMesh. Unlike a texture (whose pixel data CreateTexture
+// copies into its own GX2 surface immediately), DrawMesh re-reads this
+// pointer every frame - see its per-frame ring-buffer copy - so the buffer
+// backing it must outlive the mesh, not just the LoadMesh call.
+struct MeshData {
+    const MeshVertex* vertices = nullptr;
+    size_t vertexCount = 0;
 };
 
 namespace Format {
@@ -583,6 +592,71 @@ inline TextureHandle CreateTexture(
     return reinterpret_cast<TextureHandle>(&wrap);
 }
 
+// Reads a texture packaged by scripts/pack_resources.py/pack_texture_gx2.py
+// (16-byte big-endian header: width, height, format, dataSize, followed by
+// raw RGBA8 pixels) straight off disk and hands it to CreateTexture - the
+// on-disk counterpart to a single NVN::CreateTexture(bytes, size) call,
+// which gets the same info from a header baked into its own byte array
+// instead of a loose file. The read buffer is pure scratch: CreateTexture
+// copies pixel data into its own tiled GX2 surface before returning, so one
+// shared staging buffer is reused across every LoadTexture call rather than
+// keeping the raw file bytes around per texture.
+inline TextureHandle LoadTexture(const char* path, size_t maxFileSize = 1024 * 1024) {
+    static uint8_t* s_stagingBuffer = nullptr;
+    if (!s_stagingBuffer) s_stagingBuffer = reinterpret_cast<uint8_t*>(AllocMEM1(static_cast<uint32_t>(maxFileSize), 256));
+    if (!s_stagingBuffer) {
+        BotW::OSLog("WiiXLaunch: GX2 LoadTexture '%s' failed: staging buffer alloc failed\n", path);
+        return 0;
+    }
+
+    size_t readSize = 0;
+    if (!FS::ReadFile(path, s_stagingBuffer, maxFileSize, &readSize) || readSize < 16) {
+        BotW::OSLog("WiiXLaunch: GX2 LoadTexture '%s' failed: ReadFile\n", path);
+        return 0;
+    }
+
+    uint32_t width, height, dataSize;
+    memcpy(&width, s_stagingBuffer + 0, 4);
+    memcpy(&height, s_stagingBuffer + 4, 4);
+    memcpy(&dataSize, s_stagingBuffer + 12, 4);
+
+    TextureHandle handle = CreateTexture(s_stagingBuffer + 16, dataSize, static_cast<int>(width), static_cast<int>(height));
+    BotW::OSLog("WiiXLaunch: GX2 LoadTexture '%s' -> %ux%u handle=%p\n", path, width, height, reinterpret_cast<void*>(handle));
+    return handle;
+}
+
+// Reads a mesh packaged by scripts/pack_resources.py (16-byte big-endian
+// header: vertexCount, floatStride(=8, unused here), dataSize, 0, followed by
+// MeshVertex-compatible float data) straight off disk. Unlike LoadTexture,
+// DrawMesh re-reads its vertices pointer every frame (see DrawMesh's
+// per-frame ring-buffer copy), so the returned MeshData's buffer has to
+// outlive the mesh - each call gets its own permanent allocation, never
+// reused or freed (matching this project's general one-shot
+// startup-allocation style; nothing here is ever torn down).
+inline MeshData LoadMesh(const char* path, size_t maxFileSize = 64 * 1024) {
+    MeshData result{};
+
+    auto* buffer = reinterpret_cast<uint8_t*>(AllocMEM1(static_cast<uint32_t>(maxFileSize), 256));
+    if (!buffer) {
+        BotW::OSLog("WiiXLaunch: GX2 LoadMesh '%s' failed: alloc failed\n", path);
+        return result;
+    }
+
+    size_t readSize = 0;
+    if (!FS::ReadFile(path, buffer, maxFileSize, &readSize) || readSize < 16) {
+        BotW::OSLog("WiiXLaunch: GX2 LoadMesh '%s' failed: ReadFile\n", path);
+        return result;
+    }
+
+    uint32_t vertexCount;
+    memcpy(&vertexCount, buffer + 0, 4);
+
+    result.vertices = reinterpret_cast<const MeshVertex*>(buffer + 16);
+    result.vertexCount = vertexCount;
+    BotW::OSLog("WiiXLaunch: GX2 LoadMesh '%s' -> %u vertices\n", path, vertexCount);
+    return result;
+}
+
 inline void DrawSprite(
     CommandBuffer* cmdBuf,
     void* dstTexture,
@@ -733,10 +807,17 @@ struct MeshVertex {
     float nx, ny, nz, nw;
 };
 
+struct MeshData {
+    const MeshVertex* vertices = nullptr;
+    size_t vertexCount = 0;
+};
+
 inline void Init() {}
 inline void RegisterDrawCallback(void (*)(void*, void*, int, int)) {}
 inline void OnInitialized(void (*)()) {}
 inline TextureHandle CreateTexture(const void*, size_t, int = 0, int = 0, int = 0) { return 0; }
+inline TextureHandle LoadTexture(const char*, size_t = 0) { return 0; }
+inline MeshData LoadMesh(const char*, size_t = 0) { return MeshData{}; }
 inline void DrawSprite(void*, void*, TextureHandle, float, float, float, float, float = 1, float = 1, float = 1, float = 1) {}
 inline void DrawMesh(void*, void*, const MeshVertex*, size_t) {}
 
