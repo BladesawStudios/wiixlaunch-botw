@@ -62,6 +62,27 @@ enum class Gx2Import : uint32_t {
     SwapScanBuffers,
     SetSwapInterval,
     DrawDone,
+    // --- Added for the minimal-quad draw pipeline (see gx2.hpp) ---
+    SetContextState,
+    Invalidate,
+    SetColorBuffer,
+    SetAttribBuffer,
+    CalcFetchShaderSizeEx,
+    InitFetchShaderEx,
+    SetFetchShader,
+    SetVertexShader,
+    SetPixelShader,
+    SetShaderModeEx,
+    DrawEx,
+    SetDepthOnlyControl,
+    SetCullOnlyControl,
+    CalcSurfaceSizeAndAlignment,
+    InitColorBufferRegs,
+    CopyColorBufferToScanBuffer,
+    SetColorControl,
+    SetTargetChannelMasks,
+    SetBlendControl,
+    Flush,
     Count
 };
 

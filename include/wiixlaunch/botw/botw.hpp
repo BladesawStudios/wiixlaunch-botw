@@ -15,3 +15,4 @@
 #include "camera.hpp"
 #include "nvn.hpp"
 #include "log.hpp"
+#include "gx2.hpp"
