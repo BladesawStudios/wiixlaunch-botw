@@ -264,7 +264,12 @@ static_assert(sizeof(DepthBuffer) == 0xAC);
 // vendor/wut/include/gx2/enum.h, not guessed).
 constexpr uint32_t kShaderProgramAlignment = 0x100;
 constexpr uint32_t kAttribFormatFloat32x4 = 0x813; // FLAG_SCALED(0x800) | TYPE_32_32_32_32_FLOAT(0x13)
-constexpr uint32_t kAttribFormatFloat32x2 = 0x80f; // FLAG_SCALED(0x800) | TYPE_32_32_FLOAT(0x0f)
+// 0x0D, NOT 0x0f - see vendor/wut/include/gx2/enum.h GX2_ATTRIB_TYPE_32_32_FLOAT.
+// This was 0x80f for a long time, which is why every float4 attribute (position,
+// tint, and the whole float4-only mesh pipeline) worked while UVs silently
+// decoded wrong: v stayed pinned at 0, so a textured quad sampled one texture
+// row smeared vertically instead of the image.
+constexpr uint32_t kAttribFormatFloat32x2 = 0x80d; // FLAG_SCALED(0x800) | TYPE_32_32_FLOAT(0x0d)
 constexpr uint32_t kAttribIndexPerVertex = 0;
 constexpr uint32_t kEndianSwapDefault = 3;
 constexpr uint32_t kFetchShaderTessellationNone = 0;
@@ -280,6 +285,13 @@ constexpr uint32_t kCompareFuncAlways = 7;
 constexpr uint32_t kFrontFaceCcw = 0;
 constexpr uint32_t kSurfaceDimTexture2D = 1;
 constexpr uint32_t kSurfaceFormatUnormR8G8B8A8 = 0x01a;
+// 0x400 (SRGB flag) | 0x01a. PNG/UI artwork is authored sRGB-encoded, and
+// BotW's color buffer is an sRGB target, so a texture declared plain UNORM
+// gets sampled as though its bytes were linear and then re-encoded to sRGB on
+// write - a double encode that shows up as a uniformly brighter/washed-out
+// image. Declaring the texture sRGB makes the sampler decode on read so the
+// round trip is neutral.
+constexpr uint32_t kSurfaceFormatSrgbR8G8B8A8 = 0x41a;
 constexpr uint32_t kSurfaceFormatFloatD32 = 0x11;
 constexpr uint32_t kAaMode1x = 0;
 constexpr uint32_t kSurfaceUseTexture = 1;

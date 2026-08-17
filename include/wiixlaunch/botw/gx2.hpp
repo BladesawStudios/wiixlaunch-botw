@@ -9,6 +9,7 @@
 #include "gfd.hpp"
 #include "gx2_shader_types.hpp"
 #include "shaders/gx2_default_ui_shader.hpp"
+#include "shaders/spriteui_gsh_bytes.hpp"
 #include "shaders/gx2_normals_shader.hpp"
 
 #if WIIXL_CEMU
@@ -301,8 +302,8 @@ inline void EnsureDepthBuffer(uint32_t width, uint32_t height) {
 inline void EnsureSpritePipeline() {
     if (g_SpritePipelineReady) return;
 
-    const uint8_t* gshBytes = Shaders::g_DefaultUiGshBytes;
-    size_t gshSize = Shaders::kDefaultUiGshBytesSize;
+    const uint8_t* gshBytes = Shaders::g_SpriteUiGshBytes;
+    size_t gshSize = Shaders::kSpriteUiGshBytesSize;
 
     g_SpriteVertexShader = GFD::GetShader<GX2Types::VertexShader>(
         gshBytes, GFD::kBlockTypeVertexShaderHeader, GFD::kBlockTypeVertexShaderProgram,
@@ -444,8 +445,13 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(AglCopyToScanBufferHook) {
 
                     static uint32_t s_count = 0;
                     if ((s_count++ % 300) == 0) {
-                        BotW::OSLog("WiiXLaunch: Injected frame #%u (dst=%p, %ux%u, cbCount=%u)\n",
-                            s_count, tvColorBuffer, width, height, static_cast<unsigned int>(g_DrawCallbackCount));
+                        // dstFormat 0x41a = SRGB_R8_G8_B8_A8 (sRGB target),
+                        // 0x01a = plain UNORM - decides whether textures we
+                        // sample must be declared sRGB to avoid a double
+                        // gamma encode (see CreateTexture's format default).
+                        BotW::OSLog("WiiXLaunch: Injected frame #%u (dst=%p, %ux%u, dstFormat=0x%x, cbCount=%u)\n",
+                            s_count, tvColorBuffer, width, height, tvColorBuffer->surface.format,
+                            static_cast<unsigned int>(g_DrawCallbackCount));
                     }
 
                     for (size_t i = 0; i < g_DrawCallbackCount; ++i) {
@@ -518,7 +524,12 @@ inline TextureHandle CreateTexture(
     wrap.texture.surface.height = static_cast<uint32_t>(height);
     wrap.texture.surface.depth = 1;
     wrap.texture.surface.mipLevels = 1;
-    wrap.texture.surface.format = GX2Types::kSurfaceFormatUnormR8G8B8A8;
+    // format 0 = "default for artwork" = sRGB RGBA8, since PNG sources are
+    // sRGB-encoded and the destination color buffer is an sRGB target (see
+    // kSurfaceFormatSrgbR8G8B8A8). Pass kSurfaceFormatUnormR8G8B8A8
+    // explicitly for data that really is linear (masks, lookup tables, ...).
+    wrap.texture.surface.format = format ? static_cast<uint32_t>(format)
+                                         : GX2Types::kSurfaceFormatSrgbR8G8B8A8;
     wrap.texture.surface.aa = GX2Types::kAaMode1x;
     wrap.texture.surface.use = GX2Types::kSurfaceUseTexture;
     wrap.texture.surface.tileMode = GX2Types::kTileModeTiled1DThin1;
@@ -542,7 +553,13 @@ inline TextureHandle CreateTexture(
         for (uint32_t x = 0; x < static_cast<uint32_t>(width); ++x) {
             uint32_t tx = x >> 3;
             uint32_t bx = x & 7;
-            uint32_t elem = (bx & 1) | ((by & 1) << 1) | ((bx & 2) << 1) | ((by & 2) << 2) | ((bx & 4) << 2) | ((by & 4) << 3);
+            // GX2 micro-tile pixel index for non-depth (ADDR_DISPLAYABLE) surfaces at bpp=32:
+            // bit order is x0,x1,y0,x2,y1,y2 (NOT the plain x0,y0,x1,y1,x2,y2 Z-order used
+            // for depth/ADDR_NON_DISPLAYABLE surfaces). See AMD/decaf-emu addrlib
+            // ComputePixelIndexWithinMicroTile + R600AddrLib::GetTileType.
+            uint32_t x0 = bx & 1, x1 = (bx >> 1) & 1, x2 = (bx >> 2) & 1;
+            uint32_t y0 = by & 1, y1 = (by >> 1) & 1, y2 = (by >> 2) & 1;
+            uint32_t elem = x0 | (x1 << 1) | (y0 << 2) | (x2 << 3) | (y1 << 4) | (y2 << 5);
             uint32_t dstIdx = (ty * tilesPerRow + tx) * 64 + elem;
             dst32[dstIdx] = src32[y * width + x];
         }
