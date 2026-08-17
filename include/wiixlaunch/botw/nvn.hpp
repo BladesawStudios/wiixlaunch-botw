@@ -388,8 +388,16 @@ inline Program g_MeshProgram{};
 
 inline NVNmemoryPool g_MeshDataPool{};
 inline NVNbuffer g_MeshDataBuffer{};
-// Sized for the Fish mesh (2556 verts x 32B = 0x13f80) plus headroom.
+// One shared arena, sub-allocated per NVN::DrawMesh call via a bump/wrap
+// cursor (g_MeshDataWriteOffset below) rather than always writing at offset
+// 0 - the same "GPU consumes command buffers asynchronously" hazard
+// DrawSprite had (see its ring-buffer comment) applies here too, so drawing
+// more than one mesh a frame needs each draw's vertices to land in their
+// own untouched region. Byte-granular (not fixed slots like sprites use)
+// because mesh vertex counts vary a lot; sized with real headroom above any
+// single known mesh (e.g. the old Fish mesh at 2556 verts x 32B = 0x13f80).
 alignas(4096) inline uint8_t g_MeshDataMemory[0x18000]{};
+inline size_t g_MeshDataWriteOffset = 0;
 inline NVNvertexAttribState g_MeshAttribStates[2]{};
 inline NVNvertexStreamState g_MeshStreamState{};
 inline bool g_MeshPipelineReady = false;
@@ -427,6 +435,10 @@ inline int g_MeshDepthTextureHeight = 0;
 
 inline NVNdepthStencilState g_MeshDepthStencilState{};
 inline bool g_MeshDepthStencilStateReady = false;
+// Reset once per frame (see HookedCommandBufferEndRecording) so multiple
+// NVN::DrawMesh calls in the same frame depth-test against each other
+// instead of each one clearing away the previous mesh's depth data.
+inline bool g_MeshDepthClearedThisFrame = false;
 
 inline FnCommandBufferEndRecording g_OrigCommandBufferEndRecording = nullptr;
 
@@ -887,6 +899,7 @@ inline uint64_t HookedCommandBufferEndRecording(CommandBuffer* cmdBuf) {
                             WIIXL_LOG("WiiXLaunch: Injected frame #%u (dst=%p, %dx%d, cbCount=%u)",
                                 s_DrawCount, dstTexture, width, height, static_cast<unsigned int>(DrawCallbackCount()));
                         }
+                        g_MeshDepthClearedThisFrame = false;
                         for (size_t i = 0; i < DrawCallbackCount(); ++i) {
                             if (DrawCallbacks()[i]) {
                                 DrawCallbacks()[i](cmdBuf, dstTexture, width, height);
@@ -1177,7 +1190,19 @@ inline void DrawMesh(CommandBuffer* cmdBuf, void* dstTexture, const MeshVertex* 
     if (!impl::g_MeshPipelineReady || !vertices || vertexCount == 0) return;
 
     size_t byteSize = vertexCount * sizeof(MeshVertex);
-    if (byteSize > sizeof(impl::g_MeshDataMemory)) return;
+
+    // Same cacheline-safe alignment rationale as DrawSprite's ring buffer,
+    // but byte-granular since mesh sizes vary: round this mesh's region up,
+    // then bump-allocate it out of the shared arena, wrapping back to the
+    // start once a mesh wouldn't fit before the end.
+    constexpr size_t kMeshAlign = 256;
+    size_t alignedSize = (byteSize + kMeshAlign - 1) & ~(kMeshAlign - 1);
+    if (alignedSize > sizeof(impl::g_MeshDataMemory)) return; // this single mesh can't fit the whole arena
+    if (impl::g_MeshDataWriteOffset + alignedSize > sizeof(impl::g_MeshDataMemory)) {
+        impl::g_MeshDataWriteOffset = 0;
+    }
+    size_t byteOffset = impl::g_MeshDataWriteOffset;
+    impl::g_MeshDataWriteOffset += alignedSize;
 
     auto mapBuf                = impl::NvnFn<impl::FnBufferMap>(impl::Offset::kBufferMap);
     auto getBufAddr            = impl::NvnFn<impl::FnBufferGetAddress>(impl::Offset::kBufferGetAddress);
@@ -1208,10 +1233,11 @@ inline void DrawMesh(CommandBuffer* cmdBuf, void* dstTexture, const MeshVertex* 
 
     void* mapped = mapBuf(&impl::g_MeshDataBuffer);
     if (!mapped) return;
-    __builtin_memcpy(mapped, vertices, byteSize);
-    impl::armDCacheFlush(mapped, byteSize);
+    uint8_t* dst = static_cast<uint8_t*>(mapped) + byteOffset;
+    __builtin_memcpy(dst, vertices, byteSize);
+    impl::armDCacheFlush(dst, byteSize);
 
-    uint64_t gpuBase = getBufAddr(&impl::g_MeshDataBuffer);
+    uint64_t gpuBase = getBufAddr(&impl::g_MeshDataBuffer) + byteOffset;
 
     int dispWidth = 1280;
     int dispHeight = 720;
@@ -1239,14 +1265,15 @@ inline void DrawMesh(CommandBuffer* cmdBuf, void* dstTexture, const MeshVertex* 
     const void* colorTargets[1] = { dstTexture };
     if (setRenderTargets) setRenderTargets(cmdBuf, 1, colorTargets, nullptr, depthTexture, nullptr);
 
-    // Clear fresh every frame so the fish only ever depth-tests against its
-    // own geometry - this texture is private to us, so there's no stale
-    // content from anything else to worry about, but the clear itself
-    // (rather than relying on whatever was left from the previous frame)
-    // keeps every frame self-consistent regardless of prior content.
+    // Clear once per frame (see g_MeshDepthClearedThisFrame's comment), not
+    // once per DrawMesh call - this texture is private to us, so there's no
+    // stale content from any OTHER system to worry about, but clearing on
+    // every call would wipe out earlier meshes' depth data within the same
+    // frame, breaking occlusion between multiple models on screen at once.
     bool depthReady = depthTexture && impl::g_MeshDepthStencilStateReady && bindDepthStencil;
-    if (depthReady && clearDepthStencil) {
+    if (depthReady && clearDepthStencil && !impl::g_MeshDepthClearedThisFrame) {
         clearDepthStencil(cmdBuf, 1.0f, 1, 0, 0xff);
+        impl::g_MeshDepthClearedThisFrame = true;
     }
 
     if (setViewport) setViewport(cmdBuf, 0, 0, dispWidth, dispHeight);
