@@ -7,21 +7,47 @@
 
 // WiiXLaunch::BotW::Controller - unified button/stick reads across Switch
 // (nn::hid::GetNpadStates) and Wii U/Cemu (VPAD + KPAD/WPAD Pro/Core),
-// ported from the Freecam mod's input hooks. All bit positions here are
-// confirmed working on both platforms today.
-//
-// v1 button set is deliberately limited to what Freecam actually used
-// (B, X, ZL, DDown) - expanding to the full official nn::hid/VPAD_BUTTON_*
-// set from the vendored SDK headers is a fast, low-risk follow-up, not
-// invented/guessed here.
+// ported from the Freecam mod's input hooks. Original v1 button set (B, X,
+// ZL, DDown) was deliberately limited to what Freecam actually used; the
+// full Switch set below is the real, public nn::hid::NpadButton layout
+// (standard Nintendo SDK enum - the same public source the original subset
+// already cited, not per-game reverse engineering) - every bit position
+// this file already shipped (A=0, B=1, X=2, Y=3, L=6, R=7, ZL=8, ZR=9,
+// Down=15) matches it exactly, and the GetNpadStates hook addresses/struct
+// layout were independently confirmed against the real decompiled
+// nn::hid::GetNpadStates overloads via Ghidra.
 
 namespace WiiXLaunch::BotW {
 
 enum class Button : uint32_t {
+    A,
     B,
     X,
+    Y,
+    StickL,
+    StickR,
+    L,
+    R,
     ZL,
+    ZR,
+    Plus,
+    Minus,
+    DLeft,
+    DUp,
+    DRight,
     DDown,
+    StickLLeft,
+    StickLUp,
+    StickLRight,
+    StickLDown,
+    StickRLeft,
+    StickRUp,
+    StickRRight,
+    StickRDown,
+    LeftSL,
+    LeftSR,
+    RightSL,
+    RightSR,
 };
 
 namespace impl {
@@ -29,17 +55,76 @@ namespace impl {
 // Canonical (VPAD-style) bit values - the shared bitspace every platform's
 // raw input gets translated into before ButtonBit()/IsPressed() reads it.
 #if WIIXL_SWITCH
-    // nn::hid::NpadButton bit positions: A=0, B=1, X=2, Y=3, L=6, R=7, ZL=8, ZR=9, Down=15
-    constexpr uint32_t kBtnB     = 0x0002;
-    constexpr uint32_t kBtnX     = 0x0004;
-    constexpr uint32_t kBtnZL    = 0x0100;
-    constexpr uint32_t kBtnDDown = 0x8000;
+    // nn::hid::NpadButton - full real bit layout (public Nintendo SDK enum).
+    constexpr uint32_t kBtnA           = 0x00000001;
+    constexpr uint32_t kBtnB           = 0x00000002;
+    constexpr uint32_t kBtnX           = 0x00000004;
+    constexpr uint32_t kBtnY           = 0x00000008;
+    constexpr uint32_t kBtnStickL      = 0x00000010;
+    constexpr uint32_t kBtnStickR      = 0x00000020;
+    constexpr uint32_t kBtnL           = 0x00000040;
+    constexpr uint32_t kBtnR           = 0x00000080;
+    constexpr uint32_t kBtnZL          = 0x00000100;
+    constexpr uint32_t kBtnZR          = 0x00000200;
+    constexpr uint32_t kBtnPlus        = 0x00000400;
+    constexpr uint32_t kBtnMinus       = 0x00000800;
+    constexpr uint32_t kBtnDLeft       = 0x00001000;
+    constexpr uint32_t kBtnDUp         = 0x00002000;
+    constexpr uint32_t kBtnDRight      = 0x00004000;
+    constexpr uint32_t kBtnDDown       = 0x00008000;
+    // Left/right stick tilted fully in a cardinal direction, treated as a
+    // digital press (matches nn::hid's own semantics for these bits).
+    constexpr uint32_t kBtnStickLLeft  = 0x00010000;
+    constexpr uint32_t kBtnStickLUp    = 0x00020000;
+    constexpr uint32_t kBtnStickLRight = 0x00040000;
+    constexpr uint32_t kBtnStickLDown  = 0x00080000;
+    constexpr uint32_t kBtnStickRLeft  = 0x00100000;
+    constexpr uint32_t kBtnStickRUp    = 0x00200000;
+    constexpr uint32_t kBtnStickRRight = 0x00400000;
+    constexpr uint32_t kBtnStickRDown  = 0x00800000;
+    // Side buttons on a single detached Joy-Con (SL/SR) - only meaningful
+    // when connected as NpadJoyLeftState/NpadJoyRightState, which this
+    // project doesn't currently hook (see GetNpadStates note above); reads
+    // as never-pressed via the Handheld/JoyDual/FullKey styles this file
+    // does hook, not a wrong bit.
+    constexpr uint32_t kBtnLeftSL      = 0x01000000;
+    constexpr uint32_t kBtnLeftSR      = 0x02000000;
+    constexpr uint32_t kBtnRightSL     = 0x04000000;
+    constexpr uint32_t kBtnRightSR     = 0x08000000;
 #else
     // Wii U VPAD buttons (also the canonical/target bitspace on this platform)
     constexpr uint32_t kBtnB     = 0x4000;
     constexpr uint32_t kBtnX     = 0x2000;
     constexpr uint32_t kBtnZL    = 0x0080;
     constexpr uint32_t kBtnDDown = 0x0100;
+    // Not wired up for Wii U/Cemu - this session's expansion only covered
+    // Switch (see nn::hid::GetNpadStates note above). 0 = never matches, so
+    // these just read as never-pressed on this platform rather than
+    // guessing at real bindings.
+    constexpr uint32_t kBtnA           = 0x0000;
+    constexpr uint32_t kBtnY           = 0x0000;
+    constexpr uint32_t kBtnStickL      = 0x0000;
+    constexpr uint32_t kBtnStickR      = 0x0000;
+    constexpr uint32_t kBtnL           = 0x0000;
+    constexpr uint32_t kBtnR           = 0x0000;
+    constexpr uint32_t kBtnZR          = 0x0000;
+    constexpr uint32_t kBtnPlus        = 0x0000;
+    constexpr uint32_t kBtnMinus       = 0x0000;
+    constexpr uint32_t kBtnDLeft       = 0x0000;
+    constexpr uint32_t kBtnDUp         = 0x0000;
+    constexpr uint32_t kBtnDRight      = 0x0000;
+    constexpr uint32_t kBtnStickLLeft  = 0x0000;
+    constexpr uint32_t kBtnStickLUp    = 0x0000;
+    constexpr uint32_t kBtnStickLRight = 0x0000;
+    constexpr uint32_t kBtnStickLDown  = 0x0000;
+    constexpr uint32_t kBtnStickRLeft  = 0x0000;
+    constexpr uint32_t kBtnStickRUp    = 0x0000;
+    constexpr uint32_t kBtnStickRRight = 0x0000;
+    constexpr uint32_t kBtnStickRDown  = 0x0000;
+    constexpr uint32_t kBtnLeftSL      = 0x0000;
+    constexpr uint32_t kBtnLeftSR      = 0x0000;
+    constexpr uint32_t kBtnRightSL     = 0x0000;
+    constexpr uint32_t kBtnRightSR     = 0x0000;
 
     // WPAD Pro Controller buttons (KPADStatus::pro.hold bitspace - different from VPAD!)
     constexpr uint32_t kWpadProB     = 0x0040;
@@ -55,10 +140,34 @@ namespace impl {
 
 inline uint32_t ButtonBit(Button b) {
     switch (b) {
-        case Button::B:     return kBtnB;
-        case Button::X:     return kBtnX;
-        case Button::ZL:    return kBtnZL;
-        case Button::DDown: return kBtnDDown;
+        case Button::A:           return kBtnA;
+        case Button::B:           return kBtnB;
+        case Button::X:           return kBtnX;
+        case Button::Y:           return kBtnY;
+        case Button::StickL:      return kBtnStickL;
+        case Button::StickR:      return kBtnStickR;
+        case Button::L:           return kBtnL;
+        case Button::R:           return kBtnR;
+        case Button::ZL:          return kBtnZL;
+        case Button::ZR:          return kBtnZR;
+        case Button::Plus:        return kBtnPlus;
+        case Button::Minus:       return kBtnMinus;
+        case Button::DLeft:       return kBtnDLeft;
+        case Button::DUp:         return kBtnDUp;
+        case Button::DRight:      return kBtnDRight;
+        case Button::DDown:       return kBtnDDown;
+        case Button::StickLLeft:  return kBtnStickLLeft;
+        case Button::StickLUp:    return kBtnStickLUp;
+        case Button::StickLRight: return kBtnStickLRight;
+        case Button::StickLDown:  return kBtnStickLDown;
+        case Button::StickRLeft:  return kBtnStickRLeft;
+        case Button::StickRUp:    return kBtnStickRUp;
+        case Button::StickRRight: return kBtnStickRRight;
+        case Button::StickRDown:  return kBtnStickRDown;
+        case Button::LeftSL:      return kBtnLeftSL;
+        case Button::LeftSR:      return kBtnLeftSR;
+        case Button::RightSL:     return kBtnRightSL;
+        case Button::RightSR:     return kBtnRightSR;
     }
     return 0;
 }
