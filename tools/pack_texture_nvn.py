@@ -149,47 +149,6 @@ def swizzle_block_linear(pixels: bytes, width: int, height: int, bpp: int) -> by
     return bytes(out)
 
 
-def bleed_transparent_edges(im: Image.Image, iterations: int = 3, alpha_threshold: int = 8) -> Image.Image:
-    """Extends the RGB of visible (non-transparent) pixels a few texels into
-    the surrounding transparent border, without touching alpha.
-
-    Bilinear filtering interpolates RGB and alpha together across texel
-    boundaries. If a transparent pixel's own RGB is black/garbage (common
-    for naively-exported PNGs, which don't preserve "real" color data under
-    alpha=0), sampling near an edge blends toward that garbage color even
-    though the alpha blend math itself (see EnsureDefaultUiSpritePipeline's
-    real SRC_ALPHA/ONE_MINUS_SRC_ALPHA blend state) is correct - producing a
-    visible dark halo around non-rectangular shapes (e.g. a circular icon)
-    independent of any shader/blend-state fix. Spreading real edge color
-    outward a few pixels removes what filtering can actually sample there.
-    """
-    w, h = im.size
-    px = im.load()
-    for _ in range(iterations):
-        src = [[px[x, y] for x in range(w)] for y in range(h)]
-        for y in range(h):
-            for x in range(w):
-                r, g, b, a = src[y][x]
-                if a >= alpha_threshold:
-                    continue
-                acc_r = acc_g = acc_b = count = 0
-                for dy in (-1, 0, 1):
-                    for dx in (-1, 0, 1):
-                        if dx == 0 and dy == 0:
-                            continue
-                        nx, ny = x + dx, y + dy
-                        if 0 <= nx < w and 0 <= ny < h:
-                            nr, ng, nb, na = src[ny][nx]
-                            if na >= alpha_threshold:
-                                acc_r += nr
-                                acc_g += ng
-                                acc_b += nb
-                                count += 1
-                if count:
-                    px[x, y] = (acc_r // count, acc_g // count, acc_b // count, a)
-    return im
-
-
 def pack_image(im: Image.Image, output_name: str, out_dir: pathlib.Path, max_dim: int) -> None:
     im = im.convert("RGBA")  # 4-channel full color RGBA8
     w, h = im.size
@@ -201,7 +160,6 @@ def pack_image(im: Image.Image, output_name: str, out_dir: pathlib.Path, max_dim
     new_w = (new_w + 7) // 8 * 8
     new_h = (new_h + 7) // 8 * 8
     im = im.resize((new_w, new_h), Image.LANCZOS)
-    im = bleed_transparent_edges(im)
 
     pixels = im.tobytes("raw", "RGBA")
     swizzled = swizzle_block_linear(pixels, new_w, new_h, 4)
