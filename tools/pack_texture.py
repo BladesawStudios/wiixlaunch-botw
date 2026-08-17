@@ -68,10 +68,34 @@ GOB_SIZE = GOB_WIDTH * GOB_HEIGHT  # 512
 
 PACKAGED_HEADER_SIZE = 0x200
 
-_HEADER_TEMPLATE = b'DFvN\x10\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00HBvN$\x00\x00\x00p\x00\x00\x00\x00\x00\x00\x00$\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00@\x00\x00\x00\x00\x00\x00\x00\x02\x00\x00\x80\x00\x00\x00\x80\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x01\x00\x00\x00\x00@\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00HBvN$\x00\x00\x00\x00@\x00\x00\x00\x00\x00\x00\\\x01\x00\x00\x00\x00\x00\x00\x03\x00\x00\x00\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00'
+_FONT_TEXTURE_HPP = pathlib.Path(__file__).parent.parent / "include" / "nvn_font_texture_bytes.hpp"
+
+# Offsets within the real container header (DFvN/HBvN)
+_OFF_DATA_SIZE_A = 0x34
+_OFF_WIDTH       = 0x40
+_OFF_HEIGHT      = 0x44
+_OFF_FORMAT      = 0x50
+_OFF_DATA_SIZE_B = 0x58
+_OFF_DATA_SIZE_C = 0xE4
+
+NVN_FORMAT_RGBA8 = 0x25
+NVN_FORMAT_R8    = 0x01
+
 
 def _load_header_template() -> bytearray:
-    return bytearray(_HEADER_TEMPLATE)
+    """Pulls the first PACKAGED_HEADER_SIZE bytes out of the real, shipped
+    nvn_font.ntx asset already checked into this repo, rather than
+    hand-transcribing hex - see module docstring."""
+    text = _FONT_TEXTURE_HPP.read_text(encoding="utf-8")
+    hex_bytes = re.findall(r"0x([0-9a-fA-F]{2})", text)
+    if len(hex_bytes) < PACKAGED_HEADER_SIZE:
+        raise RuntimeError(
+            f"{_FONT_TEXTURE_HPP} has only {len(hex_bytes)} byte literals, "
+            f"need at least {PACKAGED_HEADER_SIZE} for the header template")
+    data = bytes(int(b, 16) for b in hex_bytes[:PACKAGED_HEADER_SIZE])
+    return bytearray(data)
+
+
 def _block_height_gobs(height_px: int) -> int:
     """Standard NVN block-height selection: min(16, next_pow2(ceil(height/8)))."""
     gobs_in_y = (height_px + GOB_HEIGHT - 1) // GOB_HEIGHT
@@ -125,6 +149,47 @@ def swizzle_block_linear(pixels: bytes, width: int, height: int, bpp: int) -> by
     return bytes(out)
 
 
+def bleed_transparent_edges(im: Image.Image, iterations: int = 3, alpha_threshold: int = 8) -> Image.Image:
+    """Extends the RGB of visible (non-transparent) pixels a few texels into
+    the surrounding transparent border, without touching alpha.
+
+    Bilinear filtering interpolates RGB and alpha together across texel
+    boundaries. If a transparent pixel's own RGB is black/garbage (common
+    for naively-exported PNGs, which don't preserve "real" color data under
+    alpha=0), sampling near an edge blends toward that garbage color even
+    though the alpha blend math itself (see EnsureDefaultUiSpritePipeline's
+    real SRC_ALPHA/ONE_MINUS_SRC_ALPHA blend state) is correct - producing a
+    visible dark halo around non-rectangular shapes (e.g. a circular icon)
+    independent of any shader/blend-state fix. Spreading real edge color
+    outward a few pixels removes what filtering can actually sample there.
+    """
+    w, h = im.size
+    px = im.load()
+    for _ in range(iterations):
+        src = [[px[x, y] for x in range(w)] for y in range(h)]
+        for y in range(h):
+            for x in range(w):
+                r, g, b, a = src[y][x]
+                if a >= alpha_threshold:
+                    continue
+                acc_r = acc_g = acc_b = count = 0
+                for dy in (-1, 0, 1):
+                    for dx in (-1, 0, 1):
+                        if dx == 0 and dy == 0:
+                            continue
+                        nx, ny = x + dx, y + dy
+                        if 0 <= nx < w and 0 <= ny < h:
+                            nr, ng, nb, na = src[ny][nx]
+                            if na >= alpha_threshold:
+                                acc_r += nr
+                                acc_g += ng
+                                acc_b += nb
+                                count += 1
+                if count:
+                    px[x, y] = (acc_r // count, acc_g // count, acc_b // count, a)
+    return im
+
+
 def pack_image(im: Image.Image, output_name: str, out_dir: pathlib.Path, max_dim: int) -> None:
     im = im.convert("RGBA")  # 4-channel full color RGBA8
     w, h = im.size
@@ -136,6 +201,7 @@ def pack_image(im: Image.Image, output_name: str, out_dir: pathlib.Path, max_dim
     new_w = (new_w + 7) // 8 * 8
     new_h = (new_h + 7) // 8 * 8
     im = im.resize((new_w, new_h), Image.LANCZOS)
+    im = bleed_transparent_edges(im)
 
     pixels = im.tobytes("raw", "RGBA")
     swizzled = swizzle_block_linear(pixels, new_w, new_h, 4)

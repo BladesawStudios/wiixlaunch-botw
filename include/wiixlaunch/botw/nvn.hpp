@@ -585,6 +585,8 @@ inline void EnsureDefaultUiSpritePipeline() {
     auto polySetCull     = NvnFn<FnPolygonStateSetCullFace>(Offset::kPolygonStateSetCullFace);
 
     auto blendSetDefaults = NvnFn<FnBlendStateSetDefaults>(Offset::kBlendStateSetDefaults);
+    auto blendSetTarget   = NvnFn<FnBlendStateSetBlendTarget>(Offset::kBlendStateSetBlendTarget);
+    auto blendSetFunc     = NvnFn<FnBlendStateSetBlendFunc>(Offset::kBlendStateSetBlendFunc);
 
     auto colSetDefaults   = NvnFn<FnColorStateSetDefaults>(Offset::kColorStateSetDefaults);
     auto colSetBlend      = NvnFn<FnColorStateSetBlendEnable>(Offset::kColorStateSetBlendEnable);
@@ -633,11 +635,29 @@ inline void EnsureDefaultUiSpritePipeline() {
     if (polySetDefaults) polySetDefaults(&g_OverlayPolygonState);
     if (polySetCull) polySetCull(&g_OverlayPolygonState, 0);
 
-    // Disable blend completely so we guarantee we can see our texture with no alpha issues.
-    // NVN ui blending is more complex and might depend on frame buffer state.
+    // Real alpha blending (standard "over" compositing: SRC_ALPHA /
+    // ONE_MINUS_SRC_ALPHA). This was previously left disabled - the comment
+    // here used to say binding any custom blend/color/depth/polygon state
+    // produced corrupted (yellow/black) output, but that was actually the
+    // BindDepthStencilState-and-friends GOT-offset bug elsewhere in this
+    // file (since fixed) miscalling the wrong driver functions, not a real
+    // problem with blending itself. With that fixed, a hard alpha-discard
+    // cutout (see shaders/texture.frag) is no longer the only way to render
+    // transparency - real blending gives smooth edges instead of a jagged
+    // cutout, which matters for anything non-rectangular (e.g. a circular
+    // icon loses visible area right at its roundest points under a
+    // discard-only cutout).
+    constexpr int kBlendFuncSrcAlpha = 0x5;         // NVN_BLEND_FUNC_SRC_ALPHA
+    constexpr int kBlendFuncOneMinusSrcAlpha = 0x6; // NVN_BLEND_FUNC_ONE_MINUS_SRC_ALPHA
+    constexpr int kBlendFuncOne = 0x2;              // NVN_BLEND_FUNC_ONE
     if (blendSetDefaults) blendSetDefaults(&g_OverlayBlendState);
+    if (blendSetTarget) blendSetTarget(&g_OverlayBlendState, 0);
+    if (blendSetFunc) {
+        blendSetFunc(&g_OverlayBlendState, kBlendFuncSrcAlpha, kBlendFuncOneMinusSrcAlpha,
+            kBlendFuncOne, kBlendFuncOneMinusSrcAlpha);
+    }
     if (colSetDefaults) colSetDefaults(&g_OverlayColorState);
-    if (colSetBlend) colSetBlend(&g_OverlayColorState, 0, 0);
+    if (colSetBlend) colSetBlend(&g_OverlayColorState, 0, 1);
 
     if (chanSetDefaults) chanSetDefaults(&g_OverlayChannelMaskState);
     if (chanSetMask) chanSetMask(&g_OverlayChannelMaskState, 0, 1, 1, 1, 1);
@@ -1053,6 +1073,8 @@ inline void DrawSprite(
     auto setSamplerPool        = impl::NvnFn<impl::FnCommandBufferSetSamplerPool>(impl::Offset::kCommandBufferSetSamplerPool);
     auto bindTexture           = impl::ResolveFn<impl::FnCommandBufferBindTexture>("nvnCommandBufferBindTexture");
     auto drawArrays            = impl::NvnFn<impl::FnCommandBufferDrawArrays>(impl::Offset::kCommandBufferDrawArrays);
+    auto bindBlend             = impl::NvnFn<impl::FnCommandBufferBindBlendState>(impl::Offset::kCommandBufferBindBlendState);
+    auto bindColor             = impl::NvnFn<impl::FnCommandBufferBindColorState>(impl::Offset::kCommandBufferBindColorState);
 
     if (!mapBuf || !getBufAddr || !bindProgram || !bindVertexAttribState ||
         !bindVertexStreamState || !bindVertexBuffer || !setTexturePool || !setSamplerPool ||
@@ -1105,11 +1127,14 @@ inline void DrawSprite(
     setTexturePool(cmdBuf, &impl::g_TexturePool);
     setSamplerPool(cmdBuf, &impl::g_SamplerPool);
 
-    // Deliberately no depth-stencil/polygon/color/blend/channel-mask binds here.
-    // Binding our own guessed-at state objects previously produced yellow, then
-    // solid-black, then invisible output - inheriting the game's last-bound
-    // state (same approach as the proven working DrawTextureQuadDirect) is what
-    // actually renders correctly.
+    // Still no depth-stencil/polygon/channel-mask binds (inherit the game's
+    // last-bound state there, same as before) - but blend/color ARE now
+    // bound explicitly, since real alpha compositing needs a real blend
+    // state and can't just inherit whatever the game happened to leave
+    // active. See EnsureDefaultUiSpritePipeline for what these are set to.
+    if (bindBlend) bindBlend(cmdBuf, &impl::g_OverlayBlendState);
+    if (bindColor) bindColor(cmdBuf, &impl::g_OverlayColorState);
+
     bindProgram(cmdBuf, &impl::g_DefaultUiProgram, StageMask::VertexFragment);
     bindVertexAttribState(cmdBuf, 3, impl::g_SpriteAttribStates);
     bindVertexStreamState(cmdBuf, 1, &impl::g_SpriteStreamState);
