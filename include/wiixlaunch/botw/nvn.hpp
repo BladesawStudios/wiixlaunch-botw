@@ -362,9 +362,16 @@ inline bool g_DefaultUiProgramReady = false;
 
 inline NVNmemoryPool g_SpriteDataPool{};
 inline NVNbuffer g_SpriteDataBuffer{};
-alignas(4096) inline uint8_t g_SpriteDataMemory[0x4000]{};
+// Sized as a ring of fixed-size slots (see kSpriteSlotSize/kSpriteSlotCount
+// below), not one single sprite's worth - DrawSprite can be called many
+// times per frame (e.g. Pong's paddles/ball/score pips), and command
+// buffers are consumed by the GPU asynchronously, so writing every draw's
+// vertices to the SAME offset would let the CPU race ahead and overwrite
+// an earlier sprite's data before the GPU actually reads it.
+alignas(4096) inline uint8_t g_SpriteDataMemory[0x10000]{};
 inline NVNvertexAttribState g_SpriteAttribStates[3]{};
 inline NVNvertexStreamState g_SpriteStreamState{};
+inline size_t g_SpriteDataNextSlot = 0;
 
 inline NVNdepthStencilState g_OverlayDepthStencilState{};
 inline NVNpolygonState      g_OverlayPolygonState{};
@@ -1098,10 +1105,21 @@ inline void DrawSprite(
         {x1, y0, 0.0f, 1.0f,   1.0f, 1.0f,   r, g, b, a},
         {x1, y1, 0.0f, 1.0f,   1.0f, 0.0f,   r, g, b, a},
     };
-    __builtin_memcpy(mapped, verts, sizeof(verts));
-    impl::armDCacheFlush(mapped, sizeof(verts));
 
-    uint64_t gpuBase = getBufAddr(&impl::g_SpriteDataBuffer);
+    // Round each slot up to a cacheline-friendly, comfortably-aligned size
+    // so consecutive sprites' writes/DMA reads never share a line.
+    constexpr size_t kSpriteSlotSize = 256;
+    static_assert(sizeof(verts) <= kSpriteSlotSize, "TextureVertex quad no longer fits a sprite ring slot");
+    constexpr size_t kSpriteSlotCount = sizeof(impl::g_SpriteDataMemory) / kSpriteSlotSize;
+    size_t slot = impl::g_SpriteDataNextSlot % kSpriteSlotCount;
+    impl::g_SpriteDataNextSlot = slot + 1;
+    size_t byteOffset = slot * kSpriteSlotSize;
+
+    uint8_t* dst = static_cast<uint8_t*>(mapped) + byteOffset;
+    __builtin_memcpy(dst, verts, sizeof(verts));
+    impl::armDCacheFlush(dst, sizeof(verts));
+
+    uint64_t gpuBase = getBufAddr(&impl::g_SpriteDataBuffer) + byteOffset;
 
     const void* colorTargets[1] = { dstTexture };
     if (setRenderTargets) setRenderTargets(cmdBuf, 1, colorTargets, nullptr, nullptr, nullptr);
