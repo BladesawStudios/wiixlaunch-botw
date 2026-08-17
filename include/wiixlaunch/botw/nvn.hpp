@@ -739,11 +739,7 @@ inline void EnsureMeshPipeline() {
     bufBuilderSetStorage(&dataBufferBuilder, &g_MeshDataPool, 0, sizeof(g_MeshDataMemory));
     bufferInitialize(&g_MeshDataBuffer, &dataBufferBuilder);
 
-    // Layout: position (vec4, loc 0) + normal (vec4, loc 1), stride 32 bytes.
-    // Both attributes reuse Format::Float4 (0x2e) deliberately - it's the one
-    // vertex format value this project has independently confirmed against
-    // real game code (see docs/switch-nvn-findings.md); a 3-component format
-    // for the normal would be unverified guesswork.
+    // Layout: position (vec4, loc 0) + normal (vec4, loc 1), 32-byte stride.
     vaDefaults(&g_MeshAttribStates[0]);
     vaFormat(&g_MeshAttribStates[0], Format::Float4, 0);
     vaStream(&g_MeshAttribStates[0], 0);
@@ -755,17 +751,11 @@ inline void EnsureMeshPipeline() {
     vsDefaults(&g_MeshStreamState);
     vsStride(&g_MeshStreamState, 32);
 
-    // Real depth testing (see NVN::DrawMesh, which binds BotW's own live
-    // depth buffer): test+write enabled, LESS - standard "smaller stored
-    // value wins" convention, matching NVN::DrawMesh remapping nearer
-    // geometry to a smaller depth value.
+    // Depth testing: enabled, LESS, standard depth-ordering.
     auto dsSetDefaults2 = NvnFn<FnDepthStencilStateSetDefaults>(Offset::kDepthStencilStateSetDefaults);
     auto dsSetTest2      = NvnFn<FnDepthStencilStateSetDepthTestEnable>(Offset::kDepthStencilStateSetDepthTestEnable);
     auto dsSetWrite2      = NvnFn<FnDepthStencilStateSetDepthWriteEnable>(Offset::kDepthStencilStateSetDepthWriteEnable);
     auto dsSetFunc        = ResolveFn<FnDepthStencilStateSetDepthFunc>("nvnDepthStencilStateSetDepthFunc");
-    WIIXL_LOG("WiiXLaunch: NVN mesh depth-stencil resolve: defaults=%p test=%p write=%p func=%p",
-        reinterpret_cast<void*>(dsSetDefaults2), reinterpret_cast<void*>(dsSetTest2),
-        reinterpret_cast<void*>(dsSetWrite2), reinterpret_cast<void*>(dsSetFunc));
     if (dsSetDefaults2 && dsSetTest2 && dsSetWrite2 && dsSetFunc) {
         constexpr int kDepthFuncLess = 0x2; // NVN_DEPTH_FUNC_LESS, confirmed against the real nvn.h
         dsSetDefaults2(&g_MeshDepthStencilState);
@@ -774,7 +764,6 @@ inline void EnsureMeshPipeline() {
         dsSetFunc(&g_MeshDepthStencilState, kDepthFuncLess);
         g_MeshDepthStencilStateReady = true;
     }
-    WIIXL_LOG("WiiXLaunch: NVN mesh depth-stencil state ready=%d", static_cast<int>(g_MeshDepthStencilStateReady));
 
     g_MeshPipelineReady = true;
     WIIXL_LOG("WiiXLaunch: NVN EnsureMeshPipeline OK");
@@ -812,10 +801,7 @@ inline void EnsureMeshDepthTexture(Device* device, int width, int height) {
         return;
     }
 
-    // Real order confirmed via sead::FrameBufferNvn::create's disassembly:
-    // SetDevice before SetDefaults (the reverse of every other builder in
-    // this file - deliberately replicated exactly rather than "corrected",
-    // since this is a direct copy of proven-working real code).
+    // SetDevice before SetDefaults (required order from sead::FrameBufferNvn::create).
     NVNtextureBuilder texBuilder{};
     texBuilderSetDevice(&texBuilder, device);
     texBuilderSetDefaults(&texBuilder);
@@ -840,7 +826,7 @@ inline void EnsureMeshDepthTexture(Device* device, int width, int height) {
     NVNmemoryPoolBuilder poolBuilder{};
     poolBuilderSetDefaults(&poolBuilder);
     poolBuilderSetDevice(&poolBuilder, device);
-    constexpr int kPoolFlags = 0xa1; // CPU_NO_ACCESS | GPU_CACHED | COMPRESSIBLE - real flags from FrameBufferNvn::create
+    constexpr int kPoolFlags = 0xa1; // CPU_NO_ACCESS | GPU_CACHED | COMPRESSIBLE
     poolBuilderSetFlags(&poolBuilder, kPoolFlags);
     poolBuilderSetStorage(&poolBuilder, g_MeshDepthPoolMemory, sizeof(g_MeshDepthPoolMemory));
     int poolResult = poolInitialize(&g_MeshDepthPool, &poolBuilder);
@@ -1119,8 +1105,7 @@ inline void DrawSprite(
         {x1, y1, 0.0f, 1.0f,   1.0f, 0.0f,   r, g, b, a},
     };
 
-    // Round each slot up to a cacheline-friendly, comfortably-aligned size
-    // so consecutive sprites' writes/DMA reads never share a line.
+    // 256-byte slots for cacheline-friendly alignment.
     constexpr size_t kSpriteSlotSize = 256;
     static_assert(sizeof(verts) <= kSpriteSlotSize, "TextureVertex quad no longer fits a sprite ring slot");
     constexpr size_t kSpriteSlotCount = sizeof(impl::g_SpriteDataMemory) / kSpriteSlotSize;
@@ -1158,11 +1143,7 @@ inline void DrawSprite(
     setTexturePool(cmdBuf, &impl::g_TexturePool);
     setSamplerPool(cmdBuf, &impl::g_SamplerPool);
 
-    // Still no depth-stencil/polygon/channel-mask binds (inherit the game's
-    // last-bound state there, same as before) - but blend/color ARE now
-    // bound explicitly, since real alpha compositing needs a real blend
-    // state and can't just inherit whatever the game happened to leave
-    // active. See EnsureDefaultUiSpritePipeline for what these are set to.
+    // Bind blend/color states; inherit depth/polygon/channel-mask from game.
     if (bindBlend) bindBlend(cmdBuf, &impl::g_OverlayBlendState);
     if (bindColor) bindColor(cmdBuf, &impl::g_OverlayColorState);
 
@@ -1179,22 +1160,14 @@ struct MeshVertex {
     float nx, ny, nz, nw;
 };
 
-// Draws an arbitrary, caller-supplied triangle list (non-indexed) through the
-// debug-normals shader - no texture, no lighting, color comes purely from
-// each vertex's normal (see shaders/normals.frag). Intended for a
-// caller that recomputes `vertices` CPU-side every frame (e.g. to rotate a
-// static model-space mesh) and hands the already-transformed result in here;
-// this function only uploads and draws it.
+// Draw triangle list via normals shader (color from vertex normals).
 inline void DrawMesh(CommandBuffer* cmdBuf, void* dstTexture, const MeshVertex* vertices, size_t vertexCount) {
     impl::EnsureMeshPipeline();
     if (!impl::g_MeshPipelineReady || !vertices || vertexCount == 0) return;
 
     size_t byteSize = vertexCount * sizeof(MeshVertex);
 
-    // Same cacheline-safe alignment rationale as DrawSprite's ring buffer,
-    // but byte-granular since mesh sizes vary: round this mesh's region up,
-    // then bump-allocate it out of the shared arena, wrapping back to the
-    // start once a mesh wouldn't fit before the end.
+    // Byte-granular bump allocation (unlike sprite's fixed slots).
     constexpr size_t kMeshAlign = 256;
     size_t alignedSize = (byteSize + kMeshAlign - 1) & ~(kMeshAlign - 1);
     if (alignedSize > sizeof(impl::g_MeshDataMemory)) return; // this single mesh can't fit the whole arena
@@ -1217,14 +1190,6 @@ inline void DrawMesh(CommandBuffer* cmdBuf, void* dstTexture, const MeshVertex* 
     auto bindDepthStencil       = impl::NvnFn<impl::FnCommandBufferBindDepthStencilState>(impl::Offset::kCommandBufferBindDepthStencilState);
     auto clearDepthStencil      = impl::ResolveFn<impl::FnCommandBufferClearDepthStencil>("nvnCommandBufferClearDepthStencil");
 
-    {
-        static bool s_LoggedResolve = false;
-        if (!s_LoggedResolve) {
-            s_LoggedResolve = true;
-            WIIXL_LOG("WiiXLaunch: NVN mesh draw resolve: bindDepthStencil=%p clearDepthStencil=%p",
-                reinterpret_cast<void*>(bindDepthStencil), reinterpret_cast<void*>(clearDepthStencil));
-        }
-    }
 
     if (!mapBuf || !getBufAddr || !bindProgram || !bindVertexAttribState ||
         !bindVertexStreamState || !bindVertexBuffer || !drawArrays) {
@@ -1254,22 +1219,14 @@ inline void DrawMesh(CommandBuffer* cmdBuf, void* dstTexture, const MeshVertex* 
         }
     }
 
-    // Our own private depth-stencil texture - see g_MeshDepthPool's comment
-    // for why (every live BotW depth buffer we could reach was either dead
-    // code or genuinely never GPU-built) and the real recipe this replicates
-    // (sead::FrameBufferNvn::create). Built once, at whatever resolution is
-    // active the first time a mesh is drawn.
+    // Private depth texture built once at first mesh draw.
     impl::EnsureMeshDepthTexture(impl::GetDevice(), dispWidth, dispHeight);
     void* depthTexture = impl::g_MeshDepthTextureReady ? &impl::g_MeshDepthTexture : nullptr;
 
     const void* colorTargets[1] = { dstTexture };
     if (setRenderTargets) setRenderTargets(cmdBuf, 1, colorTargets, nullptr, depthTexture, nullptr);
 
-    // Clear once per frame (see g_MeshDepthClearedThisFrame's comment), not
-    // once per DrawMesh call - this texture is private to us, so there's no
-    // stale content from any OTHER system to worry about, but clearing on
-    // every call would wipe out earlier meshes' depth data within the same
-    // frame, breaking occlusion between multiple models on screen at once.
+    // Clear once per frame so multiple meshes occlude each other correctly.
     bool depthReady = depthTexture && impl::g_MeshDepthStencilStateReady && bindDepthStencil;
     if (depthReady && clearDepthStencil && !impl::g_MeshDepthClearedThisFrame) {
         clearDepthStencil(cmdBuf, 1.0f, 1, 0, 0xff);
@@ -1279,10 +1236,7 @@ inline void DrawMesh(CommandBuffer* cmdBuf, void* dstTexture, const MeshVertex* 
     if (setViewport) setViewport(cmdBuf, 0, 0, dispWidth, dispHeight);
     if (setScissor)  setScissor(cmdBuf, 0, 0, dispWidth, dispHeight);
 
-    // Same "inherit the game's last-bound state" approach as DrawSprite above
-    // for everything EXCEPT depth (when a live depth buffer was found) -
-    // real depth testing replaces the caller's need to pre-sort or cull
-    // triangles at all; whichever surface is actually nearest wins per pixel.
+    // Bind depth state only; inherit game's blend/polygon/channel-mask state.
     if (depthReady) {
         bindDepthStencil(cmdBuf, &impl::g_MeshDepthStencilState);
     }

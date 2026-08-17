@@ -8,13 +8,7 @@
 #include <wiixlaunch/hook.hpp>
 #include <wiixlaunch/call.hpp>
 
-// Deliberately does not include debug_log.hpp / use WIIXL_LOG: the two
-// example mods have diverged, incompatible WIIXL_LOG signatures (Actor
-// Spawning's is Template Repo's printf-style DebugPrint; Freecam forked its
-// own tag+frame+floats LogWrite for Cemu ring-buffer diagnostics). A shared
-// module meant to drop into either repo unmodified can't assume either
-// shape - if you need to trace Spawn()/GetName(), log from your own mod
-// code, which already knows which WIIXL_LOG it has.
+// No WIIXL_LOG used; consuming project knows its logging signature.
 
 // WiiXLaunch::BotW::Actor - a thin wrapper around a raw ksys::act::Actor*,
 // plus the actor-name and actor-spawn RE work ported from the "Actor
@@ -146,10 +140,7 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(RequestCreateBaseProcFixHook) {
         auto createBaseProc = WiiXLaunch::GetTargetFunction<CreateBaseProcFn>(0x0, 0x03948ed8);
         createBaseProc(initializer, request);
 
-        // Pool-slot ownership fix: constructing the actor by bypassing the
-        // normal queue skips whatever step would normally set slot+4, so the
-        // slot silently never gets returned to the pool on release. Setting
-        // it here so the next release actually frees the slot.
+        // Set slot+4 for pool return on release.
         void* slot = *reinterpret_cast<void**>(SpawnedHandle());
         if (slot) {
             *reinterpret_cast<void**>(static_cast<uint8_t*>(slot) + 4) = SpawnedHandle();

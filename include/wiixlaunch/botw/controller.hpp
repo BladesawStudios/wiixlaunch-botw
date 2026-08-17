@@ -5,17 +5,7 @@
 #include <cmath>
 #include <cstdint>
 
-// WiiXLaunch::BotW::Controller - unified button/stick reads across Switch
-// (nn::hid::GetNpadStates) and Wii U/Cemu (VPAD + KPAD/WPAD Pro/Core),
-// ported from the Freecam mod's input hooks. Original v1 button set (B, X,
-// ZL, DDown) was deliberately limited to what Freecam actually used; the
-// full Switch set below is the real, public nn::hid::NpadButton layout
-// (standard Nintendo SDK enum - the same public source the original subset
-// already cited, not per-game reverse engineering) - every bit position
-// this file already shipped (A=0, B=1, X=2, Y=3, L=6, R=7, ZL=8, ZR=9,
-// Down=15) matches it exactly, and the GetNpadStates hook addresses/struct
-// layout were independently confirmed against the real decompiled
-// nn::hid::GetNpadStates overloads via Ghidra.
+// Unified button/stick reads: Switch (nn::hid) and Wii U/Cemu (VPAD/KPAD).
 
 namespace WiiXLaunch::BotW {
 
@@ -52,8 +42,7 @@ enum class Button : uint32_t {
 
 namespace impl {
 
-// Canonical (VPAD-style) bit values - the shared bitspace every platform's
-// raw input gets translated into before ButtonBit()/IsPressed() reads it.
+// Canonical (VPAD-style) button bits; all platforms map to this.
 #if WIIXL_SWITCH
     // nn::hid::NpadButton - full real bit layout (public Nintendo SDK enum).
     constexpr uint32_t kBtnA           = 0x00000001;
@@ -72,8 +61,7 @@ namespace impl {
     constexpr uint32_t kBtnDUp         = 0x00002000;
     constexpr uint32_t kBtnDRight      = 0x00004000;
     constexpr uint32_t kBtnDDown       = 0x00008000;
-    // Left/right stick tilted fully in a cardinal direction, treated as a
-    // digital press (matches nn::hid's own semantics for these bits).
+    // Stick tilted fully cardinal (matches nn::hid semantics).
     constexpr uint32_t kBtnStickLLeft  = 0x00010000;
     constexpr uint32_t kBtnStickLUp    = 0x00020000;
     constexpr uint32_t kBtnStickLRight = 0x00040000;
@@ -82,11 +70,7 @@ namespace impl {
     constexpr uint32_t kBtnStickRUp    = 0x00200000;
     constexpr uint32_t kBtnStickRRight = 0x00400000;
     constexpr uint32_t kBtnStickRDown  = 0x00800000;
-    // Side buttons on a single detached Joy-Con (SL/SR) - only meaningful
-    // when connected as NpadJoyLeftState/NpadJoyRightState, which this
-    // project doesn't currently hook (see GetNpadStates note above); reads
-    // as never-pressed via the Handheld/JoyDual/FullKey styles this file
-    // does hook, not a wrong bit.
+    // Joy-Con side buttons (SL/SR); reads as never-pressed in current hook style.
     constexpr uint32_t kBtnLeftSL      = 0x01000000;
     constexpr uint32_t kBtnLeftSR      = 0x02000000;
     constexpr uint32_t kBtnRightSL     = 0x04000000;
@@ -97,10 +81,7 @@ namespace impl {
     constexpr uint32_t kBtnX     = 0x2000;
     constexpr uint32_t kBtnZL    = 0x0080;
     constexpr uint32_t kBtnDDown = 0x0100;
-    // Not wired up for Wii U/Cemu - this session's expansion only covered
-    // Switch (see nn::hid::GetNpadStates note above). 0 = never matches, so
-    // these just read as never-pressed on this platform rather than
-    // guessing at real bindings.
+    // Wii U/Cemu: unused (reads never-pressed).
     constexpr uint32_t kBtnA           = 0x0000;
     constexpr uint32_t kBtnY           = 0x0000;
     constexpr uint32_t kBtnStickL      = 0x0000;
@@ -210,9 +191,7 @@ struct NpadState {
 
 inline void ProcessNpadState(NpadState* state) {
     if (!state) return;
-    // NpadAttribute::IsConnected - skip styles that aren't active (e.g. the
-    // Handheld state while docked), otherwise their all-zero data would
-    // clobber the real controller's input.
+    // Skip inactive styles (all-zero data would clobber real input).
     if (!(state->Flags & 0x1)) return;
 
     float lx = static_cast<float>(state->LStickX) / 32767.0f;
@@ -262,9 +241,7 @@ inline uint32_t TranslateToCanonical(uint32_t rawHold, PadSource src) {
             if (rawHold & kWpadProDDown) out |= kBtnDDown;
             return out;
         case PadSource::WPAD_CORE:
-            // Core Wiimote has no ZL/ZR/analog trigger - no reliable combo
-            // modifier exists here; mapping B->kBtnB and A->kBtnX as a
-            // stand-in.
+            // No ZL/ZR; map B->kBtnB, A->kBtnX as stand-in.
             if (rawHold & kWpadCoreB)     out |= kBtnB;
             if (rawHold & kWpadCoreA)     out |= kBtnX;
             if (rawHold & kWpadCoreDDown) out |= kBtnDDown;

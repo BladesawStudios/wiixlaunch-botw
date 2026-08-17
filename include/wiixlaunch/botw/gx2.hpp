@@ -436,11 +436,7 @@ inline void InitializeAllPipelines() {
 
 WIIXL_HOOK_DEFINE_TRAMPOLINE(AglCopyToScanBufferHook) {
     static void Callback(uintptr_t renderBuffer, uintptr_t param2, int32_t param3) {
-        static uint32_t s_rawCount = 0;
-        if ((s_rawCount++ % 60) == 0) {
-            BotW::OSLog("WiiXLaunch: AglCopyToScanBufferHook called! count=%u rb=%p\n", s_rawCount, (void*)renderBuffer);
-        }
-        if (renderBuffer) {
+            if (renderBuffer) {
             uintptr_t rt = *reinterpret_cast<uintptr_t*>(renderBuffer + 0x1c);
             if (rt) {
                 auto* tvColorBuffer = reinterpret_cast<GX2Types::ColorBuffer*>(rt + 0xbc);
@@ -454,10 +450,6 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(AglCopyToScanBufferHook) {
 
                     static uint32_t s_count = 0;
                     if ((s_count++ % 300) == 0) {
-                        // dstFormat 0x41a = SRGB_R8_G8_B8_A8 (sRGB target),
-                        // 0x01a = plain UNORM - decides whether textures we
-                        // sample must be declared sRGB to avoid a double
-                        // gamma encode (see CreateTexture's format default).
                         BotW::OSLog("WiiXLaunch: Injected frame #%u (dst=%p, %ux%u, dstFormat=0x%x, cbCount=%u)\n",
                             s_count, tvColorBuffer, width, height, tvColorBuffer->surface.format,
                             static_cast<unsigned int>(g_DrawCallbackCount));
@@ -533,10 +525,7 @@ inline TextureHandle CreateTexture(
     wrap.texture.surface.height = static_cast<uint32_t>(height);
     wrap.texture.surface.depth = 1;
     wrap.texture.surface.mipLevels = 1;
-    // format 0 = "default for artwork" = sRGB RGBA8, since PNG sources are
-    // sRGB-encoded and the destination color buffer is an sRGB target (see
-    // kSurfaceFormatSrgbR8G8B8A8). Pass kSurfaceFormatUnormR8G8B8A8
-    // explicitly for data that really is linear (masks, lookup tables, ...).
+    // Format 0 = sRGB RGBA8 (default for artwork); pass explicit format for linear data.
     wrap.texture.surface.format = format ? static_cast<uint32_t>(format)
                                          : GX2Types::kSurfaceFormatSrgbR8G8B8A8;
     wrap.texture.surface.aa = GX2Types::kAaMode1x;
@@ -562,10 +551,7 @@ inline TextureHandle CreateTexture(
         for (uint32_t x = 0; x < static_cast<uint32_t>(width); ++x) {
             uint32_t tx = x >> 3;
             uint32_t bx = x & 7;
-            // GX2 micro-tile pixel index for non-depth (ADDR_DISPLAYABLE) surfaces at bpp=32:
-            // bit order is x0,x1,y0,x2,y1,y2 (NOT the plain x0,y0,x1,y1,x2,y2 Z-order used
-            // for depth/ADDR_NON_DISPLAYABLE surfaces). See AMD/decaf-emu addrlib
-            // ComputePixelIndexWithinMicroTile + R600AddrLib::GetTileType.
+            // GX2 ADDR_DISPLAYABLE micro-tile bit order: x0,x1,y0,x2,y1,y2 (see addrlib).
             uint32_t x0 = bx & 1, x1 = (bx >> 1) & 1, x2 = (bx >> 2) & 1;
             uint32_t y0 = by & 1, y1 = (by >> 1) & 1, y2 = (by >> 2) & 1;
             uint32_t elem = x0 | (x1 << 1) | (y0 << 2) | (x2 << 3) | (y1 << 4) | (y2 << 5);

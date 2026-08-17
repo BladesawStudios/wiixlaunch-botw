@@ -32,16 +32,12 @@ inline TickCallback& TickCallbackRef() {
 
 #if !WIIXL_SWITCH
 
-// Position field on Player: +0x204/+0x214/+0x224 (x/y/z, each 0x10 apart -
-// not a tightly packed Vector3). Confirmed empirically (sane, walkable
-// world coordinates every frame).
+// Position offsets: +0x204/+0x214/+0x224 (x/y/z, 0x10 apart).
 constexpr uint32_t kPosXOffset = 0x204;
 constexpr uint32_t kPosYOffset = 0x214;
 constexpr uint32_t kPosZOffset = 0x224;
 
-// Player's per-swing attack counter. +0x4d8 increments by exactly 1 on
-// every attack - a clean event counter, not a bit flag that needs
-// interpreting. Not yet checked against Switch.
+// Attack counter at +0x4d8 (increments by 1 per swing).
 constexpr uint32_t kAttackCounterOffset = 0x4d8;
 
 inline float* PositionCache() {
@@ -66,15 +62,7 @@ inline bool& AttackEventPending() {
 
 #endif // !WIIXL_SWITCH
 
-// Player::updateMtxFromPhysics - runs every frame for Link specifically,
-// used as the tick point to refresh cached Player state. The equipped-item
-// getters (ksys::act::Player) are one virtual function per gear slot -
-// getEquippedSword (index 0, main-hand weapon), getEquippedWeapon1 (index 1
-// - despite the name, this is the SHIELD slot), getEquippedWeapon2 (index 2,
-// bow). The game apparently never calls these three itself in normal play
-// (a diagnostic hook on the shared low-level accessor underneath them fired
-// constantly for many actors, but none of these three wrappers ever fired),
-// so they're polled here instead of hooked directly.
+// Poll equipped items every frame (game never calls these getters itself).
 WIIXL_HOOK_DEFINE_TRAMPOLINE(PlayerTickHook) {
     static void Callback(void* player) {
         Orig(player);

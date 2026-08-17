@@ -3,15 +3,7 @@
 #include <wiixlaunch/platform.hpp>
 #include <cstdint>
 
-// WiiXLaunch::BotW::Camera - field-layout accessors for the live camera
-// object a LookAtCameraHook callback receives (sead::LookAtCamera on Switch
-// / its Wii U equivalent, both confirmed working - ported from the Freecam
-// mod's raw pos/at/up offset reads).
-//
-// Installs no hook itself: overriding the camera IS the mod's own behavior
-// (when to override, by how much, on what input), so the hook stays owned
-// by the mod - only the struct layout (which floats are pos/at/up) is game
-// knowledge worth centralizing here.
+// Camera field accessors (pos/at/up); mod installs its own hook to use these.
 
 namespace WiiXLaunch::BotW {
 
@@ -22,10 +14,7 @@ public:
     static constexpr uint32_t kAtOffset  = 0x44;
     static constexpr uint32_t kUpOffset  = 0x50;
 #else
-    // FUN_030bf280 = the real doUpdateMatrix equivalent, confirmed via
-    // Ghidra: matches Switch's sead::LookAtCamera::doUpdateMatrix
-    // algorithmic shape exactly (2 normalize passes, 2 cross products,
-    // 12-float matrix output).
+    // Wii U offsets confirmed via Ghidra (matches Switch layout).
     static constexpr uint32_t kPosOffset = 0x34;
     static constexpr uint32_t kAtOffset  = 0x40;
     static constexpr uint32_t kUpOffset  = 0x4C;
