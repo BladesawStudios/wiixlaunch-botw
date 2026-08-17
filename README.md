@@ -32,6 +32,7 @@ projects that want it.
 | `botw/actor.hpp` | `Actor` - a thin wrapper around a raw actor pointer (`GetName()`), plus `Actor::Spawn(name, anchor, x, y, z)` |
 | `botw/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core) |
 | `botw/camera.hpp` | `Camera` - typed get/set accessors for a live camera object's position/look-at/up |
+| `botw/nvn.hpp` | `NVN` - Switch NVN graphics injection, custom textures, packaged data, samplers, and 2D/3D drawing |
 | `botw/botw.hpp` | Umbrella include for all of the above |
 
 Every offset and vtable slot here was reverse-engineered against the game
@@ -52,6 +53,7 @@ a runtime check:
 | Actor name (`Actor::GetName`) | ✅ | ✅ |
 | Controller input | ✅ | ✅ |
 | Camera pos/at/up | ✅ | ✅ |
+| Graphics injection (`NVN::SupportsNVN`) | ✅ | ❌ |
 | Player position (`Player::SupportsPosition`) | ❌ | ✅ |
 | Attack-swing tracking (`Player::SupportsAttackTracking`) | ❌ | ✅ |
 | Actor spawning (`Actor::SupportsSpawn`) | ❌ | ✅ |
