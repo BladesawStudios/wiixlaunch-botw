@@ -99,6 +99,19 @@ namespace impl {
 namespace Offset {
     constexpr uintptr_t kGraphicsNvnInstanceSlot        = 0x2594c10;
     constexpr uintptr_t kGraphicsNvnDeviceOffset        = 0x30;
+    // agl::lyr::Renderer's singleton GOT cell (0x7102590c08 in raw Ghidra
+    // addressing, NSO base subtracted) - double-indirect via ReadIndirect,
+    // exactly the same pattern as kGraphicsNvnInstanceSlot above, and
+    // verified via raw disassembly (adrp/ldr the cell, then a second ldr for
+    // the instance) rather than trusting decompiler pseudocode.
+    constexpr uintptr_t kRendererInstanceSlot           = 0x2590c08;
+    // "gfx system manager" singleton GOT cell (0x7102591350 raw) - also
+    // double-indirect, also verified via raw disassembly (Graphics::init's
+    // very first real action: adrp/ldr the cell, ldr the instance, then
+    // store the live gfx::System* into instance+0x2458). This is the real,
+    // reachable path to BotW's actual world-rendering depth buffer - see
+    // NVN::DrawMesh's depth-chain comment for the full offset chain.
+    constexpr uintptr_t kGfxManagerInstanceSlot         = 0x2591350;
     constexpr uintptr_t kMemoryPoolBuilderSetDevice     = 0x2596a88;
     constexpr uintptr_t kMemoryPoolBuilderSetDefaults   = 0x2596a90;
     constexpr uintptr_t kMemoryPoolBuilderSetStorage    = 0x2596a98;
@@ -211,10 +224,15 @@ using FnTextureBuilderSetSize2D      = void (*)(NVNtextureBuilder*, int, int);
 using FnTextureBuilderSetFormat      = void (*)(NVNtextureBuilder*, int);
 using FnTextureBuilderSetStorage     = void (*)(NVNtextureBuilder*, NVNmemoryPool*, ptrdiff_t);
 using FnTextureBuilderSetPackagedTextureData = void (*)(NVNtextureBuilder*, const void*);
+using FnTextureBuilderSetFlags       = void (*)(NVNtextureBuilder*, int);
+using FnTextureBuilderGetStorageSize = size_t (*)(const NVNtextureBuilder*);
+using FnTextureBuilderGetStorageAlignment = size_t (*)(const NVNtextureBuilder*);
 using FnTextureInitialize            = uint8_t (*)(NVNtexture*, const NVNtextureBuilder*);
 using FnTexturePoolInitialize        = uint8_t (*)(NVNtexturePool*, NVNmemoryPool*, ptrdiff_t, int);
 using FnTexturePoolRegisterTexture   = void (*)(const NVNtexturePool*, int, const NVNtexture*, const void*);
 using FnDeviceGetTextureHandle       = TextureHandle (*)(const Device*, int, int);
+using FnTextureGetWidth              = int (*)(const NVNtexture*);
+using FnTextureGetHeight             = int (*)(const NVNtexture*);
 
 using FnSamplerBuilderSetDevice      = void (*)(NVNsamplerBuilder*, Device*);
 using FnSamplerBuilderSetDefaults    = void (*)(NVNsamplerBuilder*);
@@ -251,6 +269,8 @@ using FnPolygonStateSetCullFace      = void (*)(NVNpolygonState*, int);
 using FnDepthStencilStateSetDefaults = void (*)(NVNdepthStencilState*);
 using FnDepthStencilStateSetDepthTestEnable = void (*)(NVNdepthStencilState*, uint8_t);
 using FnDepthStencilStateSetDepthWriteEnable = void (*)(NVNdepthStencilState*, uint8_t);
+using FnDepthStencilStateSetDepthFunc = void (*)(NVNdepthStencilState*, int);
+using FnCommandBufferClearDepthStencil = void (*)(CommandBuffer*, float, uint8_t, int, int);
 
 using FnCommandBufferSetViewport     = void (*)(CommandBuffer*, int, int, int, int);
 using FnCommandBufferSetScissor      = void (*)(CommandBuffer*, int, int, int, int);
@@ -366,6 +386,40 @@ alignas(4096) inline uint8_t g_MeshDataMemory[0x18000]{};
 inline NVNvertexAttribState g_MeshAttribStates[2]{};
 inline NVNvertexStreamState g_MeshStreamState{};
 inline bool g_MeshPipelineReady = false;
+
+// Real hardware depth testing. Originally attempted by reusing one of
+// BotW's own live depth buffers, but every reachable candidate found via
+// Ghidra (sead::FrameBuffer, agl::lyr::Renderer's display RenderBuffer,
+// gsys::ModelSceneBuffer's BufferData array) was either dead code, missing
+// a depth attachment, or a real object that's simply never GPU-built in
+// practice (confirmed via a raw memory dump - genuinely all-zero, not a
+// wrong offset). BotW's actual opaque-world depth binding turned out to sit
+// behind a multi-threaded job-dispatch renderer with no direct, easily
+// reachable pointer.
+//
+// Building our OWN private depth texture instead - using the real,
+// disassembly-grounded recipe found along the way in
+// sead::FrameBufferNvn::create (the function that builds BotW's own
+// display-compositing depth buffer): a plain nvnMemoryPoolBuilder/
+// nvnMemoryPoolInitialize pool (flags 0xa1 = CPU_NO_ACCESS|GPU_CACHED|
+// COMPRESSIBLE - the missing ingredient every earlier attempt at a
+// non-packaged texture in this project's history never tried) backing an
+// ordinary (non-packaged) NVNtexture (format 0x35 = DEPTH24_STENCIL8,
+// texture flag 8 = COMPRESSIBLE). This sidesteps ever needing to find a
+// live BotW object at all.
+inline NVNmemoryPool g_MeshDepthPool{};
+inline NVNtexture g_MeshDepthTexture{};
+// Generous static GPU-memory pool for the depth texture's backing storage -
+// sized for up to 1920x1080 DEPTH24_STENCIL8 block-linear storage with
+// margin (real size is queried at runtime via GetStorageSize and asserted
+// to fit before use).
+alignas(4096) inline uint8_t g_MeshDepthPoolMemory[0xa00000]{}; // 10MB
+inline bool g_MeshDepthTextureReady = false;
+inline int g_MeshDepthTextureWidth = 0;
+inline int g_MeshDepthTextureHeight = 0;
+
+inline NVNdepthStencilState g_MeshDepthStencilState{};
+inline bool g_MeshDepthStencilStateReady = false;
 
 inline FnCommandBufferEndRecording g_OrigCommandBufferEndRecording = nullptr;
 
@@ -662,8 +716,107 @@ inline void EnsureMeshPipeline() {
     vsDefaults(&g_MeshStreamState);
     vsStride(&g_MeshStreamState, 32);
 
+    // Real depth testing (see NVN::DrawMesh, which binds BotW's own live
+    // depth buffer): test+write enabled, LESS - standard "smaller stored
+    // value wins" convention, matching NVN::DrawMesh remapping nearer
+    // geometry to a smaller depth value.
+    auto dsSetDefaults2 = NvnFn<FnDepthStencilStateSetDefaults>(Offset::kDepthStencilStateSetDefaults);
+    auto dsSetTest2      = NvnFn<FnDepthStencilStateSetDepthTestEnable>(Offset::kDepthStencilStateSetDepthTestEnable);
+    auto dsSetWrite2      = NvnFn<FnDepthStencilStateSetDepthWriteEnable>(Offset::kDepthStencilStateSetDepthWriteEnable);
+    auto dsSetFunc        = ResolveFn<FnDepthStencilStateSetDepthFunc>("nvnDepthStencilStateSetDepthFunc");
+    WIIXL_LOG("WiiXLaunch: NVN mesh depth-stencil resolve: defaults=%p test=%p write=%p func=%p",
+        reinterpret_cast<void*>(dsSetDefaults2), reinterpret_cast<void*>(dsSetTest2),
+        reinterpret_cast<void*>(dsSetWrite2), reinterpret_cast<void*>(dsSetFunc));
+    if (dsSetDefaults2 && dsSetTest2 && dsSetWrite2 && dsSetFunc) {
+        constexpr int kDepthFuncLess = 0x2; // NVN_DEPTH_FUNC_LESS, confirmed against the real nvn.h
+        dsSetDefaults2(&g_MeshDepthStencilState);
+        dsSetTest2(&g_MeshDepthStencilState, 1);
+        dsSetWrite2(&g_MeshDepthStencilState, 1);
+        dsSetFunc(&g_MeshDepthStencilState, kDepthFuncLess);
+        g_MeshDepthStencilStateReady = true;
+    }
+    WIIXL_LOG("WiiXLaunch: NVN mesh depth-stencil state ready=%d", static_cast<int>(g_MeshDepthStencilStateReady));
+
     g_MeshPipelineReady = true;
     WIIXL_LOG("WiiXLaunch: NVN EnsureMeshPipeline OK");
+}
+
+// Builds our own private depth-stencil render target the first time it's
+// needed, sized to whatever the caller's current display resolution is.
+// See g_MeshDepthPool's comment above for the real recipe this replicates
+// (sead::FrameBufferNvn::create) and why it's needed at all.
+inline void EnsureMeshDepthTexture(Device* device, int width, int height) {
+    if (g_MeshDepthTextureReady || !device || width <= 0 || height <= 0) return;
+
+    auto poolBuilderSetDefaults = NvnFn<FnMemoryPoolBuilderSetDefaults>(Offset::kMemoryPoolBuilderSetDefaults);
+    auto poolBuilderSetDevice   = NvnFn<FnMemoryPoolBuilderSetDevice>(Offset::kMemoryPoolBuilderSetDevice);
+    auto poolBuilderSetFlags    = NvnFn<FnMemoryPoolBuilderSetFlags>(Offset::kMemoryPoolBuilderSetFlags);
+    auto poolBuilderSetStorage  = NvnFn<FnMemoryPoolBuilderSetStorage>(Offset::kMemoryPoolBuilderSetStorage);
+    auto poolInitialize         = NvnFn<FnMemoryPoolInitialize>(Offset::kMemoryPoolInitialize);
+
+    auto texBuilderSetDevice   = ResolveFn<FnTextureBuilderSetDevice>("nvnTextureBuilderSetDevice");
+    auto texBuilderSetDefaults = ResolveFn<FnTextureBuilderSetDefaults>("nvnTextureBuilderSetDefaults");
+    auto texBuilderSetTarget   = ResolveFn<FnTextureBuilderSetTarget>("nvnTextureBuilderSetTarget");
+    auto texBuilderSetSize2D   = ResolveFn<FnTextureBuilderSetSize2D>("nvnTextureBuilderSetSize2D");
+    auto texBuilderSetFormat   = ResolveFn<FnTextureBuilderSetFormat>("nvnTextureBuilderSetFormat");
+    auto texBuilderSetFlags    = ResolveFn<FnTextureBuilderSetFlags>("nvnTextureBuilderSetFlags");
+    auto texBuilderSetStorage  = ResolveFn<FnTextureBuilderSetStorage>("nvnTextureBuilderSetStorage");
+    auto texBuilderGetStorageSize      = ResolveFn<FnTextureBuilderGetStorageSize>("nvnTextureBuilderGetStorageSize");
+    auto texBuilderGetStorageAlignment = ResolveFn<FnTextureBuilderGetStorageAlignment>("nvnTextureBuilderGetStorageAlignment");
+    auto texInitialize         = ResolveFn<FnTextureInitialize>("nvnTextureInitialize");
+
+    if (!poolBuilderSetDefaults || !poolBuilderSetDevice || !poolBuilderSetFlags || !poolBuilderSetStorage ||
+        !poolInitialize || !texBuilderSetDevice || !texBuilderSetDefaults || !texBuilderSetTarget ||
+        !texBuilderSetSize2D || !texBuilderSetFormat || !texBuilderSetFlags || !texBuilderSetStorage ||
+        !texBuilderGetStorageSize || !texBuilderGetStorageAlignment || !texInitialize) {
+        WIIXL_LOG("WiiXLaunch: NVN mesh depth texture symbol resolution failed");
+        return;
+    }
+
+    // Real order confirmed via sead::FrameBufferNvn::create's disassembly:
+    // SetDevice before SetDefaults (the reverse of every other builder in
+    // this file - deliberately replicated exactly rather than "corrected",
+    // since this is a direct copy of proven-working real code).
+    NVNtextureBuilder texBuilder{};
+    texBuilderSetDevice(&texBuilder, device);
+    texBuilderSetDefaults(&texBuilder);
+    texBuilderSetSize2D(&texBuilder, width, height);
+    texBuilderSetTarget(&texBuilder, 1);
+    constexpr int kFormatDepth24Stencil8 = 0x35; // NVN_FORMAT_DEPTH24_STENCIL8, confirmed against real nvn.h
+    texBuilderSetFormat(&texBuilder, kFormatDepth24Stencil8);
+    constexpr int kTextureFlagCompressible = 8; // NVN_TEXTURE_FLAGS_COMPRESSIBLE_BIT
+    texBuilderSetFlags(&texBuilder, kTextureFlagCompressible);
+
+    size_t storageSize = texBuilderGetStorageSize(&texBuilder);
+    size_t storageAlign = texBuilderGetStorageAlignment(&texBuilder);
+    size_t poolSize = (storageSize + 0xfff) & ~static_cast<size_t>(0xfff);
+    WIIXL_LOG("WiiXLaunch: NVN mesh depth texture: %dx%d storageSize=%u align=%u poolSize=%u (budget=%u)",
+        width, height, static_cast<unsigned int>(storageSize), static_cast<unsigned int>(storageAlign),
+        static_cast<unsigned int>(poolSize), static_cast<unsigned int>(sizeof(g_MeshDepthPoolMemory)));
+    if (storageSize == 0 || poolSize > sizeof(g_MeshDepthPoolMemory)) {
+        WIIXL_LOG("WiiXLaunch: NVN mesh depth texture storage too large for static budget");
+        return;
+    }
+
+    NVNmemoryPoolBuilder poolBuilder{};
+    poolBuilderSetDefaults(&poolBuilder);
+    poolBuilderSetDevice(&poolBuilder, device);
+    constexpr int kPoolFlags = 0xa1; // CPU_NO_ACCESS | GPU_CACHED | COMPRESSIBLE - real flags from FrameBufferNvn::create
+    poolBuilderSetFlags(&poolBuilder, kPoolFlags);
+    poolBuilderSetStorage(&poolBuilder, g_MeshDepthPoolMemory, sizeof(g_MeshDepthPoolMemory));
+    int poolResult = poolInitialize(&g_MeshDepthPool, &poolBuilder);
+    WIIXL_LOG("WiiXLaunch: NVN mesh depth pool init result=%d", poolResult);
+    if (!poolResult) return;
+
+    texBuilderSetStorage(&texBuilder, &g_MeshDepthPool, 0);
+    uint8_t texResult = texInitialize(&g_MeshDepthTexture, &texBuilder);
+    WIIXL_LOG("WiiXLaunch: NVN mesh depth texture initialize result=%d", static_cast<int>(texResult));
+    if (!texResult) return;
+
+    g_MeshDepthTextureWidth = width;
+    g_MeshDepthTextureHeight = height;
+    g_MeshDepthTextureReady = true;
+    WIIXL_LOG("WiiXLaunch: NVN EnsureMeshDepthTexture OK (%dx%d)", width, height);
 }
 
 inline void InitializeAllPipelines(void* gameFramework) {
@@ -993,6 +1146,17 @@ inline void DrawMesh(CommandBuffer* cmdBuf, void* dstTexture, const MeshVertex* 
     auto bindVertexStreamState = impl::NvnFn<impl::FnCommandBufferBindVertexStreamState>(impl::Offset::kCommandBufferBindVertexStreamState);
     auto bindVertexBuffer      = impl::NvnFn<impl::FnCommandBufferBindVertexBuffer>(impl::Offset::kCommandBufferBindVertexBuffer);
     auto drawArrays             = impl::NvnFn<impl::FnCommandBufferDrawArrays>(impl::Offset::kCommandBufferDrawArrays);
+    auto bindDepthStencil       = impl::NvnFn<impl::FnCommandBufferBindDepthStencilState>(impl::Offset::kCommandBufferBindDepthStencilState);
+    auto clearDepthStencil      = impl::ResolveFn<impl::FnCommandBufferClearDepthStencil>("nvnCommandBufferClearDepthStencil");
+
+    {
+        static bool s_LoggedResolve = false;
+        if (!s_LoggedResolve) {
+            s_LoggedResolve = true;
+            WIIXL_LOG("WiiXLaunch: NVN mesh draw resolve: bindDepthStencil=%p clearDepthStencil=%p",
+                reinterpret_cast<void*>(bindDepthStencil), reinterpret_cast<void*>(clearDepthStencil));
+        }
+    }
 
     if (!mapBuf || !getBufAddr || !bindProgram || !bindVertexAttribState ||
         !bindVertexStreamState || !bindVertexBuffer || !drawArrays) {
@@ -1005,9 +1169,6 @@ inline void DrawMesh(CommandBuffer* cmdBuf, void* dstTexture, const MeshVertex* 
     impl::armDCacheFlush(mapped, byteSize);
 
     uint64_t gpuBase = getBufAddr(&impl::g_MeshDataBuffer);
-
-    const void* colorTargets[1] = { dstTexture };
-    if (setRenderTargets) setRenderTargets(cmdBuf, 1, colorTargets, nullptr, nullptr, nullptr);
 
     int dispWidth = 1280;
     int dispHeight = 720;
@@ -1024,14 +1185,38 @@ inline void DrawMesh(CommandBuffer* cmdBuf, void* dstTexture, const MeshVertex* 
         }
     }
 
+    // Our own private depth-stencil texture - see g_MeshDepthPool's comment
+    // for why (every live BotW depth buffer we could reach was either dead
+    // code or genuinely never GPU-built) and the real recipe this replicates
+    // (sead::FrameBufferNvn::create). Built once, at whatever resolution is
+    // active the first time a mesh is drawn.
+    impl::EnsureMeshDepthTexture(impl::GetDevice(), dispWidth, dispHeight);
+    void* depthTexture = impl::g_MeshDepthTextureReady ? &impl::g_MeshDepthTexture : nullptr;
+
+    const void* colorTargets[1] = { dstTexture };
+    if (setRenderTargets) setRenderTargets(cmdBuf, 1, colorTargets, nullptr, depthTexture, nullptr);
+
+    // Clear fresh every frame so the fish only ever depth-tests against its
+    // own geometry - this texture is private to us, so there's no stale
+    // content from anything else to worry about, but the clear itself
+    // (rather than relying on whatever was left from the previous frame)
+    // keeps every frame self-consistent regardless of prior content.
+    bool depthReady = depthTexture && impl::g_MeshDepthStencilStateReady && bindDepthStencil;
+    if (depthReady && clearDepthStencil) {
+        clearDepthStencil(cmdBuf, 1.0f, 1, 0, 0xff);
+    }
+
     if (setViewport) setViewport(cmdBuf, 0, 0, dispWidth, dispHeight);
     if (setScissor)  setScissor(cmdBuf, 0, 0, dispWidth, dispHeight);
 
     // Same "inherit the game's last-bound state" approach as DrawSprite above
-    // - no depth/polygon/color/blend/channel-mask binds. Both triangle
-    // windings are already baked into `vertices` (see scripts/pack_mesh.py)
-    // specifically so whatever cull-face state is inherited still shows the
-    // model instead of silently culling half of it.
+    // for everything EXCEPT depth (when a live depth buffer was found) -
+    // real depth testing replaces the caller's need to pre-sort or cull
+    // triangles at all; whichever surface is actually nearest wins per pixel.
+    if (depthReady) {
+        bindDepthStencil(cmdBuf, &impl::g_MeshDepthStencilState);
+    }
+
     bindProgram(cmdBuf, &impl::g_MeshProgram, StageMask::VertexFragment);
     bindVertexAttribState(cmdBuf, 2, impl::g_MeshAttribStates);
     bindVertexStreamState(cmdBuf, 1, &impl::g_MeshStreamState);
