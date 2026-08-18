@@ -63,6 +63,7 @@ using SpawnActorFn = int (*)(void* mgr, const char* name, void* heap, void* hand
 using SetParamPackAnchorFn = void (*)(void* paramPack, void* anchorActor);
 using CreateBaseProcFn = int (*)(void* initializer, void* request);
 using WriteParamFn = void (*)(void* pack, void* value, void* keyRef, int sizeBytes, uint8_t typeTag);
+using InitParamPackBufferFn = void* (*)(void* buffer);
 
 constexpr uintptr_t kPositionKeyWord0 = 0x10072ed4;  // DAT_10072ed4, from doSpawn_Conf98's direct FUN_031f9870 call
 constexpr uintptr_t kSafeStringVtable = 0x10263910;  // DAT_10263910, the shared resolver vtable reused everywhere
@@ -128,7 +129,18 @@ inline void ExecuteSpawn(const char* actorName, void* anchor, float x, float y, 
     if (!heapOwner) return;
     void* heap = *reinterpret_cast<void**>(static_cast<uint8_t*>(heapOwner) + kHeapFieldOffset);
 
+    // One static pack, reused every spawn - so it has to be reset every spawn.
+    //
+    // InstParamPack::Buffer::init (0x031f9818) zeroes the param count, the used
+    // length and the 192-byte body, and the game calls it before filling a pack
+    // in. This does not, which is harmless on the first spawn only: after that
+    // the count and used length carry over, so each call appends another copy
+    // of the position parameter to a buffer that is never cleared.
     alignas(8) static InstParamPack pack = {};
+    auto initPackBuffer = WiiXLaunch::GetTargetFunction<InitParamPackBufferFn>(0x0, 0x031f9818);
+    initPackBuffer(&pack.count);
+    pack.anchor = nullptr;
+
     auto setAnchor = WiiXLaunch::GetTargetFunction<SetParamPackAnchorFn>(0x0, 0x037b55fc);
     setAnchor(&pack, anchor);
 
