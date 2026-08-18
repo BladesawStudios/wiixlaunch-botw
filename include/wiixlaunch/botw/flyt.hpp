@@ -139,17 +139,29 @@ public:
     }
 
     void GetTranslate(float& x, float& y, float& z) const { Get3(impl::kPaneTranslateOffset, x, y, z); }
-    void SetTranslate(float x, float y, float z) { Set3(impl::kPaneTranslateOffset, x, y, z); }
+    void SetTranslate(float x, float y, float z) {
+        Set3(impl::kPaneTranslateOffset, x, y, z);
+        if (m_Ptr) *Byte(impl::kPaneFlagsOffset) |= 0x10;
+    }
 
     // Unit unconfirmed (NintendoWare convention: degrees, XYZ Euler order).
     void GetRotate(float& x, float& y, float& z) const { Get3(impl::kPaneRotateOffset, x, y, z); }
-    void SetRotate(float x, float y, float z) { Set3(impl::kPaneRotateOffset, x, y, z); }
+    void SetRotate(float x, float y, float z) {
+        Set3(impl::kPaneRotateOffset, x, y, z);
+        if (m_Ptr) *Byte(impl::kPaneFlagsOffset) |= 0x10;
+    }
 
     void GetScale(float& x, float& y) const { Get2(impl::kPaneScaleOffset, x, y); }
-    void SetScale(float x, float y) { Set2(impl::kPaneScaleOffset, x, y); }
+    void SetScale(float x, float y) {
+        Set2(impl::kPaneScaleOffset, x, y);
+        if (m_Ptr) *Byte(impl::kPaneFlagsOffset) |= 0x10;
+    }
 
     void GetSize(float& w, float& h) const { Get2(impl::kPaneSizeOffset, w, h); }
-    void SetSize(float w, float h) { Set2(impl::kPaneSizeOffset, w, h); }
+    void SetSize(float w, float h) {
+        Set2(impl::kPaneSizeOffset, w, h);
+        if (m_Ptr) *Byte(impl::kPaneFlagsOffset) |= 0x10;
+    }
 
     // "Resource"/source alpha (+0x45) only - the mirrored "effective" alpha
     // at +0x46 is recomputed from this (combined with parent alpha) every
@@ -168,16 +180,32 @@ public:
         else flags &= static_cast<uint8_t>(~impl::kVisibleFlagBit);
     }
 
-    // Finds a descendant child pane by name.
-    // Wii U 0x03c49ee0: Pane::FindPaneByName(Pane* this, const char* name, bool recursive)
-    Pane FindChild(const char* name, bool recursive = true) const {
+    // Finds a descendant child pane by name using direct intrusive tree traversal.
+    // Confirmed via FUN_03c49a34: child list is a circular list with sentinel at parent + 0x14,
+    // head at *(parent + 0x14), and next sibling at *(child + 0x00).
+    Pane FindChild(const char* name) const {
 #if !WIIXL_SWITCH
         if (!m_Ptr || !name) return Pane();
-        using PaneFindByNameFn = void* (*)(void* pane, const char* name, int recursive);
-        auto findFn = WiiXLaunch::GetTargetFunction<PaneFindByNameFn>(0x0, 0x03c49ee0);
-        return Pane(findFn(m_Ptr, name, recursive ? 1 : 0));
+
+        // 1. Check direct match on this pane (+0x80 holds up to 24 chars)
+        const char* myName = reinterpret_cast<const char*>(static_cast<uint8_t*>(m_Ptr) + 0x80);
+        if (std::strncmp(myName, name, 24) == 0) return *this;
+
+        // 2. Circular child list with sentinel at +0x14
+        const void* sentinel = static_cast<const uint8_t*>(m_Ptr) + 0x14;
+        void* child = *reinterpret_cast<void**>(const_cast<void*>(sentinel));
+
+        while (child && child != sentinel) {
+            Pane found = Pane(child).FindChild(name);
+            if (found.IsValid()) return found;
+
+            // Advance to next sibling: offset +0x00 is child->mNext
+            child = *reinterpret_cast<void**>(child);
+        }
+
+        return Pane();
 #else
-        (void)name; (void)recursive;
+        (void)name;
         return Pane();
 #endif
     }
@@ -214,29 +242,27 @@ protected:
     void* m_Ptr;
 };
 
-// A pane known to be a Picture pane (BFLYT tag "pic1", vtable confirmed
-// distinct from the base Pane's - Wii U 0x03c48290). No vtable-based type
-// check is done here (pane-subtype RTTI/tag comparison hasn't been RE'd) -
-// only construct this from a pane you already know is a picture (same as
-// the base game itself: subtype is implied by the archive you're modding,
-// not queried at runtime).
+// Specialization of Pane for PicturePane instances (the dominant UI element
+// type in BotW - every icon, badge, and colored rect is one).
 class PicturePane : public Pane {
 public:
-    PicturePane() = default;
+    PicturePane() : Pane() {}
     explicit PicturePane(void* ptr) : Pane(ptr) {}
-    explicit PicturePane(const Pane& pane) : Pane(pane) {}
+    explicit PicturePane(const Pane& pane) : Pane(pane.GetRaw()) {}
 
-    // index: 0 = top-left, 1 = top-right, 2 = bottom-left, 3 = bottom-right.
-    void GetCornerColor(int index, uint8_t& r, uint8_t& g, uint8_t& b, uint8_t& a) const {
-        uint8_t* c = FieldAt(impl::kPictureCornerColorsOffset + static_cast<uint32_t>(index) * 4);
-        if (!c) { r = g = b = a = 0; return; }
-        r = c[0]; g = c[1]; b = c[2]; a = c[3];
+    // Corner vertex colors at +0xa8 (4 x RGBA8888, 16 bytes total).
+    void GetCornerColor(int corner, uint8_t& r, uint8_t& g, uint8_t& b, uint8_t& a) const {
+        if (!m_Ptr || corner < 0 || corner >= 4) return;
+        uint8_t* p = FieldAt(0xa8 + corner * 4);
+        r = p[0]; g = p[1]; b = p[2]; a = p[3];
     }
-    void SetCornerColor(int index, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
-        uint8_t* c = FieldAt(impl::kPictureCornerColorsOffset + static_cast<uint32_t>(index) * 4);
-        if (!c) return;
-        c[0] = r; c[1] = g; c[2] = b; c[3] = a;
+
+    void SetCornerColor(int corner, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+        if (!m_Ptr || corner < 0 || corner >= 4) return;
+        uint8_t* p = FieldAt(0xa8 + corner * 4);
+        p[0] = r; p[1] = g; p[2] = b; p[3] = a;
     }
+
     // Convenience: sets all four corners to the same flat color.
     void SetColor(uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
         for (int i = 0; i < 4; i++) SetCornerColor(i, r, g, b, a);
@@ -271,37 +297,10 @@ public:
         Pane root = GetRootPane();
         if (!root.IsValid()) return Pane();
 
-        // If no '/', search recursively from the root pane directly.
-        const char* slash = std::strchr(name, '/');
-        if (!slash) {
-            return root.FindChild(name, true);
-        }
+        const char* leaf = std::strrchr(name, '/');
+        const char* queryName = leaf ? (leaf + 1) : name;
 
-        // Walk hierarchical path segment by segment.
-        Pane current = root;
-        const char* segStart = name;
-        while (segStart && *segStart) {
-            const char* nextSlash = std::strchr(segStart, '/');
-            char segBuf[64];
-            size_t len = nextSlash ? static_cast<size_t>(nextSlash - segStart) : std::strlen(segStart);
-            if (len >= sizeof(segBuf)) len = sizeof(segBuf) - 1;
-            std::memcpy(segBuf, segStart, len);
-            segBuf[len] = '\0';
-
-            current = current.FindChild(segBuf, true);
-            if (!current.IsValid()) {
-                // Fallback: try finding the leaf name directly from root
-                const char* lastSlash = std::strrchr(name, '/');
-                if (lastSlash && *(lastSlash + 1)) {
-                    return root.FindChild(lastSlash + 1, true);
-                }
-                return Pane();
-            }
-
-            if (!nextSlash) break;
-            segStart = nextSlash + 1;
-        }
-        return current;
+        return root.FindChild(queryName);
 #else
         (void)name;
         return Pane();

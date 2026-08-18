@@ -153,16 +153,24 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(RequestCreateBaseProcFixHook) {
 // FUN_024adac8 - a Player-specific per-frame update method; every real spawn
 // is issued from inside some actor's own calc/update, never from a generic
 // system-wide dispatcher, so a pending Spawn() request is flushed from here
-// too, matching that pattern. Pure pass-through (Orig called first,
-// unconditionally) before the flush runs.
+// too, matching that pattern. Also provides a safe per-frame tick callback.
 WIIXL_HOOK_DEFINE_TRAMPOLINE(SpawnFlushHook) {
+    using RawCallbackFn = void (*)(void* playerPtr);
+    static RawCallbackFn& CallbackRef() { static RawCallbackFn fn = nullptr; return fn; }
+
     static void Callback(void* param1, void* param2) {
         Orig(param1, param2);
 
-        PendingSpawn& pending = PendingSpawnRef();
-        if (pending.valid) {
-            pending.valid = false;
-            ExecuteSpawn(pending.name, pending.anchor, pending.pos[0], pending.pos[1], pending.pos[2]);
+        if (param1) {
+            PendingSpawn& pending = PendingSpawnRef();
+            if (pending.valid) {
+                pending.valid = false;
+                ExecuteSpawn(pending.name, pending.anchor, pending.pos[0], pending.pos[1], pending.pos[2]);
+            }
+
+            if (RawCallbackFn cb = CallbackRef()) {
+                cb(param1);
+            }
         }
     }
 };
@@ -214,11 +222,25 @@ public:
     // offset - check SupportsSpawn if you need to branch mod behavior on it.
     static constexpr bool SupportsSpawn = !WIIXL_SWITCH;
 
-    // Installs the spawn-plumbing hooks. Call once from WiiXLaunch_Init().
+    // Installs the spawn/player-tick plumbing hooks. Call once from WiiXLaunch_Init().
     static void Init() {
 #if !WIIXL_SWITCH
         impl::SpawnFlushHook::Install(0x0, 0x024adac8);
         impl::RequestCreateBaseProcFixHook::Install(0x0, 0x03948cb8);
+#endif
+    }
+
+    // Registers a callback fired on the Player's per-frame update loop.
+    using PlayerCallbackFn = void (*)(const Actor& player);
+    static void OnUpdate(PlayerCallbackFn callback) {
+#if !WIIXL_SWITCH
+        static PlayerCallbackFn s_Callback = nullptr;
+        s_Callback = callback;
+        impl::SpawnFlushHook::CallbackRef() = [](void* ptr) {
+            if (s_Callback) s_Callback(Actor(ptr));
+        };
+#else
+        (void)callback;
 #endif
     }
 
@@ -240,6 +262,116 @@ public:
         return true;
 #endif
     }
+
+    // Health / Life accessors (Wii U / Cemu confirmed):
+    // On Wii U, Actor+0xe8 is the primary actor vtable pointer.
+    // Slot +0xf4 (index 61) is GetMaxLife(actor) -> int
+    // Slot +0x2bc (700, index 175) is GetCurrentLifePtr(actor) -> int*
+    int GetCurrentLife() const {
+#if !WIIXL_SWITCH
+        if (!m_Ptr) return 0;
+        uint8_t* ptr = static_cast<uint8_t*>(m_Ptr);
+        void** vtable = *reinterpret_cast<void***>(ptr + 0xe8);
+        if (!vtable) return 0;
+        uintptr_t vtAddr = reinterpret_cast<uintptr_t>(vtable);
+        if (vtAddr < 0x02000000 || vtAddr > 0x10600000) return 0;
+
+        using GetLifePtrFn = int* (*)(void* actor);
+        auto fn = reinterpret_cast<GetLifePtrFn>(vtable[0x2bc / 4]);
+        if (!fn) return 0;
+        uintptr_t fnAddr = reinterpret_cast<uintptr_t>(fn);
+        if (fnAddr < 0x02000000 || fnAddr > 0x04000000) return 0;
+
+        int* pLife = fn(m_Ptr);
+        if (!pLife) return 0;
+        uintptr_t lifeAddr = reinterpret_cast<uintptr_t>(pLife);
+        if (lifeAddr < 0x10000000 || lifeAddr > 0xa0000000 || (lifeAddr & 3) != 0) return 0;
+
+        return *pLife;
+#else
+        return 0;
+#endif
+    }
+
+    void SetCurrentLife(int life) {
+#if !WIIXL_SWITCH
+        if (!m_Ptr) return;
+        uint8_t* ptr = static_cast<uint8_t*>(m_Ptr);
+        void** vtable = *reinterpret_cast<void***>(ptr + 0xe8);
+        if (!vtable) return;
+        uintptr_t vtAddr = reinterpret_cast<uintptr_t>(vtable);
+        if (vtAddr < 0x02000000 || vtAddr > 0x10600000) return;
+
+        using GetLifePtrFn = int* (*)(void* actor);
+        auto fn = reinterpret_cast<GetLifePtrFn>(vtable[0x2bc / 4]);
+        if (!fn) return;
+        uintptr_t fnAddr = reinterpret_cast<uintptr_t>(fn);
+        if (fnAddr < 0x02000000 || fnAddr > 0x04000000) return;
+
+        int* pLife = fn(m_Ptr);
+        if (!pLife) return;
+        uintptr_t lifeAddr = reinterpret_cast<uintptr_t>(pLife);
+        if (lifeAddr < 0x10000000 || lifeAddr > 0xa0000000 || (lifeAddr & 3) != 0) return;
+
+        *pLife = life;
+#else
+        (void)life;
+#endif
+    }
+
+    int GetMaxLife() const {
+#if !WIIXL_SWITCH
+        if (!m_Ptr) return 0;
+        uint8_t* ptr = static_cast<uint8_t*>(m_Ptr);
+        void** vtable = *reinterpret_cast<void***>(ptr + 0xe8);
+        if (!vtable) return 0;
+        uintptr_t vtAddr = reinterpret_cast<uintptr_t>(vtable);
+        if (vtAddr < 0x02000000 || vtAddr > 0x10600000) return 0;
+
+        using GetMaxLifeFn = int (*)(void* actor);
+        auto fn = reinterpret_cast<GetMaxLifeFn>(vtable[0xf4 / 4]);
+        if (!fn) return 0;
+        uintptr_t fnAddr = reinterpret_cast<uintptr_t>(fn);
+        if (fnAddr < 0x02000000 || fnAddr > 0x04000000) return 0;
+
+        return fn(m_Ptr);
+#else
+        return 0;
+#endif
+    }
+
+    void SetMaxLife(int maxLife) {
+#if !WIIXL_SWITCH
+        if (!m_Ptr) return;
+        uint8_t* ptr = static_cast<uint8_t*>(m_Ptr);
+        void** vtable = *reinterpret_cast<void***>(ptr + 0xe8);
+        if (!vtable) return;
+        uintptr_t vtAddr = reinterpret_cast<uintptr_t>(vtable);
+        if (vtAddr < 0x02000000 || vtAddr > 0x10600000) return;
+
+        using GetLifePtrFn = int* (*)(void* actor);
+        auto fn = reinterpret_cast<GetLifePtrFn>(vtable[0x2bc / 4]);
+        if (!fn) return;
+        uintptr_t fnAddr = reinterpret_cast<uintptr_t>(fn);
+        if (fnAddr < 0x02000000 || fnAddr > 0x04000000) return;
+
+        int* pLife = fn(m_Ptr);
+        if (!pLife) return;
+        uintptr_t lifeAddr = reinterpret_cast<uintptr_t>(pLife);
+        if (lifeAddr < 0x10000000 || lifeAddr > 0xa0000000 || (lifeAddr & 3) != 0) return;
+
+        *(pLife + 1) = maxLife;
+#else
+        (void)maxLife;
+#endif
+    }
+
+    // Convenience helpers converting between integer Life units (4 per heart) and floating-point hearts
+    float GetCurrentHearts() const { return GetCurrentLife() / 4.0f; }
+    void SetCurrentHearts(float hearts) { SetCurrentLife(static_cast<int>(hearts * 4.0f + 0.5f)); }
+
+    float GetMaxHearts() const { return GetMaxLife() / 4.0f; }
+    void SetMaxHearts(float hearts) { SetMaxLife(static_cast<int>(hearts * 4.0f + 0.5f)); }
 
 private:
     void* m_Ptr;
