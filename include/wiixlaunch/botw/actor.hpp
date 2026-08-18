@@ -63,6 +63,7 @@ using SpawnActorFn = int (*)(void* mgr, const char* name, void* heap, void* hand
 using SetParamPackAnchorFn = void (*)(void* paramPack, void* anchorActor);
 using CreateBaseProcFn = int (*)(void* initializer, void* request);
 using WriteParamFn = void (*)(void* pack, void* value, void* keyRef, int sizeBytes, uint8_t typeTag);
+using InitParamPackBufferFn = void* (*)(void* buffer);
 
 constexpr uintptr_t kPositionKeyWord0 = 0x10072ed4;  // DAT_10072ed4, from doSpawn_Conf98's direct FUN_031f9870 call
 constexpr uintptr_t kSafeStringVtable = 0x10263910;  // DAT_10263910, the shared resolver vtable reused everywhere
@@ -71,11 +72,33 @@ constexpr uintptr_t kActorCreateMgrAddr = 0x1047c2b8;   // global: manager point
 constexpr uintptr_t kHeapProviderAddr = 0x10463f6c;     // global: pointer to a struct; +0x10 field is the spawn heap
 constexpr uint32_t kHeapFieldOffset = 0x10;
 
-// *SpawnedHandle() is a small creation-request/job tracker, not the finished
-// actor - handle[0] is the pool-slot pointer allocUnit() claims, handle[4] is
-// a "fast path already resolved" byte. Persistent (function-local static,
-// not per-call) since the pool-ownership fix below needs it to survive
-// across the RequestCreateBaseProcFixHook call that follows each spawn.
+// The creation-request tracker handed to spawnActor. Not the finished actor,
+// and not the pooled unit either - it stays small.
+//
+// Read at 0x0378a70c (V208 Wii U), which takes it as `handle` alongside the
+// new proc:
+//
+//   +0x00  int   request state; the create path only runs when this is 1
+//   +0x04  byte  "already resolved" flag
+//
+// Nothing has been observed reading past +0x08, and 0x0378a70c is the only
+// caller of BaseProcHandle::setProc, so 16 bytes is generous rather than tight.
+//
+// Word 0 was previously described here as a pool-slot pointer. It is not: it is
+// the request-state int above, which is why the "set slot+4" write that used to
+// follow the forced createBaseProc call below never did anything.
+//
+// The handle never receives the created actor. That lands on the pooled
+// BaseProcUnit instead - 0x25C bytes from the 256-entry pool at 0x105597c0
+// (see the pool set-up at 0x0378d22c) - whose own layout is:
+//
+//   +0x00  state (0..5)          +0x08  BaseProc*
+//   +0x04  link; 0x105597b8 is the "detached" sentinel
+//   +0x220 sead::CriticalSection
+//
+// and a proc points back at its unit through BaseProc+0xE0. Getting a spawned
+// actor back means going through one of those, not through this handle - see
+// the note on Actor::Spawn.
 inline uint8_t* SpawnedHandle() {
     alignas(8) static uint8_t handle[16] = {};
     return handle;
@@ -106,7 +129,18 @@ inline void ExecuteSpawn(const char* actorName, void* anchor, float x, float y, 
     if (!heapOwner) return;
     void* heap = *reinterpret_cast<void**>(static_cast<uint8_t*>(heapOwner) + kHeapFieldOffset);
 
+    // One static pack, reused every spawn - so it has to be reset every spawn.
+    //
+    // InstParamPack::Buffer::init (0x031f9818) zeroes the param count, the used
+    // length and the 192-byte body, and the game calls it before filling a pack
+    // in. This does not, which is harmless on the first spawn only: after that
+    // the count and used length carry over, so each call appends another copy
+    // of the position parameter to a buffer that is never cleared.
     alignas(8) static InstParamPack pack = {};
+    auto initPackBuffer = WiiXLaunch::GetTargetFunction<InitParamPackBufferFn>(0x0, 0x031f9818);
+    initPackBuffer(&pack.count);
+    pack.anchor = nullptr;
+
     auto setAnchor = WiiXLaunch::GetTargetFunction<SetParamPackAnchorFn>(0x0, 0x037b55fc);
     setAnchor(&pack, anchor);
 
@@ -140,11 +174,12 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(RequestCreateBaseProcFixHook) {
         auto createBaseProc = WiiXLaunch::GetTargetFunction<CreateBaseProcFn>(0x0, 0x03948ed8);
         createBaseProc(initializer, request);
 
-        // Set slot+4 for pool return on release.
-        void* slot = *reinterpret_cast<void**>(SpawnedHandle());
-        if (slot) {
-            *reinterpret_cast<void**>(static_cast<uint8_t*>(slot) + 4) = SpawnedHandle();
-        }
+        // A "set slot+4 for pool return on release" write used to sit here,
+        // reading handle word 0 as a pool-slot pointer. Word 0 is the request
+        // state (see SpawnedHandle), so the value was only ever 0, 1 or 2: the
+        // write was dead whenever the state was 0, and a store to address 0x5
+        // or 0x6 for any other value. Removed rather than repaired - the unit
+        // it was reaching for is pooled and released by the game itself.
 
         return result;
     }
@@ -190,10 +225,23 @@ public:
     // ksys::act::Actor::getUniqueName() const on Switch (0x11c9bfc) - the
     // placement's "UniqueName" tag, or the actor's ActorLink resource name
     // (e.g. "Weapon_Sword_070") when there's no placement, exactly what a
-    // dynamically-spawned/held actor has. Wii U/Cemu has no Ghidra-found
-    // equivalent function; the same information sits as a plain inline
-    // null-terminated buffer at +0x10 on the actor object instead, confirmed
-    // via live Cheat Engine string scan (see handwritten-symbols-botw.csv).
+    // dynamically-spawned/held actor has.
+    //
+    // Wii U/Cemu has no Ghidra-found equivalent function, so the name is read
+    // off the object. Two places hold one, and which is populated depends on
+    // the actor:
+    //
+    //   +0x04  sead::SafeString - a char* here, its vtable at +0x08. This is
+    //          where the game's own trace prints read a proc's name from
+    //          ("BaseProcUnit:%p BaseProc(%s:%p)" at 0x0378a658 and the
+    //          BaseProcHandle::setProc trace both use *(proc+4)), and it is
+    //          the one populated on a freshly spawned actor.
+    //   +0x10  a plain inline null-terminated buffer, confirmed via live Cheat
+    //          Engine string scan (see handwritten-symbols-botw.csv).
+    //
+    // The inline buffer was the only one checked here originally, which made
+    // GetName() report nothing usable for actors created through Spawn().
+    // The SafeString is tried first, then the inline buffer.
     const char* GetName() const {
         if (!m_Ptr) return "(none)";
 #if WIIXL_SWITCH
@@ -203,16 +251,72 @@ public:
         return name ? name : "(unnamed)";
 #else
         static char buf[64];
-        constexpr uintptr_t kActorNameOffset = 0x10;
-        auto* p = reinterpret_cast<const char*>(m_Ptr) + kActorNameOffset;
+        constexpr uintptr_t kSafeStringOffset = 0x04;
+        constexpr uintptr_t kInlineNameOffset = 0x10;
+
+        auto* base = static_cast<const uint8_t*>(m_Ptr);
+        const char* raw = *reinterpret_cast<const char* const*>(base + kSafeStringOffset);
+        if (!IsReadablePtr(raw)) raw = reinterpret_cast<const char*>(base + kInlineNameOffset);
+
         int n = 0;
         for (; n < static_cast<int>(sizeof(buf)) - 1; n++) {
-            if (p[n] == '\0') break;
-            buf[n] = p[n];
+            if (raw[n] == '\0') break;
+            buf[n] = raw[n];
         }
         buf[n] = '\0';
         return n > 0 ? buf : "(unnamed)";
 #endif
+    }
+
+    // Asks the game to delete this actor, the same way it deletes its own:
+    // ksys::act::BaseProc::deleteLater(DeleteReason). Returns whether the
+    // request was accepted - it is refused if the actor is already being
+    // deleted or already flagged for it, which is a normal outcome rather
+    // than an error.
+    //
+    // Unlike spawning, this is confirmed on both platforms:
+    //   Switch  0x11b9da4  - symbolised in the 1.5.0 binary
+    //   Wii U   0x0378a374 - V208, matched against that symbolised copy: same
+    //                        early-outs on the state byte and delete flag, the
+    //                        same name-string vfunc called twice, the same
+    //                        BaseProcMgr singleton and high-priority-thread
+    //                        check, the same lock-then-recheck of both
+    //                        conditions, and the same virtual dispatch of the
+    //                        reason. Only struct/vtable offsets differ, as
+    //                        expected between a 64- and a 32-bit build.
+    //
+    // The Wii U side is corroborated by the game's own use of it: 0x0378a70c
+    // calls it as deleteLater(proc, 1) and deleteLater(proc, 2) on the failure
+    // paths of actor creation, which fixes both the argument order and the
+    // meaning of the second parameter.
+    //
+    // The Switch address is derived from the symbolised binary rather than
+    // observed running; the identity is certain, the runtime behaviour has not
+    // been exercised there yet.
+    //
+    // Confirmed on Wii U by deleting the player's equipped sword: the weapon
+    // leaves Link's hand. Its inventory entry stays, which is correct - that is
+    // save data, not the actor.
+    //
+    // Confirmed to remove a spawned weapon from the world as well, once that
+    // weapon has been woken (see Spawn). The one case where the proc dies and
+    // the model stays is an actor the game never places in the world - armour -
+    // which is a property of that actor, not of this call. See Spawn below.
+    //
+    // The proc's state flags at +0x64 drive this and two neighbouring
+    // transitions, via 0x0378a1b8(proc, bit) which sets a bit and queues the
+    // proc for state processing:
+    //
+    //   bit 0  request deletion (what this uses)
+    //   bit 1  wake:  Sleep -> Calc, and it stays awake
+    //   bit 2  sleep: Calc  -> Sleep
+    static constexpr bool SupportsDelete = true;
+
+    bool Delete(uint32_t reason = 0) const {
+        if (!m_Ptr) return false;
+        using DeleteLaterFn = int (*)(void* proc, uint32_t reason);
+        auto deleteLater = WiiXLaunch::GetTargetFunction<DeleteLaterFn>(0x11b9da4, 0x0378a374);
+        return deleteLater(m_Ptr, reason) != 0;
     }
 
     // Actor creation ("spawn an actor near this one") is only confirmed on
@@ -247,6 +351,49 @@ public:
     // Queues actorName to spawn near anchor at (x, y, z); the actual
     // creation happens on the next safe per-frame tick (see SpawnFlushHook).
     // Returns false immediately on Switch (SupportsSpawn == false).
+    //
+    // The return value says the request was queued, not that an actor exists,
+    // and there is still no way to get the created actor back: the handle only
+    // ever carries request state, and the proc is stored on the pooled
+    // BaseProcUnit instead (see impl::SpawnedHandle for both layouts).
+    //
+    // Worth knowing before relying on this: 0x0378a70c only runs the create
+    // path when the handle's word 0 is 1, and takes a deleteLater branch
+    // otherwise. This handle is left zeroed, so that condition is not currently
+    // met. Spawning does produce visible actors regardless, so the path
+    // actually taken has not been fully pinned down.
+    //
+    // **Spawn what the game itself puts in the world, and it just works.**
+    // Confirmed on Wii U with a weapon, an animal and an enemy: a spawned
+    // Enemy_Bokoblin_Junior runs its AI, animates, reacts to the player and
+    // fights. A spawned weapon falls under gravity with its proc position
+    // tracking the model and brings its own sub-actors along (a sword spawns
+    // its sheath, which the game then cleans up itself). Actor::Delete removes
+    // any of them cleanly. Nothing extra is needed to make this happen.
+    //
+    // Actors that the game never places in the world do not. Armour is the
+    // clear case: an Armor_* actor binds to a skeleton - the player's, or the
+    // pause menu doll's - and nothing in the game ever creates one as a
+    // free-standing world actor. Spawn one and it *renders*, which makes it
+    // look like it worked, but it has no world lifecycle:
+    //
+    //   * Writing the proc's position moves the field and not the model.
+    //   * Deleting the proc destroys it - confirmed by watching its memory get
+    //     handed to another actor - and the model stays on screen.
+    //
+    // That is not a fault in this code. Such an actor is created correctly:
+    // compared field for field against the armour the pause menu builds, ours
+    // matches on state, job bits, flags, vtable and unit, both at creation and
+    // at deletion. There is simply no teardown path for a world armour model,
+    // because the game never makes one.
+    //
+    // So: fine for weapons, animals, enemies, NPCs, props. For armour, expect
+    // a model that renders once and can never be moved or removed.
+    //
+    // Armour also never leaves the Sleep state - it goes Init -> Sleep and
+    // never reaches Calc. That is the same story rather than a separate one:
+    // an actor with no world behaviour has nothing to run. Actors that do have
+    // behaviour reach Calc by themselves, with no help from the caller.
     static bool Spawn(const char* actorName, const Actor& anchor, float x, float y, float z) {
 #if WIIXL_SWITCH
         (void)actorName; (void)anchor; (void)x; (void)y; (void)z;
@@ -374,6 +521,17 @@ public:
     void SetMaxHearts(float hearts) { SetMaxLife(static_cast<int>(hearts * 4.0f + 0.5f)); }
 
 private:
+#if !WIIXL_SWITCH
+    // Whether a pointer read off an actor is worth dereferencing. Matches the
+    // range checks the Life accessors above already use for the same reason:
+    // these are fields whose layout is inferred, so a wrong guess has to fail
+    // as a null read rather than as a crash.
+    static bool IsReadablePtr(const void* p) {
+        uintptr_t v = reinterpret_cast<uintptr_t>(p);
+        return v >= 0x10000000 && v < 0xa0000000;
+    }
+#endif
+
     void* m_Ptr;
 };
 

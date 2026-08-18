@@ -29,7 +29,7 @@ projects that want it.
 | Header | Provides |
 | --- | --- |
 | `botw/player.hpp` | `Player` - equipped sword/shield/bow, position, per-swing attack detection, a per-frame `OnTick` callback |
-| `botw/actor.hpp` | `Actor` - a thin wrapper around a raw actor pointer (`GetName()`), plus `Actor::Spawn(name, anchor, x, y, z)` |
+| `botw/actor.hpp` | `Actor` - a thin wrapper around a raw actor pointer (`GetName()`, `Delete()`), plus `Actor::Spawn(name, anchor, x, y, z)` |
 | `botw/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core) |
 | `botw/camera.hpp` | `Camera` - typed get/set accessors for a live camera object's position/look-at/up |
 | `botw/nvn.hpp` | `NVN` - Switch NVN graphics injection, custom textures, packaged data, samplers, and 2D/3D drawing |
@@ -56,6 +56,7 @@ a runtime check:
 | --- | :---: | :---: |
 | Equipped sword/shield/bow | ✅ | ✅ |
 | Actor name (`Actor::GetName`) | ✅ | ✅ |
+| Actor deletion (`Actor::Delete`) | ✅ | ✅ |
 | Controller input | ✅ | ✅ |
 | Camera pos/at/up | ✅ | ✅ |
 | File read/write (`FS::ReadFile`/`WriteFile`) | ✅ | ✅ |
@@ -63,8 +64,14 @@ a runtime check:
 | Graphics injection (`GX2::SupportsGX2`) | N/A | ✅ |
 | Player position (`Player::SupportsPosition`) | ❌ | ✅ |
 | Attack-swing tracking (`Player::SupportsAttackTracking`) | ❌ | ✅ |
-| Actor spawning (`Actor::SupportsSpawn`) | ❌ | ✅ |
+| Actor spawning (`Actor::SupportsSpawn`) | ❌ | ✅ (see caveat) |
 | `OSLog` (Cemu `OSReport`) | N/A | Cemu only, no-op on Wii U |
+
+**Spawning caveat:** a spawned actor renders, but is only half-attached - it
+never reaches Calc, and its model is not driven by its proc. It cannot be
+repositioned or removed afterwards; deleting it destroys the proc and leaves the
+model on screen. Fine for placing something permanent, not for anything that
+needs to cycle or clear what it spawned. See `Actor::Spawn` for details.
 
 Switch-unsupported calls are safe no-ops (return `false`/an invalid `Actor`)
 rather than reading an offset that was never confirmed - check the
