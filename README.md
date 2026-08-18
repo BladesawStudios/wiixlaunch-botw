@@ -33,7 +33,12 @@ projects that want it.
 | `botw/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core) |
 | `botw/camera.hpp` | `Camera` - typed get/set accessors for a live camera object's position/look-at/up |
 | `botw/nvn.hpp` | `NVN` - Switch NVN graphics injection, custom textures, packaged data, samplers, and 2D/3D drawing |
+| `botw/gx2.hpp` | `GX2` - Wii U/Cemu GX2 graphics injection, mirrors `NVN`'s API (`Init`, `RegisterDrawCallback`, `CreateTexture`, `LoadTexture`, `LoadMesh`, `DrawSprite`, `DrawMesh`) |
+| `botw/fs.hpp` | `FS` - cross-platform file read/write, used internally by `GX2::LoadTexture`/`LoadMesh` and available directly |
+| `botw/log.hpp` | `OSLog` - Cemu-only logger (`OSReport`), used internally by `GX2`/`FS` for their own diagnostics |
 | `botw/botw.hpp` | Umbrella include for all of the above |
+
+`botw/gfd.hpp`, `botw/gx2_shader_types.hpp`, `botw/gx2_imports.hpp`, `botw/cemu_fs.hpp`, and `botw/cemu_logging.hpp` are internal support headers `gx2.hpp`/`fs.hpp`/`log.hpp` build on (GX2 shader-blob parsing, GX2 type/constant mirrors, and the Cemu "resolve real OS/GX2 calls from a bare code cave" shim tables). Not part of the public API, but worth knowing about if you're digging into how the Cemu side actually works.
 
 Every offset and vtable slot here was reverse-engineered against the game
 binaries (see the original mods' `handwritten-symbols-botw.csv` for
@@ -53,10 +58,13 @@ a runtime check:
 | Actor name (`Actor::GetName`) | ✅ | ✅ |
 | Controller input | ✅ | ✅ |
 | Camera pos/at/up | ✅ | ✅ |
-| Graphics injection (`NVN::SupportsNVN`) | ✅ | ❌ |
+| File read/write (`FS::ReadFile`/`WriteFile`) | ✅ | ✅ |
+| Graphics injection (`NVN::SupportsNVN`) | ✅ | N/A |
+| Graphics injection (`GX2::SupportsGX2`) | N/A | ✅ |
 | Player position (`Player::SupportsPosition`) | ❌ | ✅ |
 | Attack-swing tracking (`Player::SupportsAttackTracking`) | ❌ | ✅ |
 | Actor spawning (`Actor::SupportsSpawn`) | ❌ | ✅ |
+| `OSLog` (Cemu `OSReport`) | ❌ | Cemu only, no-op on Wii U |
 
 Switch-unsupported calls are safe no-ops (return `false`/an invalid `Actor`)
 rather than reading an offset that was never confirmed - check the

@@ -5,7 +5,12 @@
 #include <cmath>
 #include <cstdint>
 
-// Unified button/stick reads: Switch (nn::hid) and Wii U/Cemu (VPAD/KPAD).
+// Unified button/stick reads: Switch (nn::hid) and Wii U/Cemu (VPAD GamePad,
+// WPAD Pro Controller, and WPAD Wii Remote with or without a Nunchuk).
+// Every Button enum value that has a real equivalent on a given platform's
+// connected controller is mapped; the only permanent gaps are Joy-Con-only
+// buttons (LeftSL/LeftSR/RightSL/RightSR) on Wii U/Cemu, since no Wii U
+// controller has a physical equivalent.
 
 namespace WiiXLaunch::BotW {
 
@@ -76,47 +81,106 @@ namespace impl {
     constexpr uint32_t kBtnRightSL     = 0x04000000;
     constexpr uint32_t kBtnRightSR     = 0x08000000;
 #else
-    // Wii U VPAD buttons (also the canonical/target bitspace on this platform)
-    constexpr uint32_t kBtnB     = 0x4000;
-    constexpr uint32_t kBtnX     = 0x2000;
-    constexpr uint32_t kBtnZL    = 0x0080;
-    constexpr uint32_t kBtnDDown = 0x0100;
-    // Wii U/Cemu: unused (reads never-pressed).
-    constexpr uint32_t kBtnA           = 0x0000;
-    constexpr uint32_t kBtnY           = 0x0000;
-    constexpr uint32_t kBtnStickL      = 0x0000;
-    constexpr uint32_t kBtnStickR      = 0x0000;
-    constexpr uint32_t kBtnL           = 0x0000;
-    constexpr uint32_t kBtnR           = 0x0000;
-    constexpr uint32_t kBtnZR          = 0x0000;
-    constexpr uint32_t kBtnPlus        = 0x0000;
-    constexpr uint32_t kBtnMinus       = 0x0000;
-    constexpr uint32_t kBtnDLeft       = 0x0000;
-    constexpr uint32_t kBtnDUp         = 0x0000;
-    constexpr uint32_t kBtnDRight      = 0x0000;
-    constexpr uint32_t kBtnStickLLeft  = 0x0000;
-    constexpr uint32_t kBtnStickLUp    = 0x0000;
-    constexpr uint32_t kBtnStickLRight = 0x0000;
-    constexpr uint32_t kBtnStickLDown  = 0x0000;
-    constexpr uint32_t kBtnStickRLeft  = 0x0000;
-    constexpr uint32_t kBtnStickRUp    = 0x0000;
-    constexpr uint32_t kBtnStickRRight = 0x0000;
-    constexpr uint32_t kBtnStickRDown  = 0x0000;
+    // Wii U VPAD buttons (VPADButtons, vpad/input.h) - this is also the
+    // canonical/target bitspace on this platform, so these values ARE the
+    // bits SetState()/StateRef() store; no translation needed for VPAD.
+    constexpr uint32_t kBtnA           = 0x8000;
+    constexpr uint32_t kBtnB           = 0x4000;
+    constexpr uint32_t kBtnX           = 0x2000;
+    constexpr uint32_t kBtnY           = 0x1000;
+    constexpr uint32_t kBtnDLeft       = 0x0800;
+    constexpr uint32_t kBtnDRight      = 0x0400;
+    constexpr uint32_t kBtnDUp         = 0x0200;
+    constexpr uint32_t kBtnDDown       = 0x0100;
+    constexpr uint32_t kBtnZL          = 0x0080;
+    constexpr uint32_t kBtnZR          = 0x0040;
+    constexpr uint32_t kBtnL           = 0x0020;
+    constexpr uint32_t kBtnR           = 0x0010;
+    constexpr uint32_t kBtnPlus        = 0x0008;
+    constexpr uint32_t kBtnMinus       = 0x0004;
+    constexpr uint32_t kBtnStickR      = 0x00020000; // right stick click
+    constexpr uint32_t kBtnStickL      = 0x00040000; // left stick click
+    // VPAD_STICK_*_EMULATION_* - the GamePad's own hardware-computed
+    // "stick tilted fully this direction" flags, the direct Wii U
+    // equivalent of nn::hid's stick-tilt bits on Switch.
+    constexpr uint32_t kBtnStickRLeft  = 0x04000000;
+    constexpr uint32_t kBtnStickRRight = 0x02000000;
+    constexpr uint32_t kBtnStickRUp    = 0x01000000;
+    constexpr uint32_t kBtnStickRDown  = 0x00800000;
+    constexpr uint32_t kBtnStickLLeft  = 0x40000000;
+    constexpr uint32_t kBtnStickLRight = 0x20000000;
+    constexpr uint32_t kBtnStickLUp    = 0x10000000;
+    constexpr uint32_t kBtnStickLDown  = 0x08000000;
+    // No Wii U controller (GamePad, Pro Controller, or Wii Remote) has a
+    // Joy-Con-style SL/SR side button - these stay never-pressed on this
+    // platform, not a mapping gap.
     constexpr uint32_t kBtnLeftSL      = 0x0000;
     constexpr uint32_t kBtnLeftSR      = 0x0000;
     constexpr uint32_t kBtnRightSL     = 0x0000;
     constexpr uint32_t kBtnRightSR     = 0x0000;
 
-    // WPAD Pro Controller buttons (KPADStatus::pro.hold bitspace - different from VPAD!)
-    constexpr uint32_t kWpadProB     = 0x0040;
-    constexpr uint32_t kWpadProX     = 0x0008;
-    constexpr uint32_t kWpadProZL    = 0x0080;
-    constexpr uint32_t kWpadProDDown = 0x4000;
+    // Wii U Pro Controller buttons (WPADButtonsProController, padscore/wpad.h,
+    // read via KPADStatus::pro - a different bitspace from VPAD's, translated
+    // to canonical below). The Pro Controller has the same physical button
+    // set as the GamePad (no touch/motion), so this reaches full parity too.
+    constexpr uint32_t kWpadProUp          = 0x00000001;
+    constexpr uint32_t kWpadProLeft        = 0x00000002;
+    constexpr uint32_t kWpadProZR          = 0x00000004;
+    constexpr uint32_t kWpadProX           = 0x00000008;
+    constexpr uint32_t kWpadProA           = 0x00000010;
+    constexpr uint32_t kWpadProY           = 0x00000020;
+    constexpr uint32_t kWpadProB           = 0x00000040;
+    constexpr uint32_t kWpadProZL          = 0x00000080;
+    constexpr uint32_t kWpadProR           = 0x00000200;
+    constexpr uint32_t kWpadProPlus        = 0x00000400;
+    constexpr uint32_t kWpadProMinus       = 0x00001000;
+    constexpr uint32_t kWpadProL           = 0x00002000;
+    constexpr uint32_t kWpadProDown        = 0x00004000;
+    constexpr uint32_t kWpadProRight       = 0x00008000;
+    constexpr uint32_t kWpadProStickR      = 0x00010000; // right stick click
+    constexpr uint32_t kWpadProStickL      = 0x00020000; // left stick click
+    constexpr uint32_t kWpadProStickLRight = 0x00040000;
+    constexpr uint32_t kWpadProStickLLeft  = 0x00080000;
+    constexpr uint32_t kWpadProStickLDown  = 0x00100000;
+    constexpr uint32_t kWpadProStickLUp    = 0x00200000;
+    constexpr uint32_t kWpadProStickRRight = 0x00400000;
+    constexpr uint32_t kWpadProStickRLeft  = 0x00800000;
+    constexpr uint32_t kWpadProStickRDown  = 0x01000000;
+    constexpr uint32_t kWpadProStickRUp    = 0x02000000;
 
-    // Core WPAD (bare Wiimote) buttons (outer KPADStatus::hold bitspace - no ZL/ZR exist here)
-    constexpr uint32_t kWpadCoreB     = 0x0400; // "B" trigger button
-    constexpr uint32_t kWpadCoreA     = 0x0800; // used in place of X (no analog-adjacent button on core Wiimote)
-    constexpr uint32_t kWpadCoreDDown = 0x0004;
+    // Core WPAD (bare Wii Remote, no Nunchuk) buttons - outer
+    // KPADStatus::hold bitspace (WPADButtons, padscore/wpad.h). The Wii
+    // Remote by itself has no X/Y/L/R/ZL/ZR/stick-click equivalents; "1"
+    // and "2" stand in for the two "extra" face buttons since nothing else
+    // maps cleanly, everything else maps 1:1 by name.
+    constexpr uint32_t kWpadCoreLeft  = 0x0001;
+    constexpr uint32_t kWpadCoreRight = 0x0002;
+    constexpr uint32_t kWpadCoreDown  = 0x0004;
+    constexpr uint32_t kWpadCoreUp    = 0x0008;
+    constexpr uint32_t kWpadCorePlus  = 0x0010;
+    constexpr uint32_t kWpadCoreTwo   = 0x0100; // stand-in for X
+    constexpr uint32_t kWpadCoreOne   = 0x0200; // stand-in for Y
+    constexpr uint32_t kWpadCoreB     = 0x0400;
+    constexpr uint32_t kWpadCoreA     = 0x0800;
+    constexpr uint32_t kWpadCoreMinus = 0x1000;
+
+    // Nunchuk extension buttons (KPADStatus::nunchuk.hold bitspace, only
+    // valid when extensionType is WPAD_EXT_NUNCHUK/WPAD_EXT_MPLUS_NUNCHUK).
+    // Z/C stand in for ZL/L, the closest thing a Wii Remote + Nunchuk combo
+    // has to shoulder buttons, and the Nunchuk's analog stick becomes the
+    // left stick - a bare Wii Remote alone has no analog stick at all.
+    constexpr uint32_t kNunchukZ = 0x2000;
+    constexpr uint32_t kNunchukC = 0x4000;
+
+    // KPADExtensionType (padscore/wpad.h's WPADExtensionType, read via
+    // KPADStatus::extensionType) values this code distinguishes between.
+    // Everything else (bare core = 0x00, Classic Controller, Balance Board,
+    // MotionPlus without a Nunchuk, etc) falls back to the core.hold path,
+    // which is correct for all of them - only a Pro Controller or an
+    // attached Nunchuk change what's readable at the 0x60 union offset.
+    constexpr uint8_t kExtNunchuk       = 0x01;
+    constexpr uint8_t kExtMplusNunchuk  = 0x06;
+    constexpr uint8_t kExtProController = 0x1f;
 #endif
 
 inline uint32_t ButtonBit(Button b) {
@@ -225,29 +289,71 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(NpadStatesFullKeyHook) {
 
 #else // WIIXL_WIIU || WIIXL_CEMU
 
-enum class PadSource { VPAD, WPAD_PRO, WPAD_CORE };
+enum class PadSource { VPAD, WPAD_PRO, WPAD_CORE, WPAD_NUNCHUK };
 
 // Translates a raw hold value from a given controller's native bitspace
-// into the canonical VPAD-style bitspace SetState() expects.
+// into the canonical VPAD-style bitspace SetState() expects. WPAD_NUNCHUK
+// translates the Wii Remote's own core.hold (buttons on the remote itself,
+// not the Nunchuk's Z/C - see NunchukExtraBits below for those).
 inline uint32_t TranslateToCanonical(uint32_t rawHold, PadSource src) {
     uint32_t out = 0;
     switch (src) {
         case PadSource::VPAD:
             return rawHold; // already canonical
         case PadSource::WPAD_PRO:
-            if (rawHold & kWpadProB)     out |= kBtnB;
-            if (rawHold & kWpadProX)     out |= kBtnX;
-            if (rawHold & kWpadProZL)    out |= kBtnZL;
-            if (rawHold & kWpadProDDown) out |= kBtnDDown;
+            if (rawHold & kWpadProUp)          out |= kBtnDUp;
+            if (rawHold & kWpadProLeft)         out |= kBtnDLeft;
+            if (rawHold & kWpadProZR)           out |= kBtnZR;
+            if (rawHold & kWpadProX)            out |= kBtnX;
+            if (rawHold & kWpadProA)            out |= kBtnA;
+            if (rawHold & kWpadProY)            out |= kBtnY;
+            if (rawHold & kWpadProB)            out |= kBtnB;
+            if (rawHold & kWpadProZL)           out |= kBtnZL;
+            if (rawHold & kWpadProR)            out |= kBtnR;
+            if (rawHold & kWpadProPlus)         out |= kBtnPlus;
+            if (rawHold & kWpadProMinus)        out |= kBtnMinus;
+            if (rawHold & kWpadProL)            out |= kBtnL;
+            if (rawHold & kWpadProDown)         out |= kBtnDDown;
+            if (rawHold & kWpadProRight)        out |= kBtnDRight;
+            if (rawHold & kWpadProStickR)       out |= kBtnStickR;
+            if (rawHold & kWpadProStickL)       out |= kBtnStickL;
+            if (rawHold & kWpadProStickLRight)  out |= kBtnStickLRight;
+            if (rawHold & kWpadProStickLLeft)   out |= kBtnStickLLeft;
+            if (rawHold & kWpadProStickLDown)   out |= kBtnStickLDown;
+            if (rawHold & kWpadProStickLUp)     out |= kBtnStickLUp;
+            if (rawHold & kWpadProStickRRight)  out |= kBtnStickRRight;
+            if (rawHold & kWpadProStickRLeft)   out |= kBtnStickRLeft;
+            if (rawHold & kWpadProStickRDown)   out |= kBtnStickRDown;
+            if (rawHold & kWpadProStickRUp)     out |= kBtnStickRUp;
             return out;
         case PadSource::WPAD_CORE:
-            // No ZL/ZR; map B->kBtnB, A->kBtnX as stand-in.
+        case PadSource::WPAD_NUNCHUK:
+            // Same core.hold bitspace either way; a Nunchuk adds Z/C and an
+            // analog stick on top (see NunchukExtraBits/stick handling in
+            // KPADReadExWrapperHook), it doesn't change what the remote's
+            // own buttons mean.
+            if (rawHold & kWpadCoreLeft)  out |= kBtnDLeft;
+            if (rawHold & kWpadCoreRight) out |= kBtnDRight;
+            if (rawHold & kWpadCoreDown)  out |= kBtnDDown;
+            if (rawHold & kWpadCoreUp)    out |= kBtnDUp;
+            if (rawHold & kWpadCorePlus)  out |= kBtnPlus;
+            if (rawHold & kWpadCoreTwo)   out |= kBtnX;
+            if (rawHold & kWpadCoreOne)   out |= kBtnY;
             if (rawHold & kWpadCoreB)     out |= kBtnB;
-            if (rawHold & kWpadCoreA)     out |= kBtnX;
-            if (rawHold & kWpadCoreDDown) out |= kBtnDDown;
+            if (rawHold & kWpadCoreA)     out |= kBtnA;
+            if (rawHold & kWpadCoreMinus) out |= kBtnMinus;
             return out;
     }
     return rawHold;
+}
+
+// Z -> ZL, C -> L: the closest thing a Wii Remote + Nunchuk combo has to
+// shoulder buttons.
+inline uint32_t NunchukExtraBits(uint32_t nunchukHold) {
+    uint32_t out = 0;
+    if (nunchukHold & kNunchukZ) out |= kBtnZL;
+    if (nunchukHold & kNunchukC) out |= kBtnL;
+    return out;
 }
 
 WIIXL_HOOK_DEFINE_TRAMPOLINE(VPADReadWrapperHook) {
@@ -268,20 +374,39 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(KPADReadExWrapperHook) {
         Orig(obj);
         for (int i = 0; i < 4; i++) {
             uint8_t* kpad = static_cast<uint8_t*>(obj) + 0x1118 + (i * 0xF08);
-            uint32_t wii_hold = *reinterpret_cast<uint32_t*>(kpad + 0x00);
-            // KPADStatus::pro union starts at 0x60 (hold@0x60, leftStick@0x6C,
-            // rightStick@0x74), confirmed against wut's WUT_CHECK_OFFSET asserts.
-            uint32_t pro_hold = *reinterpret_cast<uint32_t*>(kpad + 0x60);
+            uint32_t coreHold = *reinterpret_cast<uint32_t*>(kpad + 0x00);
+            // extensionType (KPADStatus+0x5C) gates which sub-struct the
+            // 0x60-byte union actually holds right now - reading e.g.
+            // pro.hold when a Nunchuk (not a Pro Controller) is connected
+            // would silently reinterpret nunchuk.stick's floats as a
+            // button mask instead. Confirmed against wut's WUT_CHECK_OFFSET
+            // asserts for KPADStatus::extensionType/pro/nunchuk.
+            uint8_t extensionType = *reinterpret_cast<uint8_t*>(kpad + 0x5C);
 
-            if (pro_hold != 0) {
+            if (extensionType == kExtProController) {
+                uint32_t proHold = *reinterpret_cast<uint32_t*>(kpad + 0x60);
+                if (proHold == 0) continue;
                 float lx = *reinterpret_cast<float*>(kpad + 0x6C);
                 float ly = *reinterpret_cast<float*>(kpad + 0x70);
                 float rx = *reinterpret_cast<float*>(kpad + 0x74);
                 float ry = *reinterpret_cast<float*>(kpad + 0x78);
-                SetState(TranslateToCanonical(pro_hold, PadSource::WPAD_PRO), lx, ly, rx, ry);
+                SetState(TranslateToCanonical(proHold, PadSource::WPAD_PRO), lx, ly, rx, ry);
                 break;
-            } else if (wii_hold != 0) {
-                SetState(TranslateToCanonical(wii_hold, PadSource::WPAD_CORE), 0.0f, 0.0f, 0.0f, 0.0f);
+            } else if (extensionType == kExtNunchuk || extensionType == kExtMplusNunchuk) {
+                // nunchuk.stick@0x60, nunchuk.hold@0x7C (KPADStatus's
+                // nunchuk sub-struct: stick, acc, accMagnitude,
+                // accVariation, then hold), confirmed against wut's
+                // WUT_CHECK_OFFSET asserts.
+                float lx = *reinterpret_cast<float*>(kpad + 0x60);
+                float ly = *reinterpret_cast<float*>(kpad + 0x64);
+                uint32_t nunchukHold = *reinterpret_cast<uint32_t*>(kpad + 0x7C);
+                uint32_t canonical = TranslateToCanonical(coreHold, PadSource::WPAD_NUNCHUK) | NunchukExtraBits(nunchukHold);
+                if (canonical == 0 && lx == 0.0f && ly == 0.0f) continue;
+                SetState(canonical, lx, ly, 0.0f, 0.0f);
+                break;
+            } else {
+                if (coreHold == 0) continue;
+                SetState(TranslateToCanonical(coreHold, PadSource::WPAD_CORE), 0.0f, 0.0f, 0.0f, 0.0f);
                 break;
             }
         }
