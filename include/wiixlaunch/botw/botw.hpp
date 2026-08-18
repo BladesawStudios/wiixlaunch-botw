@@ -13,6 +13,7 @@
 #include "player.hpp"
 #include "controller.hpp"
 #include "camera.hpp"
+#include "flyt.hpp"
 #include "nvn.hpp"
 #include "log.hpp"
 #include "gx2.hpp"
