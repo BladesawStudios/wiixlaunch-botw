@@ -213,10 +213,23 @@ public:
     // ksys::act::Actor::getUniqueName() const on Switch (0x11c9bfc) - the
     // placement's "UniqueName" tag, or the actor's ActorLink resource name
     // (e.g. "Weapon_Sword_070") when there's no placement, exactly what a
-    // dynamically-spawned/held actor has. Wii U/Cemu has no Ghidra-found
-    // equivalent function; the same information sits as a plain inline
-    // null-terminated buffer at +0x10 on the actor object instead, confirmed
-    // via live Cheat Engine string scan (see handwritten-symbols-botw.csv).
+    // dynamically-spawned/held actor has.
+    //
+    // Wii U/Cemu has no Ghidra-found equivalent function, so the name is read
+    // off the object. Two places hold one, and which is populated depends on
+    // the actor:
+    //
+    //   +0x04  sead::SafeString - a char* here, its vtable at +0x08. This is
+    //          where the game's own trace prints read a proc's name from
+    //          ("BaseProcUnit:%p BaseProc(%s:%p)" at 0x0378a658 and the
+    //          BaseProcHandle::setProc trace both use *(proc+4)), and it is
+    //          the one populated on a freshly spawned actor.
+    //   +0x10  a plain inline null-terminated buffer, confirmed via live Cheat
+    //          Engine string scan (see handwritten-symbols-botw.csv).
+    //
+    // The inline buffer was the only one checked here originally, which made
+    // GetName() report nothing usable for actors created through Spawn().
+    // The SafeString is tried first, then the inline buffer.
     const char* GetName() const {
         if (!m_Ptr) return "(none)";
 #if WIIXL_SWITCH
@@ -226,12 +239,17 @@ public:
         return name ? name : "(unnamed)";
 #else
         static char buf[64];
-        constexpr uintptr_t kActorNameOffset = 0x10;
-        auto* p = reinterpret_cast<const char*>(m_Ptr) + kActorNameOffset;
+        constexpr uintptr_t kSafeStringOffset = 0x04;
+        constexpr uintptr_t kInlineNameOffset = 0x10;
+
+        auto* base = static_cast<const uint8_t*>(m_Ptr);
+        const char* raw = *reinterpret_cast<const char* const*>(base + kSafeStringOffset);
+        if (!IsReadablePtr(raw)) raw = reinterpret_cast<const char*>(base + kInlineNameOffset);
+
         int n = 0;
         for (; n < static_cast<int>(sizeof(buf)) - 1; n++) {
-            if (p[n] == '\0') break;
-            buf[n] = p[n];
+            if (raw[n] == '\0') break;
+            buf[n] = raw[n];
         }
         buf[n] = '\0';
         return n > 0 ? buf : "(unnamed)";
@@ -442,6 +460,17 @@ public:
     void SetMaxHearts(float hearts) { SetMaxLife(static_cast<int>(hearts * 4.0f + 0.5f)); }
 
 private:
+#if !WIIXL_SWITCH
+    // Whether a pointer read off an actor is worth dereferencing. Matches the
+    // range checks the Life accessors above already use for the same reason:
+    // these are fields whose layout is inferred, so a wrong guess has to fail
+    // as a null read rather than as a crash.
+    static bool IsReadablePtr(const void* p) {
+        uintptr_t v = reinterpret_cast<uintptr_t>(p);
+        return v >= 0x10000000 && v < 0xa0000000;
+    }
+#endif
+
     void* m_Ptr;
 };
 
