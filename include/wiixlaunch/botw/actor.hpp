@@ -281,6 +281,23 @@ public:
     // The Switch address is derived from the symbolised binary rather than
     // observed running; the identity is certain, the runtime behaviour has not
     // been exercised there yet.
+    //
+    // Confirmed on Wii U by deleting the player's equipped sword: the weapon
+    // leaves Link's hand. Its inventory entry stays, which is correct - that is
+    // save data, not the actor.
+    //
+    // Confirmed to remove a spawned weapon from the world as well, once that
+    // weapon has been woken (see Spawn). The one case where the proc dies and
+    // the model stays is an actor the game never places in the world - armour -
+    // which is a property of that actor, not of this call. See Spawn below.
+    //
+    // The proc's state flags at +0x64 drive this and two neighbouring
+    // transitions, via 0x0378a1b8(proc, bit) which sets a bit and queues the
+    // proc for state processing:
+    //
+    //   bit 0  request deletion (what this uses)
+    //   bit 1  wake:  Sleep -> Calc, and it stays awake
+    //   bit 2  sleep: Calc  -> Sleep
     static constexpr bool SupportsDelete = true;
 
     bool Delete(uint32_t reason = 0) const {
@@ -331,8 +348,40 @@ public:
     // Worth knowing before relying on this: 0x0378a70c only runs the create
     // path when the handle's word 0 is 1, and takes a deleteLater branch
     // otherwise. This handle is left zeroed, so that condition is not currently
-    // met. Spawning does produce visible, working actors regardless, so the
-    // path actually taken has not been fully pinned down.
+    // met. Spawning does produce visible actors regardless, so the path
+    // actually taken has not been fully pinned down.
+    //
+    // **Spawn what the game itself puts in the world, and it just works.**
+    // Confirmed on Wii U with a weapon, an animal and an enemy: a spawned
+    // Enemy_Bokoblin_Junior runs its AI, animates, reacts to the player and
+    // fights. A spawned weapon falls under gravity with its proc position
+    // tracking the model and brings its own sub-actors along (a sword spawns
+    // its sheath, which the game then cleans up itself). Actor::Delete removes
+    // any of them cleanly. Nothing extra is needed to make this happen.
+    //
+    // Actors that the game never places in the world do not. Armour is the
+    // clear case: an Armor_* actor binds to a skeleton - the player's, or the
+    // pause menu doll's - and nothing in the game ever creates one as a
+    // free-standing world actor. Spawn one and it *renders*, which makes it
+    // look like it worked, but it has no world lifecycle:
+    //
+    //   * Writing the proc's position moves the field and not the model.
+    //   * Deleting the proc destroys it - confirmed by watching its memory get
+    //     handed to another actor - and the model stays on screen.
+    //
+    // That is not a fault in this code. Such an actor is created correctly:
+    // compared field for field against the armour the pause menu builds, ours
+    // matches on state, job bits, flags, vtable and unit, both at creation and
+    // at deletion. There is simply no teardown path for a world armour model,
+    // because the game never makes one.
+    //
+    // So: fine for weapons, animals, enemies, NPCs, props. For armour, expect
+    // a model that renders once and can never be moved or removed.
+    //
+    // Armour also never leaves the Sleep state - it goes Init -> Sleep and
+    // never reaches Calc. That is the same story rather than a separate one:
+    // an actor with no world behaviour has nothing to run. Actors that do have
+    // behaviour reach Calc by themselves, with no help from the caller.
     static bool Spawn(const char* actorName, const Actor& anchor, float x, float y, float z) {
 #if WIIXL_SWITCH
         (void)actorName; (void)anchor; (void)x; (void)y; (void)z;

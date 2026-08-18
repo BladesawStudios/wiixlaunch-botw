@@ -64,8 +64,14 @@ a runtime check:
 | Graphics injection (`GX2::SupportsGX2`) | N/A | ✅ |
 | Player position (`Player::SupportsPosition`) | ❌ | ✅ |
 | Attack-swing tracking (`Player::SupportsAttackTracking`) | ❌ | ✅ |
-| Actor spawning (`Actor::SupportsSpawn`) | ❌ | ✅ |
+| Actor spawning (`Actor::SupportsSpawn`) | ❌ | ✅ (see caveat) |
 | `OSLog` (Cemu `OSReport`) | N/A | Cemu only, no-op on Wii U |
+
+**Spawning caveat:** a spawned actor renders, but is only half-attached - it
+never reaches Calc, and its model is not driven by its proc. It cannot be
+repositioned or removed afterwards; deleting it destroys the proc and leaves the
+model on screen. Fine for placing something permanent, not for anything that
+needs to cycle or clear what it spawned. See `Actor::Spawn` for details.
 
 Switch-unsupported calls are safe no-ops (return `false`/an invalid `Actor`)
 rather than reading an offset that was never confirmed - check the
