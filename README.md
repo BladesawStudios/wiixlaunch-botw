@@ -64,7 +64,7 @@ a runtime check:
 | Player position (`Player::SupportsPosition`) | ❌ | ✅ |
 | Attack-swing tracking (`Player::SupportsAttackTracking`) | ❌ | ✅ |
 | Actor spawning (`Actor::SupportsSpawn`) | ❌ | ✅ |
-| `OSLog` (Cemu `OSReport`) | ❌ | Cemu only, no-op on Wii U |
+| `OSLog` (Cemu `OSReport`) | N/A | Cemu only, no-op on Wii U |
 
 Switch-unsupported calls are safe no-ops (return `false`/an invalid `Actor`)
 rather than reading an offset that was never confirmed - check the
