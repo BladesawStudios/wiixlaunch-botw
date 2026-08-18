@@ -29,7 +29,7 @@ projects that want it.
 | Header | Provides |
 | --- | --- |
 | `botw/player.hpp` | `Player` - equipped sword/shield/bow, position, per-swing attack detection, a per-frame `OnTick` callback |
-| `botw/actor.hpp` | `Actor` - a thin wrapper around a raw actor pointer (`GetName()`), plus `Actor::Spawn(name, anchor, x, y, z)` |
+| `botw/actor.hpp` | `Actor` - a thin wrapper around a raw actor pointer (`GetName()`, `Delete()`), plus `Actor::Spawn(name, anchor, x, y, z)` |
 | `botw/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core) |
 | `botw/camera.hpp` | `Camera` - typed get/set accessors for a live camera object's position/look-at/up |
 | `botw/nvn.hpp` | `NVN` - Switch NVN graphics injection, custom textures, packaged data, samplers, and 2D/3D drawing |
@@ -56,6 +56,7 @@ a runtime check:
 | --- | :---: | :---: |
 | Equipped sword/shield/bow | ✅ | ✅ |
 | Actor name (`Actor::GetName`) | ✅ | ✅ |
+| Actor deletion (`Actor::Delete`) | ✅ | ✅ |
 | Controller input | ✅ | ✅ |
 | Camera pos/at/up | ✅ | ✅ |
 | File read/write (`FS::ReadFile`/`WriteFile`) | ✅ | ✅ |

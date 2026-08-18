@@ -238,6 +238,40 @@ public:
 #endif
     }
 
+    // Asks the game to delete this actor, the same way it deletes its own:
+    // ksys::act::BaseProc::deleteLater(DeleteReason). Returns whether the
+    // request was accepted - it is refused if the actor is already being
+    // deleted or already flagged for it, which is a normal outcome rather
+    // than an error.
+    //
+    // Unlike spawning, this is confirmed on both platforms:
+    //   Switch  0x11b9da4  - symbolised in the 1.5.0 binary
+    //   Wii U   0x0378a374 - V208, matched against that symbolised copy: same
+    //                        early-outs on the state byte and delete flag, the
+    //                        same name-string vfunc called twice, the same
+    //                        BaseProcMgr singleton and high-priority-thread
+    //                        check, the same lock-then-recheck of both
+    //                        conditions, and the same virtual dispatch of the
+    //                        reason. Only struct/vtable offsets differ, as
+    //                        expected between a 64- and a 32-bit build.
+    //
+    // The Wii U side is corroborated by the game's own use of it: 0x0378a70c
+    // calls it as deleteLater(proc, 1) and deleteLater(proc, 2) on the failure
+    // paths of actor creation, which fixes both the argument order and the
+    // meaning of the second parameter.
+    //
+    // The Switch address is derived from the symbolised binary rather than
+    // observed running; the identity is certain, the runtime behaviour has not
+    // been exercised there yet.
+    static constexpr bool SupportsDelete = true;
+
+    bool Delete(uint32_t reason = 0) const {
+        if (!m_Ptr) return false;
+        using DeleteLaterFn = int (*)(void* proc, uint32_t reason);
+        auto deleteLater = WiiXLaunch::GetTargetFunction<DeleteLaterFn>(0x11b9da4, 0x0378a374);
+        return deleteLater(m_Ptr, reason) != 0;
+    }
+
     // Actor creation ("spawn an actor near this one") is only confirmed on
     // Wii U/Cemu - no Switch equivalent was ever RE'd (see
     // handwritten-symbols-botw.csv). Spawn() is a silent, safe no-op on
