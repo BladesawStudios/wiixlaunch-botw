@@ -71,11 +71,33 @@ constexpr uintptr_t kActorCreateMgrAddr = 0x1047c2b8;   // global: manager point
 constexpr uintptr_t kHeapProviderAddr = 0x10463f6c;     // global: pointer to a struct; +0x10 field is the spawn heap
 constexpr uint32_t kHeapFieldOffset = 0x10;
 
-// *SpawnedHandle() is a small creation-request/job tracker, not the finished
-// actor - handle[0] is the pool-slot pointer allocUnit() claims, handle[4] is
-// a "fast path already resolved" byte. Persistent (function-local static,
-// not per-call) since the pool-ownership fix below needs it to survive
-// across the RequestCreateBaseProcFixHook call that follows each spawn.
+// The creation-request tracker handed to spawnActor. Not the finished actor,
+// and not the pooled unit either - it stays small.
+//
+// Read at 0x0378a70c (V208 Wii U), which takes it as `handle` alongside the
+// new proc:
+//
+//   +0x00  int   request state; the create path only runs when this is 1
+//   +0x04  byte  "already resolved" flag
+//
+// Nothing has been observed reading past +0x08, and 0x0378a70c is the only
+// caller of BaseProcHandle::setProc, so 16 bytes is generous rather than tight.
+//
+// Word 0 was previously described here as a pool-slot pointer. It is not: it is
+// the request-state int above, which is why the "set slot+4" write that used to
+// follow the forced createBaseProc call below never did anything.
+//
+// The handle never receives the created actor. That lands on the pooled
+// BaseProcUnit instead - 0x25C bytes from the 256-entry pool at 0x105597c0
+// (see the pool set-up at 0x0378d22c) - whose own layout is:
+//
+//   +0x00  state (0..5)          +0x08  BaseProc*
+//   +0x04  link; 0x105597b8 is the "detached" sentinel
+//   +0x220 sead::CriticalSection
+//
+// and a proc points back at its unit through BaseProc+0xE0. Getting a spawned
+// actor back means going through one of those, not through this handle - see
+// the note on Actor::Spawn.
 inline uint8_t* SpawnedHandle() {
     alignas(8) static uint8_t handle[16] = {};
     return handle;
@@ -140,11 +162,12 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(RequestCreateBaseProcFixHook) {
         auto createBaseProc = WiiXLaunch::GetTargetFunction<CreateBaseProcFn>(0x0, 0x03948ed8);
         createBaseProc(initializer, request);
 
-        // Set slot+4 for pool return on release.
-        void* slot = *reinterpret_cast<void**>(SpawnedHandle());
-        if (slot) {
-            *reinterpret_cast<void**>(static_cast<uint8_t*>(slot) + 4) = SpawnedHandle();
-        }
+        // A "set slot+4 for pool return on release" write used to sit here,
+        // reading handle word 0 as a pool-slot pointer. Word 0 is the request
+        // state (see SpawnedHandle), so the value was only ever 0, 1 or 2: the
+        // write was dead whenever the state was 0, and a store to address 0x5
+        // or 0x6 for any other value. Removed rather than repaired - the unit
+        // it was reaching for is pooled and released by the game itself.
 
         return result;
     }
@@ -247,6 +270,17 @@ public:
     // Queues actorName to spawn near anchor at (x, y, z); the actual
     // creation happens on the next safe per-frame tick (see SpawnFlushHook).
     // Returns false immediately on Switch (SupportsSpawn == false).
+    //
+    // The return value says the request was queued, not that an actor exists,
+    // and there is still no way to get the created actor back: the handle only
+    // ever carries request state, and the proc is stored on the pooled
+    // BaseProcUnit instead (see impl::SpawnedHandle for both layouts).
+    //
+    // Worth knowing before relying on this: 0x0378a70c only runs the create
+    // path when the handle's word 0 is 1, and takes a deleteLater branch
+    // otherwise. This handle is left zeroed, so that condition is not currently
+    // met. Spawning does produce visible, working actors regardless, so the
+    // path actually taken has not been fully pinned down.
     static bool Spawn(const char* actorName, const Actor& anchor, float x, float y, float z) {
 #if WIIXL_SWITCH
         (void)actorName; (void)anchor; (void)x; (void)y; (void)z;
