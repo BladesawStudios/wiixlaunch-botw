@@ -45,6 +45,26 @@ binaries (see the original mods' `handwritten-symbols-botw.csv` for
 provenance/confidence notes on each one) - not guessed or ported from public
 symbol databases.
 
+## Symbols
+
+`data/symbols-wiiu-v208.csv` records addresses, vtable slots and struct field
+offsets established against the **Wii U V208** binary, each with a `confidence`
+column and the evidence behind it:
+
+* `confirmed` - verified two or more independent ways, typically the
+  disassembly of the function itself, the static vtable contents in `.rodata`,
+  and a value read out of a running game.
+* `confirmed-static` - proven from the binary and consistent with the
+  decompilation, but not yet exercised at runtime.
+* `behaviour-confirmed-name-unknown` - behaviour is certain, the C++ name is
+  not. Recorded rather than named.
+
+Add to it when you pin something down, and be honest in the `confidence` column
+- the point of the file is that a `confirmed` row can be relied on without
+re-deriving it. Rows also record what does *not* work: `Actor` field `0x1320`
+is max life, but it is a cache that cannot be written, and the row says so.
+Addresses are V208-specific and do not transfer to Switch.
+
 ## Platform coverage
 
 Every WiiXLaunch build targets exactly one platform at compile time
