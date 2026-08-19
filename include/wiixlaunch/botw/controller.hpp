@@ -356,16 +356,126 @@ inline uint32_t NunchukExtraBits(uint32_t nunchukHold) {
     return out;
 }
 
+// Input injection state. Applied inside the VPAD read hook below, which is
+// what makes it work at all: the hook wraps the game's own read wrapper and
+// runs Orig() first, so by the time we get control the buffer holds this
+// frame's input and the game has not looked at it yet. Writing there is
+// indistinguishable from the player having pressed the button.
+struct Injection {
+    uint32_t buttons = 0;
+    bool overrideLeftStick = false;
+    float leftX = 0.0f, leftY = 0.0f;
+    bool overrideRightStick = false;
+    float rightX = 0.0f, rightY = 0.0f;
+    // 0 = inactive. kHoldIndefinitely = until cleared or the watchdog fires.
+    uint32_t framesRemaining = 0;
+    uint32_t framesHeld = 0;
+};
+
+constexpr uint32_t kHoldIndefinitely = 0xFFFFFFFFu;
+
+// A dead-man's switch on injected input. Even an "indefinite" hold expires
+// after this many frames unless the client re-sends it.
+//
+// This exists because of a real failure: a client held buttons indefinitely,
+// then the thing pumping the server stopped, so the release could never be
+// delivered - leaving buttons jammed down in game with no way to clear them
+// short of killing the emulator. Injected input must never be able to outlive
+// the connection that asked for it. About 5 seconds at 60fps.
+constexpr uint32_t kMaxInjectionFrames = 300;
+
+inline Injection& InjectionRef() {
+    static Injection injection;
+    return injection;
+}
+
+using FrameCallback = void (*)();
+
+inline FrameCallback& FrameCallbackRef() {
+    static FrameCallback callback = nullptr;
+    return callback;
+}
+
+#if !WIIXL_SWITCH
+
+// VPADStatus: hold +0x00, trigger +0x04, release +0x08, sticks from +0x0C.
+constexpr uint32_t kVpadHoldOffset = 0x00;
+constexpr uint32_t kVpadTriggerOffset = 0x04;
+constexpr uint32_t kVpadReleaseOffset = 0x08;
+
+inline uint32_t& PreviousCombinedHold() {
+    static uint32_t hold = 0;
+    return hold;
+}
+
+inline bool& WasInjectingLastFrame() {
+    static bool was = false;
+    return was;
+}
+
+// Rewrites hold/trigger/release only while injecting, plus the one frame after
+// it stops so the injected buttons get their release edge. Left alone
+// otherwise: the console's own trigger/release bits are none of our business
+// when we are not adding anything to them.
+inline void ApplyInjection(uint8_t* vpad, uint32_t realHold) {
+    Injection& injection = InjectionRef();
+    const bool injecting = injection.framesRemaining > 0;
+
+    if (!injecting && !WasInjectingLastFrame()) {
+        PreviousCombinedHold() = realHold;
+        return;
+    }
+
+    const uint32_t combined = injecting ? (realHold | injection.buttons) : realHold;
+
+    const uint32_t previous = PreviousCombinedHold();
+
+    *reinterpret_cast<uint32_t*>(vpad + kVpadHoldOffset) = combined;
+    *reinterpret_cast<uint32_t*>(vpad + kVpadTriggerOffset) = combined & ~previous;
+    *reinterpret_cast<uint32_t*>(vpad + kVpadReleaseOffset) = previous & ~combined;
+
+    if (injecting && injection.overrideLeftStick) {
+        *reinterpret_cast<float*>(vpad + 0x0C) = injection.leftX;
+        *reinterpret_cast<float*>(vpad + 0x10) = injection.leftY;
+    }
+    if (injecting && injection.overrideRightStick) {
+        *reinterpret_cast<float*>(vpad + 0x14) = injection.rightX;
+        *reinterpret_cast<float*>(vpad + 0x18) = injection.rightY;
+    }
+
+    PreviousCombinedHold() = combined;
+    WasInjectingLastFrame() = injecting;
+
+    if (injecting) {
+        if (injection.framesRemaining != kHoldIndefinitely) injection.framesRemaining--;
+
+        // The watchdog. Counts real frames of injection regardless of what the
+        // client asked for, so an indefinite hold still lets go on its own.
+        injection.framesHeld++;
+        if (injection.framesHeld >= kMaxInjectionFrames) injection.framesRemaining = 0;
+
+        // Expiring clears everything, not just the countdown. Leaving the
+        // button mask behind meant a later stick-only request revived it.
+        if (injection.framesRemaining == 0) injection = Injection{};
+    }
+}
+
+#endif
+
 WIIXL_HOOK_DEFINE_TRAMPOLINE(VPADReadWrapperHook) {
     static void Callback(void* obj) {
         Orig(obj);
         uint8_t* vpad = static_cast<uint8_t*>(obj) + 0x14;
+        ApplyInjection(vpad, *reinterpret_cast<uint32_t*>(vpad + 0x00));
+
         uint32_t hold = *reinterpret_cast<uint32_t*>(vpad + 0x00);
         float lx = *reinterpret_cast<float*>(vpad + 0x0C);
         float ly = *reinterpret_cast<float*>(vpad + 0x10);
         float rx = *reinterpret_cast<float*>(vpad + 0x14);
         float ry = *reinterpret_cast<float*>(vpad + 0x18);
         SetState(hold, lx, ly, rx, ry);
+
+        if (FrameCallback callback = FrameCallbackRef()) callback();
     }
 };
 
@@ -431,6 +541,12 @@ public:
 #endif
     }
 
+    // Runs once per frame, from the input read the game performs every frame -
+    // including on the title screen, during loads and in menus. That makes it a
+    // sturdier per-frame hook than Player::OnTick, which stops the moment there
+    // is no player actor. Only one callback slot; call again to replace it.
+    static void OnFrame(impl::FrameCallback callback) { impl::FrameCallbackRef() = callback; }
+
     static bool IsPressed(Button b) {
         return (impl::StateRef().hold & impl::ButtonBit(b)) != 0;
     }
@@ -443,6 +559,94 @@ public:
     static void GetRightStick(float& x, float& y) {
         impl::State& s = impl::StateRef();
         x = s.rightX; y = s.rightY;
+    }
+
+    // ---- Input injection -------------------------------------------------
+    //
+    // Wii U/Cemu only. The Switch path reads nn::hid state arrays in a
+    // different bitspace and would need its own reverse translation, so this
+    // is a no-op there rather than a guess.
+    //
+    // Injection is applied in the VPAD read hook, so it reaches the game the
+    // same way a real GamePad press does - no window focus needed, and it
+    // composes with real input rather than replacing it (buttons are OR'd).
+    //
+    // Caveat worth knowing: this drives the VPAD (GamePad) path. A game being
+    // played through a Wii Remote or Pro Controller reads KPAD instead, which
+    // is a different bitspace and is not injected into.
+    static constexpr bool SupportsInjection = !WIIXL_SWITCH;
+
+    // Even this expires: see impl::kMaxInjectionFrames. Re-send to keep a hold
+    // alive; that way a client that goes away cannot jam a button down.
+    static constexpr uint32_t HoldIndefinitely = impl::kHoldIndefinitely;
+    static constexpr uint32_t MaxInjectionFrames = impl::kMaxInjectionFrames;
+
+    // The raw bit for a button, for building masks to put in Input::buttons.
+    static uint32_t MaskFor(Button b) { return impl::ButtonBit(b); }
+
+    // One injection, described completely.
+    //
+    // Send() REPLACES whatever was in flight - it never merges. That is
+    // deliberate: an earlier version let callers set buttons and sticks
+    // separately, and a stick-only call would revive a stale button mask left
+    // over from a previous call whose countdown had expired. Pressing buttons
+    // nobody asked for is about the worst failure mode an input API has.
+    struct Input {
+        uint32_t buttons = 0;
+        bool setLeftStick = false;
+        float leftX = 0.0f, leftY = 0.0f;
+        bool setRightStick = false;
+        float rightX = 0.0f, rightY = 0.0f;
+        uint32_t frames = 1;
+    };
+
+    static void Send(const Input& input) {
+#if !WIIXL_SWITCH
+        impl::Injection injection;
+        injection.buttons = input.buttons;
+        injection.overrideLeftStick = input.setLeftStick;
+        injection.leftX = input.leftX;
+        injection.leftY = input.leftY;
+        injection.overrideRightStick = input.setRightStick;
+        injection.rightX = input.rightX;
+        injection.rightY = input.rightY;
+        injection.framesRemaining = input.frames;
+        impl::InjectionRef() = injection;
+#else
+        (void)input;
+#endif
+    }
+
+    static void Hold(uint32_t buttonMask, uint32_t frames) {
+        Input input;
+        input.buttons = buttonMask;
+        input.frames = frames;
+        Send(input);
+    }
+
+    // Ends injection. The hook still runs once more to emit the release edge,
+    // so buttons do not get stuck down.
+    static void Release() {
+#if !WIIXL_SWITCH
+        impl::InjectionRef() = impl::Injection{};
+#endif
+    }
+
+    static bool IsInjecting() {
+#if !WIIXL_SWITCH
+        return impl::InjectionRef().framesRemaining > 0;
+#else
+        return false;
+#endif
+    }
+
+    static uint32_t InjectedButtons() {
+#if !WIIXL_SWITCH
+        const impl::Injection& injection = impl::InjectionRef();
+        return injection.framesRemaining > 0 ? injection.buttons : 0;
+#else
+        return 0;
+#endif
     }
 };
 
