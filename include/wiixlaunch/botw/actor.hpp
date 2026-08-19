@@ -1328,15 +1328,22 @@ public:
     }
 
 private:
-#if !WIIXL_SWITCH
     // Whether a pointer read off an actor is worth dereferencing. Matches the
     // range checks the Life accessors above already use for the same reason:
     // these are fields whose layout is inferred, so a wrong guess has to fail
-    // as a null read rather than as a crash.
+    // as a null read rather than as a crash. (Unguarded because GetName /
+    // IsValidActorName compile on every platform; the address band is
+    // per-platform: Wii U MEM2 vs the Switch 39-bit address space.)
     static bool IsReadablePtr(const void* p) {
         uintptr_t v = reinterpret_cast<uintptr_t>(p);
+#if WIIXL_SWITCH
+        return v >= 0x8000000 && v < (uintptr_t(1) << 40);
+#else
         return v >= 0x10000000 && v < 0xa0000000;
+#endif
     }
+
+#if !WIIXL_SWITCH
 
     // Whether a pointer pulled out of a BaseProcMgr job list is really a
     // BaseProc. IsReadablePtr alone is far too weak: it passed 0x62caf01e, a

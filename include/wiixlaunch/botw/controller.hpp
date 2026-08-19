@@ -264,6 +264,18 @@ inline void StoreState(State& s, uint32_t hold, float lx, float ly, float rx, fl
     s.rightY = (std::abs(ry) > 0.1f) ? ry : 0.0f;
 }
 
+// Per-input-read client callback. Declared for every platform so
+// Controller::OnFrame compiles everywhere; it currently only FIRES on
+// Wii U/Cemu (from the VPAD read hook). The Switch npad hooks don't call it
+// because they trigger once per npad style per read, which would multi-fire
+// a "per frame" callback.
+using FrameCallback = void (*)();
+
+inline FrameCallback& FrameCallbackRef() {
+    static FrameCallback callback = nullptr;
+    return callback;
+}
+
 #if WIIXL_SWITCH
 
 struct NpadState {
@@ -396,7 +408,7 @@ struct Injection {
     uint32_t framesHeld = 0;
 };
 
-constexpr uint32_t kHoldIndefinitely = 0xFFFFFFFFu;
+constexpr uint32_t kHoldIndefinitely = 0xFFFFFFFFu;  // (Wii U/Cemu branch)
 
 // A dead-man's switch on injected input. Even an "indefinite" hold expires
 // after this many frames unless the client re-sends it.
@@ -411,13 +423,6 @@ constexpr uint32_t kMaxInjectionFrames = 300;
 inline Injection& InjectionRef() {
     static Injection injection;
     return injection;
-}
-
-using FrameCallback = void (*)();
-
-inline FrameCallback& FrameCallbackRef() {
-    static FrameCallback callback = nullptr;
-    return callback;
 }
 
 #if !WIIXL_SWITCH
@@ -611,8 +616,10 @@ public:
 
     // Even this expires: see impl::kMaxInjectionFrames. Re-send to keep a hold
     // alive; that way a client that goes away cannot jam a button down.
+#if !WIIXL_SWITCH
     static constexpr uint32_t HoldIndefinitely = impl::kHoldIndefinitely;
     static constexpr uint32_t MaxInjectionFrames = impl::kMaxInjectionFrames;
+#endif
 
     // The raw bit for a button, for building masks to put in Input::buttons.
     static uint32_t MaskFor(Button b) { return impl::ButtonBit(b); }
