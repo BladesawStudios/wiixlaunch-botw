@@ -108,4 +108,136 @@ inline bool SetMaxHearts(float hearts) {
     return SetMaxLife(static_cast<int>(hearts * 4.0f + 0.5f));
 }
 
+// ---------------------------------------------------------------------------
+// Stamina
+//
+// Measured in "wheel units": 1000 = one full wheel, 3000 = the three-wheel cap.
+//
+// Mind the flag names, which are actively misleading:
+//
+//   StaminaCurrentMax  -> CURRENT stamina (PlayerInfo +0x68). Reads "current
+//                         max", but it is the live value that drains as you
+//                         sprint and regenerates when you stop. Confirmed by
+//                         sampling it while running: 3000 -> 1882 -> 3000.
+//   StaminaMax         -> MAX stamina (PlayerInfo +0x6c). Constant while the
+//                         above moves. This is what stamina vessels raise.
+//
+// The player actor keeps its own copy of the MAX at +0x1324, right after max
+// life. recoverStamina() is setStaminaCurrentMax(getMaxStaminaFromPlayerActor())
+// - current = max - which is the exact analogue of recoverLife(), and is the
+// clearest confirmation of which is which.
+// ---------------------------------------------------------------------------
+
+namespace impl {
+
+// PlayerInfo::setStaminaCurrentMax(this, f32) - CURRENT stamina; flag + cache +0x68
+constexpr uintptr_t kSetStaminaWiiU = 0x02d49d70;
+// PlayerInfo::getStaminaCurrentMax(this) -> f32 - CURRENT stamina
+constexpr uintptr_t kGetStaminaWiiU = 0x02d49dc0;
+// PlayerInfo::setStaminaMax(this, f32) - MAX stamina; flag + cache +0x6c
+constexpr uintptr_t kSetStaminaMaxWiiU = 0x02d49dfc;
+// PlayerInfo::getStaminaMax(this) -> f32 - MAX stamina
+constexpr uintptr_t kGetStaminaMaxWiiU = 0x02d49e4c;
+// PlayerInfo::setMaxStaminaForPlayerActor(this, f32) -> actor+0x1324 (the max)
+constexpr uintptr_t kSetActorMaxStaminaWiiU = 0x02d49e88;
+// PlayerInfo::getMaxStaminaFromPlayerActor(this) -> f32
+constexpr uintptr_t kGetActorMaxStaminaWiiU = 0x02d49e9c;
+
+using GetStaminaFn = float (*)(void* playerInfo);
+using SetStaminaFn = void (*)(void* playerInfo, float value);
+
+inline float CallStaminaGetter(uintptr_t wiiuOffset) {
+#if !WIIXL_SWITCH
+    void* playerInfo = PlayerInfo();
+    if (!playerInfo) return 0.0f;
+    auto fn = WiiXLaunch::GetTargetFunction<GetStaminaFn>(0x0, wiiuOffset);
+    if (!fn) return 0.0f;
+    return fn(playerInfo);
+#else
+    (void)wiiuOffset;
+    return 0.0f;
+#endif
+}
+
+} // namespace impl
+
+static constexpr bool SupportsStamina = !WIIXL_SWITCH;
+
+constexpr float kStaminaPerWheel = 1000.0f;
+constexpr float kStaminaMaxWheels = 3.0f;
+constexpr float kStaminaAbsoluteMax = kStaminaPerWheel * kStaminaMaxWheels;
+
+// Live stamina, 0..max. Drains and regenerates as you play.
+inline float GetStamina() { return impl::CallStaminaGetter(impl::kGetStaminaWiiU); }
+
+// Max stamina - what stamina vessels raise.
+inline float GetMaxStamina() { return impl::CallStaminaGetter(impl::kGetStaminaMaxWiiU); }
+
+// The player actor's own copy of the max (+0x1324). Should match GetMaxStamina();
+// exposed so a disagreement is visible rather than mysterious.
+inline float GetActorMaxStamina() { return impl::CallStaminaGetter(impl::kGetActorMaxStaminaWiiU); }
+
+// Sets live stamina. Clamped to 0..max rather than refused, since "fill it up"
+// is the common case and the ceiling is whatever the player has earned.
+inline bool SetStamina(float wheelUnits) {
+#if !WIIXL_SWITCH
+    if (!(wheelUnits >= 0.0f)) return false;          // NaN-safe
+
+    float max = GetMaxStamina();
+    if (!(max > 0.0f)) max = kStaminaAbsoluteMax;     // no reading; fall back to the cap
+    if (wheelUnits > max) wheelUnits = max;
+
+    void* playerInfo = impl::PlayerInfo();
+    if (!playerInfo) return false;
+    auto fn = WiiXLaunch::GetTargetFunction<impl::SetStaminaFn>(0x0, impl::kSetStaminaWiiU);
+    if (!fn) return false;
+
+    fn(playerInfo, wheelUnits);
+    return true;
+#else
+    (void)wheelUnits;
+    return false;
+#endif
+}
+
+// Restores stamina to full - what the game's own recoverStamina() does.
+inline bool RecoverStamina() { return SetStamina(kStaminaAbsoluteMax); }
+
+// Sets max stamina in both places the game keeps it: the StaminaMax flag (which
+// persists to the save) and the player actor's copy. Does NOT touch current
+// stamina - that is a separate value, and conflating them is what the flag
+// naming tempts you into.
+//
+// Refuses values outside 1000..3000 (one to three wheels) rather than
+// committing them, since the flag write is persistent.
+inline bool SetMaxStamina(float wheelUnits) {
+#if !WIIXL_SWITCH
+    if (!(wheelUnits >= kStaminaPerWheel) || !(wheelUnits <= kStaminaAbsoluteMax)) {
+        return false;   // NaN-safe: NaN fails both comparisons
+    }
+
+    void* playerInfo = impl::PlayerInfo();
+    if (!playerInfo) return false;
+
+    auto setMax      = WiiXLaunch::GetTargetFunction<impl::SetStaminaFn>(0x0, impl::kSetStaminaMaxWiiU);
+    auto setActorMax = WiiXLaunch::GetTargetFunction<impl::SetStaminaFn>(0x0, impl::kSetActorMaxStaminaWiiU);
+    if (!setMax || !setActorMax) return false;
+
+    setMax(playerInfo, wheelUnits);
+    // Safe with no player actor loaded: the game's own function null-checks
+    // PlayerInfo::mPlayerActor (+0x30) and returns.
+    setActorMax(playerInfo, wheelUnits);
+    return true;
+#else
+    (void)wheelUnits;
+    return false;
+#endif
+}
+
+// Convenience in wheels (1.0 = one full wheel).
+inline float GetStaminaWheels() { return GetStamina() / kStaminaPerWheel; }
+inline bool SetStaminaWheels(float wheels) { return SetStamina(wheels * kStaminaPerWheel); }
+inline float GetMaxStaminaWheels() { return GetMaxStamina() / kStaminaPerWheel; }
+inline bool SetMaxStaminaWheels(float wheels) { return SetMaxStamina(wheels * kStaminaPerWheel); }
+
 } // namespace WiiXLaunch::BotW::GameData
