@@ -144,6 +144,35 @@ public:
         if (m_Ptr) *Byte(impl::kPaneFlagsOffset) |= 0x10;
     }
 
+    // Traverses up the parent chain to sum all parent translations (+0x0c is mParent)
+    void GetParentGlobalTranslate(float& outX, float& outY, float& outZ) const {
+        outX = 0.0f; outY = 0.0f; outZ = 0.0f;
+        if (!m_Ptr) return;
+        void* parent = *reinterpret_cast<void**>(static_cast<uint8_t*>(m_Ptr) + 0x0c);
+        while (parent) {
+            float px = 0, py = 0, pz = 0;
+            Pane(parent).GetTranslate(px, py, pz);
+            outX += px; outY += py; outZ += pz;
+            parent = *reinterpret_cast<void**>(static_cast<uint8_t*>(parent) + 0x0c);
+        }
+    }
+
+    // Calculates the pane's absolute screen/layout position independent of parent hierarchy
+    void GetGlobalTranslate(float& outX, float& outY, float& outZ) const {
+        GetTranslate(outX, outY, outZ);
+        float px = 0, py = 0, pz = 0;
+        GetParentGlobalTranslate(px, py, pz);
+        outX += px; outY += py; outZ += pz;
+    }
+
+    // Sets the pane's position in absolute screen/layout coordinates
+    // (compensating for all parent offsets in the layout tree)
+    void SetGlobalTranslate(float globalX, float globalY, float globalZ) {
+        float px = 0, py = 0, pz = 0;
+        GetParentGlobalTranslate(px, py, pz);
+        SetTranslate(globalX - px, globalY - py, globalZ - pz);
+    }
+
     // Unit unconfirmed (NintendoWare convention: degrees, XYZ Euler order).
     void GetRotate(float& x, float& y, float& z) const { Get3(impl::kPaneRotateOffset, x, y, z); }
     void SetRotate(float x, float y, float z) {
@@ -169,6 +198,19 @@ public:
     uint8_t GetAlpha() const { return m_Ptr ? *Byte(impl::kPaneAlphaOffset) : 0; }
     void SetAlpha(uint8_t alpha) { if (m_Ptr) *Byte(impl::kPaneAlphaOffset) = alpha; }
 
+    // "Effective" alpha (+0x46) - recomputed by the engine every frame from
+    // this pane's own alpha combined with its ancestors'. READ-ONLY (writes
+    // get stomped, see SetAlpha above), but as a *read* it is the truest
+    // "is this actually on screen" signal available: unlike the visible
+    // flag (whose bit position is still unconfirmed, see §6.2) it also
+    // catches the case where a parent or the whole screen fades out while
+    // this pane's own state never changes.
+    uint8_t GetEffectiveAlpha() const { return m_Ptr ? *Byte(impl::kPaneAlphaMirrorOffset) : 0; }
+
+    // Raw flags byte (+0x44). Exposed for diagnostics - individual bit
+    // meanings beyond 0x10 are not confirmed.
+    uint8_t GetFlagsRaw() const { return m_Ptr ? *Byte(impl::kPaneFlagsOffset) : 0; }
+
     // Bit meaning not individually confirmed - see flyt_notes.md §6.2. Bit 0
     // is used here as NintendoWare's conventional "visible" flag position;
     // verify against your own target build before shipping a mod on it.
@@ -180,32 +222,26 @@ public:
         else flags &= static_cast<uint8_t>(~impl::kVisibleFlagBit);
     }
 
-    // Finds a descendant child pane by name using direct intrusive tree traversal.
-    // Confirmed via FUN_03c49a34: child list is a circular list with sentinel at parent + 0x14,
-    // head at *(parent + 0x14), and next sibling at *(child + 0x00).
-    Pane FindChild(const char* name) const {
+    // Finds a descendant child pane by name.
+    // Wii U 0x03c49ee0: Pane::FindPaneByName(Pane* this, const char* name, bool recursive)
+    //
+    // Deliberately calls the game's own real function instead of
+    // reimplementing tree traversal by hand: an earlier version here walked
+    // a hand-decoded "circular list with sentinel at +0x14" that was never
+    // actually confirmed against real behavior, and it silently broke the
+    // HUD-loaded detection - OnLayoutLoaded() calls this once per heart pane
+    // right before it sets s_PanesLoaded = true, so a bad offset in that
+    // traversal (infinite loop / bad pointer) can prevent that flag from
+    // ever being set, with no crash or error to point at the cause. Calling
+    // the game's own tested function avoids re-litigating that risk.
+    Pane FindChild(const char* name, bool recursive = true) const {
 #if !WIIXL_SWITCH
         if (!m_Ptr || !name) return Pane();
-
-        // 1. Check direct match on this pane (+0x80 holds up to 24 chars)
-        const char* myName = reinterpret_cast<const char*>(static_cast<uint8_t*>(m_Ptr) + 0x80);
-        if (std::strncmp(myName, name, 24) == 0) return *this;
-
-        // 2. Circular child list with sentinel at +0x14
-        const void* sentinel = static_cast<const uint8_t*>(m_Ptr) + 0x14;
-        void* child = *reinterpret_cast<void**>(const_cast<void*>(sentinel));
-
-        while (child && child != sentinel) {
-            Pane found = Pane(child).FindChild(name);
-            if (found.IsValid()) return found;
-
-            // Advance to next sibling: offset +0x00 is child->mNext
-            child = *reinterpret_cast<void**>(child);
-        }
-
-        return Pane();
+        using PaneFindByNameFn = void* (*)(void* pane, const char* name, int recursive);
+        auto findFn = WiiXLaunch::GetTargetFunction<PaneFindByNameFn>(0x0, 0x03c49ee0);
+        return Pane(findFn(m_Ptr, name, recursive ? 1 : 0));
 #else
-        (void)name;
+        (void)name; (void)recursive;
         return Pane();
 #endif
     }
