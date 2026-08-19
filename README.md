@@ -59,6 +59,12 @@ column and the evidence behind it:
 * `behaviour-confirmed-name-unknown` - behaviour is certain, the C++ name is
   not. Recorded rather than named.
 
+`docs/actor-transforms.md` is the long-form companion to those rows: the actor
+transform layout, how to enumerate every live actor off `BaseProcMgr`, the map
+placement array, and the measured finding that **no field on an actor will move
+one the physics drives** - the per-frame physics sync rewrites all of them. Read
+it before adding anything that writes an actor's position.
+
 Add to it when you pin something down, and be honest in the `confidence` column
 - the point of the file is that a `confirmed` row can be relied on without
 re-deriving it. Rows also record what does *not* work: `Actor` field `0x1320`
