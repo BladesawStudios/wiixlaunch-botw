@@ -297,6 +297,11 @@ struct SafeString {
 
 using IncreaseFlagCurrentRupeeFn = void (*)(int delta, bool tag);
 using SetFlagS32ByNameFn = void (*)(void* manager, int value, const SafeString* name);
+using IncreaseFlagS32ByNameFn = void (*)(int delta, const SafeString* name, uint8_t tag);
+
+// gdt::increaseFlag_s32_byName. 0x02e17f58 is the CurrentRupee-specific wrapper
+// around this; called directly it reaches any s32 flag.
+constexpr uintptr_t kIncreaseFlagS32ByNameWiiU = 0x02e147a4;
 using GetFlagS32ByNameFn = int (*)(void* core, int* out, const SafeString* name,
                                    uint8_t flags, int one);
 
@@ -354,18 +359,13 @@ inline bool GetRupees(int& out) {
 // Adds to the wallet, the same operation a picked-up rupee performs. Negative
 // deltas spend. This is the game's own primitive; SetRupees is layered on the
 // absolute write instead.
-inline bool AddRupees(int delta) {
-#if !WIIXL_SWITCH
-    auto add = WiiXLaunch::GetTargetFunction<impl::IncreaseFlagCurrentRupeeFn>(
-        0x0, impl::kIncreaseFlagCurrentRupeeWiiU);
-    if (!add) return false;
+// Defined further down, in the generic flag section. Rupees are just the
+// best-known s32 flag, so the rupee helpers are thin wrappers over it rather
+// than a second implementation.
+inline bool AddFlagS32(const char* name, int delta);
 
-    add(delta, false);
-    return true;
-#else
-    (void)delta;
-    return false;
-#endif
+inline bool AddRupees(int delta) {
+    return AddFlagS32("CurrentRupee", delta);
 }
 
 // Writes the CurrentRupee flag to an absolute value.
@@ -391,6 +391,561 @@ inline bool SetRupees(int value) {
     return true;
 #else
     (void)value;
+    return false;
+#endif
+}
+
+
+// ---------------------------------------------------------------------------
+// Generic flag access
+//
+// Rupees turned out to be one instance of a general mechanism, so this exposes
+// the mechanism. Everything below is s32 flags only - see the note on stores.
+//
+// How the store is shaped, from 0x0320fadc and the two halves it splits into:
+//
+//   manager             0x1046d5b0 (a pointer; null before a save loads)
+//   core                **(void***)(manager + 0x700), with a u8 at +0x704
+//                       that every read takes as an argument
+//   s32 container       core + 0x10, laid out { u32 count; u32; void** entries }
+//   entries[i]          a flag object; virtual slot +0x14 returns its name hash
+//
+// Names are NOT stored - 0x0320f45c CRC32s the name via 0x030c5d30 and
+// 0x03208cd4 binary-searches the sorted hashes. So a flag can be read by name,
+// but enumerating the store yields hashes, and turning one back into a name
+// means matching it against a list of candidate names you already have.
+
+static constexpr bool SupportsFlags = !WIIXL_SWITCH;
+
+namespace impl {
+
+// (container*, sead::SafeString* name, int) -> index, or -1 when absent.
+constexpr uintptr_t kFindFlagIndexByNameWiiU = 0x0320f45c;
+
+// (s32* out, container*, int index, u8 flags) -> non-zero on success. Reached
+// through the stub at 0x0320f9b4, which just adds the 0x10 container offset and
+// tail-calls; the argument order here is from that stub's register moves, not
+// from Ghidra's parameter recovery, which gets it wrong.
+constexpr uintptr_t kGetFlagS32ByIndexWiiU = 0x03234b08;
+
+// The bool equivalents. The stub table is ordered like the containers, so the
+// bool stubs (0x0320f994 and 0x0320f9a4, both adding 0x04 and branching to the
+// same reader) sit immediately BEFORE the s32 one - which is why walking
+// forward from s32 never finds them.
+constexpr uintptr_t kGetFlagBoolByIndexWiiU = 0x03234a64;
+
+// (core, out, sead::SafeString* name, u8 flags, int one) -> non-zero on success.
+// Same shape as the s32 reader at 0x0320fadc; it just resolves the index
+// against core+0x04 instead of core+0x10.
+constexpr uintptr_t kGetFlagBoolByNameWiiU = 0x0320fa78;
+
+// (Manager*, bool value, sead::SafeString* name) -> non-zero on success. Found
+// through 0x02e147a4, which uses it to raise IsChangedByDebug. Structurally
+// identical to the s32 setter 0x0320400c, down to the manager+0x730 bit 0x12
+// guard and the mirrored write to the second core, differing only in the typed
+// setter it forwards to (0x032163cc rather than 0x03216440).
+constexpr uintptr_t kSetFlagBoolByNameWiiU = 0x032002d4;
+
+// The typed bool setter 0x032002d4 forwards to, exposed directly so its last
+// argument can be changed.
+//
+//   (core, bool value, sead::SafeString* name, u8 flags, int one, int force)
+//
+// That last argument is a latch bypass. Many story flags are declared
+// IsOneTrigger in the ROM's gamedata - Clear_Dungeon000, Open_Dungeon000 and
+// IsGet_PlayerStole2 all are - and once such a flag is true the ordinary setter
+// will not clear it: 0x032354bc falls through to the guarded setter at vtable
+// +0xa4, which refuses and returns 0. With force non-zero it takes the
+// unconditional path at vtable +0xac instead. Every wrapper in the game passes
+// 0 here; nothing in the binary ever forces.
+constexpr uintptr_t kSetFlagBoolTypedWiiU = 0x032163cc;
+
+// Manager fields 0x032002d4 reads, mirrored here because forcing means
+// reimplementing that wrapper rather than calling it.
+constexpr uintptr_t kManagerStatusBits = 0x730;   // bit 0x12 blocks all writes
+constexpr uintptr_t kManagerWriteGate = 0x716;    // non-zero blocks bool writes
+constexpr uintptr_t kManagerMirrorGate = 0x715;   // non-zero -> write both cores
+constexpr uintptr_t kManagerFlagByte = 0x714;
+constexpr uintptr_t kManagerBoolCore = 0x70c;
+constexpr uintptr_t kManagerBoolCoreMirror = 0x710;
+
+constexpr uintptr_t kS32ContainerOffset = 0x10;
+constexpr uintptr_t kBoolContainerOffset = 0x04;
+
+// The containers are 0x0c apart and the first is at core+0x04, not at the s32
+// one. Confirmed against a live v208 save: all 18 stores in the canonical gdt
+// type order, with bool at 0x04 (42025 entries) sitting BEFORE s32 at 0x10.
+// Every non-bool count matches its ROM gamedata category exactly. The store
+// after s32 is f32, not bool - a probe that only walks forward from the s32
+// container misses the largest store in the game. Full table in
+// data/symbols-wiiu-v208.csv.
+constexpr uintptr_t kFirstContainerOffset = 0x04;
+constexpr uintptr_t kContainerStride = 0x0c;
+constexpr int kFlagStoreCount = 18;
+constexpr uintptr_t kContainerCount = 0x00;
+constexpr uintptr_t kContainerEntries = 0x08;
+
+// Virtual slot returning a flag object's name hash, from the binary search in
+// 0x03208cd4.
+constexpr uintptr_t kFlagHashVtableSlot = 0x14;
+
+// A store with more entries than this is a bad read rather than a big save.
+constexpr int kMaxFlagsInStore = 100000;
+
+using FindFlagIndexByNameFn = int (*)(void* container, const SafeString* name, int one);
+using GetFlagS32ByIndexFn = int (*)(int* out, void* container, int index, uint8_t flags);
+
+// bool reads land in a word that is deliberately over-sized and zero-filled:
+// whether the game writes one byte or four, testing the whole word against zero
+// gives the right answer on big-endian, where a single-byte store lands in the
+// most significant byte.
+using GetFlagBoolByIndexFn = int (*)(uint32_t* out, void* container, int index, uint8_t flags);
+using GetFlagBoolByNameFn = int (*)(void* core, uint32_t* out, const SafeString* name,
+                                    uint8_t flags, int one);
+using SetFlagBoolByNameFn = int (*)(void* manager, int value, const SafeString* name);
+using SetFlagBoolTypedFn = int (*)(void* core, int value, const SafeString* name,
+                                   uint8_t flags, int one, int force);
+using GetFlagHashFn = uint32_t (*)(void* flagObject);
+
+// Sanity check for a pointer read out of game memory: catches null, small
+// integers and obvious garbage without pretending to know the memory map.
+//
+// The upper bound was 0xa0000000 and that was wrong. gdt's bool write core,
+// **(void***)(manager + 0x70c), measured live at 0xa0000238 - just past it - so
+// the check silently rejected a pointer the game itself dereferences on every
+// bool write, and any code guarding on it failed for a reason that looked
+// nothing like a bad bound. Only the read core at manager+0x700 (0x676eac48 in
+// the same session) fell inside the old range, which is why reads worked and
+// writes did not.
+inline bool Plausible(const void* p) {
+    uintptr_t addr = reinterpret_cast<uintptr_t>(p);
+    return addr >= 0x10000000 && addr < 0xf0000000;
+}
+
+// The manager, the flag core and the u8 every read wants, resolved together
+// because no caller needs one without the others.
+struct FlagAccess {
+    void* manager;
+    void* core;
+    void* s32Container;
+    uint8_t flags;
+};
+
+inline bool ResolveFlagAccess(FlagAccess& out) {
+#if !WIIXL_SWITCH
+    void* manager = GameDataManager();
+    if (!manager) return false;
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(manager);
+    uintptr_t* slot = *reinterpret_cast<uintptr_t**>(base + 0x700);
+    if (!Plausible(slot)) return false;
+
+    void* core = *reinterpret_cast<void**>(slot);
+    if (!Plausible(core)) return false;
+
+    out.manager = manager;
+    out.core = core;
+    out.s32Container = reinterpret_cast<void*>(
+        reinterpret_cast<uintptr_t>(core) + kS32ContainerOffset);
+    out.flags = *reinterpret_cast<uint8_t*>(base + 0x704);
+    return true;
+#else
+    (void)out;
+    return false;
+#endif
+}
+
+inline SafeString MakeSafeString(const char* text) {
+    SafeString s = { text, reinterpret_cast<const void*>(kSeadSafeStringVtableWiiU) };
+    return s;
+}
+
+// Resolves one store slot: validates the index against the container's count
+// and hands back the container plus the flag object's name hash. Shared by
+// every typed enumerator, which then only has to do its own read.
+inline bool StoreSlot(uint32_t containerOffset, int index, FlagAccess& access,
+                      void*& container, uint32_t& hash) {
+#if !WIIXL_SWITCH
+    if (index < 0 || !ResolveFlagAccess(access)) return false;
+
+    uintptr_t at = reinterpret_cast<uintptr_t>(access.core) + containerOffset;
+
+    int count = *reinterpret_cast<int*>(at + kContainerCount);
+    if (count < 0 || count > kMaxFlagsInStore || index >= count) return false;
+
+    void** entries = *reinterpret_cast<void***>(at + kContainerEntries);
+    if (!Plausible(entries)) return false;
+
+    void* object = entries[index];
+    if (!Plausible(object)) return false;
+
+    uintptr_t vtable = *reinterpret_cast<uintptr_t*>(object);
+    if (!Plausible(reinterpret_cast<void*>(vtable))) return false;
+
+    auto getHash = *reinterpret_cast<GetFlagHashFn*>(vtable + kFlagHashVtableSlot);
+    if (!getHash) return false;
+
+    container = reinterpret_cast<void*>(at);
+    hash = getHash(object);
+    return true;
+#else
+    (void)containerOffset; (void)index; (void)access; (void)container; (void)hash;
+    return false;
+#endif
+}
+
+// Entry count of one store, or 0 when unavailable.
+inline int StoreCount(uint32_t containerOffset) {
+#if !WIIXL_SWITCH
+    FlagAccess access;
+    if (!ResolveFlagAccess(access)) return 0;
+
+    uintptr_t at = reinterpret_cast<uintptr_t>(access.core) + containerOffset;
+    int count = *reinterpret_cast<int*>(at + kContainerCount);
+    if (count < 0 || count > kMaxFlagsInStore) return 0;
+    return count;
+#else
+    (void)containerOffset;
+    return 0;
+#endif
+}
+
+} // namespace impl
+
+// Reads any s32 flag by name. False when there is no save loaded or the name is
+// not an s32 flag - a bool or f32 flag of that name lives in a different store
+// and will read as absent here rather than as the wrong type.
+inline bool GetFlagS32(const char* name, int& out) {
+#if !WIIXL_SWITCH
+    impl::FlagAccess access;
+    if (!name || !impl::ResolveFlagAccess(access)) return false;
+
+    auto get = WiiXLaunch::GetTargetFunction<impl::GetFlagS32ByNameFn>(
+        0x0, impl::kGetFlagS32ByNameWiiU);
+    if (!get) return false;
+
+    impl::SafeString key = impl::MakeSafeString(name);
+    int value = 0;
+    if (get(access.core, &value, &key, access.flags, 1) == 0) return false;
+
+    out = value;
+    return true;
+#else
+    (void)name; (void)out;
+    return false;
+#endif
+}
+
+// Writes any s32 flag by name, absolutely.
+inline bool SetFlagS32(const char* name, int value) {
+#if !WIIXL_SWITCH
+    impl::FlagAccess access;
+    if (!name || !impl::ResolveFlagAccess(access)) return false;
+
+    auto set = WiiXLaunch::GetTargetFunction<impl::SetFlagS32ByNameFn>(
+        0x0, impl::kSetFlagS32ByNameWiiU);
+    if (!set) return false;
+
+    impl::SafeString key = impl::MakeSafeString(name);
+    set(access.manager, value, &key);
+    return true;
+#else
+    (void)name; (void)value;
+    return false;
+#endif
+}
+
+// The game's deferred add: pushes the delta onto the per-thread queue at
+// manager+0x71c, which drains on a later frame. The write lands, but it is NOT
+// observable in a read taken straight afterwards, so a caller that reports the
+// value back immediately will report the old one.
+//
+// AddFlagS32 is what you usually want. This is here because it is the game's
+// own primitive and it is atomic against other writers, which the read-add-set
+// alternative is not.
+inline bool QueueFlagS32Delta(const char* name, int delta) {
+#if !WIIXL_SWITCH
+    if (!name) return false;
+
+    auto add = WiiXLaunch::GetTargetFunction<impl::IncreaseFlagS32ByNameFn>(
+        0x0, impl::kIncreaseFlagS32ByNameWiiU);
+    if (!add) return false;
+
+    impl::SafeString key = impl::MakeSafeString(name);
+    add(delta, &key, 0);
+    return true;
+#else
+    (void)name; (void)delta;
+    return false;
+#endif
+}
+
+// Adds to any s32 flag by name. Negative deltas subtract.
+//
+// Read, add, absolute store - which is exactly what 0x03204a14 does in its
+// immediate branch when the delta queue is disabled. Chosen over the queued
+// primitive so the result is observable straight away; queueing leaves a reader
+// looking at the pre-write value for a frame, which makes any API that echoes
+// the value back a liar. The tradeoff is that this is not atomic against
+// another writer touching the same flag in the same frame - see
+// QueueFlagS32Delta if that matters more than immediacy.
+inline bool AddFlagS32(const char* name, int delta) {
+#if !WIIXL_SWITCH
+    int current = 0;
+    if (!GetFlagS32(name, current)) return false;
+    return SetFlagS32(name, current + delta);
+#else
+    (void)name; (void)delta;
+    return false;
+#endif
+}
+
+// How many s32 flags the save holds. 0 when unavailable, which is also a
+// legitimate-looking answer, so check SupportsFlags and a known flag first if
+// the distinction matters.
+inline int FlagS32Count() { return impl::StoreCount(impl::kS32ContainerOffset); }
+
+// How many bool flags the save holds - by far the largest store, around 42000.
+inline int FlagBoolCount() { return impl::StoreCount(impl::kBoolContainerOffset); }
+
+// One s32 flag by store index, giving its name hash and value. Enumeration is
+// hash-only by necessity: the store does not keep names.
+inline bool GetFlagS32ByIndex(int index, uint32_t& hash, int& value) {
+#if !WIIXL_SWITCH
+    impl::FlagAccess access;
+    void* container = nullptr;
+    uint32_t foundHash = 0;
+    if (!impl::StoreSlot(impl::kS32ContainerOffset, index, access, container, foundHash)) {
+        return false;
+    }
+
+    auto read = WiiXLaunch::GetTargetFunction<impl::GetFlagS32ByIndexFn>(
+        0x0, impl::kGetFlagS32ByIndexWiiU);
+    if (!read) return false;
+
+    int readValue = 0;
+    if (read(&readValue, container, index, access.flags) == 0) return false;
+
+    hash = foundHash;
+    value = readValue;
+    return true;
+#else
+    (void)index; (void)hash; (void)value;
+    return false;
+#endif
+}
+
+// Reads any bool flag by name - the store holding every IsGet_*, shrine, Korok
+// and story flag.
+inline bool GetFlagBool(const char* name, bool& out) {
+#if !WIIXL_SWITCH
+    impl::FlagAccess access;
+    if (!name || !impl::ResolveFlagAccess(access)) return false;
+
+    auto get = WiiXLaunch::GetTargetFunction<impl::GetFlagBoolByNameFn>(
+        0x0, impl::kGetFlagBoolByNameWiiU);
+    if (!get) return false;
+
+    impl::SafeString key = impl::MakeSafeString(name);
+    uint32_t value = 0;
+    if (get(access.core, &value, &key, access.flags, 1) == 0) return false;
+
+    out = value != 0;
+    return true;
+#else
+    (void)name; (void)out;
+    return false;
+#endif
+}
+
+// Writes any bool flag by name.
+inline bool SetFlagBool(const char* name, bool value) {
+#if !WIIXL_SWITCH
+    impl::FlagAccess access;
+    if (!name || !impl::ResolveFlagAccess(access)) return false;
+
+    auto set = WiiXLaunch::GetTargetFunction<impl::SetFlagBoolByNameFn>(
+        0x0, impl::kSetFlagBoolByNameWiiU);
+    if (!set) return false;
+
+    impl::SafeString key = impl::MakeSafeString(name);
+    return set(access.manager, value ? 1 : 0, &key) != 0;
+#else
+    (void)name; (void)value;
+    return false;
+#endif
+}
+
+// Clears or sets a bool flag past the two things that normally stop it.
+//
+// There are TWO independent refusals, and they come from different flag
+// properties declared in the ROM's gamedata:
+//
+//   IsOneTrigger      the flag latches; once true the guarded setter at vtable
+//                     +0xa4 refuses to clear it. Bypassed by the force argument
+//                     to 0x032354bc.
+//   IsProgramWritable false means the flag is meant to be driven only by the
+//                     event and quest system, never by a program write. This is
+//                     checked earlier, in the `if (param_5 != 0)` block at the
+//                     top of 0x032354bc, where param_5 is the manager's flag
+//                     byte from +0x714: it calls vtable +0x34 then 0x0324d1d0
+//                     and bails returning 0 when that says no. Passing 0 for
+//                     that argument skips the block entirely.
+//
+// bypassPermission drives the second. Nearly every quest flag needs it -
+// measured, only 9 of 103 Divine Beast quest flags are program-writable, while
+// all 25 of the beast state flags are - so without it a quest reset mostly
+// fails while looking like a latch problem.
+//
+// This is a faithful copy of 0x032002d4 - same status-bit guard, same write
+// gate, same mirrored second write - with exactly one argument changed. It is
+// separate from SetFlagBool rather than a parameter on it because latching is
+// the game's own rule about its own save data: the default path should respect
+// it, and stepping outside should have to be asked for.
+//
+// Forcing a story flag backwards can leave a quest in a state its event flow
+// never produces, which the game has no reason to be able to recover from.
+// Back up the save first.
+inline bool SetFlagBoolForced(const char* name, bool value, bool bypassPermission = false) {
+#if !WIIXL_SWITCH
+    impl::FlagAccess access;
+    if (!name || !impl::ResolveFlagAccess(access)) return false;
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(access.manager);
+
+    if ((*reinterpret_cast<uint32_t*>(base + impl::kManagerStatusBits) >> 0x12) & 1) return false;
+    if (*reinterpret_cast<char*>(base + impl::kManagerWriteGate) != 0) return false;
+
+    auto set = WiiXLaunch::GetTargetFunction<impl::SetFlagBoolTypedFn>(
+        0x0, impl::kSetFlagBoolTypedWiiU);
+    if (!set) return false;
+
+    uintptr_t* slot = *reinterpret_cast<uintptr_t**>(base + impl::kManagerBoolCore);
+    if (!impl::Plausible(slot)) return false;
+    void* core = *reinterpret_cast<void**>(slot);
+    if (!impl::Plausible(core)) return false;
+
+    impl::SafeString key = impl::MakeSafeString(name);
+
+    // Zero here is what skips the writability check; the manager's real byte
+    // (1 in practice) is what enables it.
+    const uint8_t flags = bypassPermission
+                        ? 0
+                        : *reinterpret_cast<uint8_t*>(base + impl::kManagerFlagByte);
+    const int written = value ? 1 : 0;
+
+    if (set(core, written, &key, flags, 1, 1) == 0) return false;
+
+    // The wrapper mirrors into the second core when this gate is set; skipping
+    // it would leave the two disagreeing.
+    if (*reinterpret_cast<char*>(base + impl::kManagerMirrorGate) != 0) {
+        uintptr_t* mirrorSlot = *reinterpret_cast<uintptr_t**>(base + impl::kManagerBoolCoreMirror);
+        if (impl::Plausible(mirrorSlot)) {
+            void* mirror = *reinterpret_cast<void**>(mirrorSlot);
+            if (impl::Plausible(mirror)) set(mirror, written, &key, flags, 1, 1);
+        }
+    }
+
+    return true;
+#else
+    (void)name; (void)value;
+    return false;
+#endif
+}
+
+// Raw view of the manager fields both write paths depend on. Exists because a
+// forced write can fail for several indistinguishable reasons - a status bit, a
+// gate byte, or a core pointer that does not resolve - and guessing between
+// them costs a rebuild and a game reload each time.
+struct FlagDebug {
+    uintptr_t manager;
+    uint32_t status;      // +0x730, bit 0x12 blocks writes
+    uint8_t flagByte;     // +0x714, passed to every typed call
+    uint8_t mirrorGate;   // +0x715
+    uint8_t writeGate;    // +0x716
+    uintptr_t slot[4];    // raw words at +0x6fc, +0x700, +0x70c, +0x710
+    uintptr_t core[4];    // those dereferenced once more, 0 if implausible
+};
+
+inline bool GetFlagDebug(FlagDebug& out) {
+#if !WIIXL_SWITCH
+    void* manager = impl::GameDataManager();
+    if (!manager) return false;
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(manager);
+    out.manager = base;
+    out.status = *reinterpret_cast<uint32_t*>(base + impl::kManagerStatusBits);
+    out.flagByte = *reinterpret_cast<uint8_t*>(base + impl::kManagerFlagByte);
+    out.mirrorGate = *reinterpret_cast<uint8_t*>(base + impl::kManagerMirrorGate);
+    out.writeGate = *reinterpret_cast<uint8_t*>(base + impl::kManagerWriteGate);
+
+    static const uintptr_t kOffsets[4] = { 0x6fc, 0x700, 0x70c, 0x710 };
+    for (int i = 0; i < 4; ++i) {
+        uintptr_t slot = *reinterpret_cast<uintptr_t*>(base + kOffsets[i]);
+        out.slot[i] = slot;
+        out.core[i] = impl::Plausible(reinterpret_cast<void*>(slot))
+                    ? *reinterpret_cast<uintptr_t*>(slot)
+                    : 0;
+    }
+    return true;
+#else
+    (void)out;
+    return false;
+#endif
+}
+
+// One bool flag by store index, giving its name hash and value.
+inline bool GetFlagBoolByIndex(int index, uint32_t& hash, bool& value) {
+#if !WIIXL_SWITCH
+    impl::FlagAccess access;
+    void* container = nullptr;
+    uint32_t foundHash = 0;
+    if (!impl::StoreSlot(impl::kBoolContainerOffset, index, access, container, foundHash)) {
+        return false;
+    }
+
+    auto read = WiiXLaunch::GetTargetFunction<impl::GetFlagBoolByIndexFn>(
+        0x0, impl::kGetFlagBoolByIndexWiiU);
+    if (!read) return false;
+
+    uint32_t readValue = 0;
+    if (read(&readValue, container, index, access.flags) == 0) return false;
+
+    hash = foundHash;
+    value = readValue != 0;
+    return true;
+#else
+    (void)index; (void)hash; (void)value;
+    return false;
+#endif
+}
+
+// Walks the flag stores, reporting each one's offset and entry count. Store 0
+// is bool at core+0x04 and store 1 is the s32 one at core+0x10.
+//
+// Returns false once the offset stops looking like a container, or past the end
+// of the type list.
+inline bool GetFlagStoreCount(int storeIndex, uint32_t& offset, int& count) {
+#if !WIIXL_SWITCH
+    impl::FlagAccess access;
+    if (storeIndex < 0 || storeIndex >= impl::kFlagStoreCount ||
+        !impl::ResolveFlagAccess(access)) return false;
+
+    const uint32_t at = impl::kFirstContainerOffset +
+                        static_cast<uint32_t>(storeIndex) * impl::kContainerStride;
+    uintptr_t container = reinterpret_cast<uintptr_t>(access.core) + at;
+
+    int found = *reinterpret_cast<int*>(container + impl::kContainerCount);
+    if (found < 0 || found > impl::kMaxFlagsInStore) return false;
+
+    void** entries = *reinterpret_cast<void***>(container + impl::kContainerEntries);
+    if (found > 0 && !impl::Plausible(entries)) return false;
+
+    offset = at;
+    count = found;
+    return true;
+#else
+    (void)storeIndex; (void)offset; (void)count;
     return false;
 #endif
 }
