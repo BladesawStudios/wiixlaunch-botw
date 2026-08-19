@@ -32,10 +32,9 @@ inline TickCallback& TickCallbackRef() {
 
 #if !WIIXL_SWITCH
 
-// Position offsets: +0x204/+0x214/+0x224 (x/y/z, 0x10 apart).
-constexpr uint32_t kPosXOffset = 0x204;
-constexpr uint32_t kPosYOffset = 0x214;
-constexpr uint32_t kPosZOffset = 0x224;
+// Position offsets come from actor.hpp - kPosXOffset/kPosYOffset/kPosZOffset
+// are the translation column of the actor's sead::Matrix34f at +0x1F8, which
+// is why they are 0x10 apart rather than 4. They used to be redeclared here.
 
 // Attack counter at +0x4d8 (increments by 1 per swing).
 constexpr uint32_t kAttackCounterOffset = 0x4d8;
@@ -98,9 +97,31 @@ public:
         impl::PlayerTickHook::Install(0x873374, 0x02d67cf4);
     }
 
-    // Escape hatch to the raw ksys::act::Player* for anything not yet
-    // wrapped here. Null until the first tick after Init().
-    static void* GetRaw() { return impl::RawPlayerRef(); }
+    // Escape hatch to the raw ksys::act::Player* (GameROMPlayer).
+    static void* GetRaw() {
+#if !WIIXL_SWITCH
+        auto isValidPtr = [](const void* p) {
+            uintptr_t v = reinterpret_cast<uintptr_t>(p);
+            return v >= 0x10000000 && v < 0xa0000000;
+        };
+
+        uint8_t** ppPlayerTracker = reinterpret_cast<uint8_t**>(0x10463f38);
+        if (ppPlayerTracker && isValidPtr(*ppPlayerTracker)) {
+            uint8_t* tracker = *ppPlayerTracker;
+            void* linkMgr = *reinterpret_cast<void**>(tracker + 0x34);
+            uint32_t procId = *reinterpret_cast<uint32_t*>(tracker + 0x38);
+            uint8_t flag = *reinterpret_cast<uint8_t*>(tracker + 0x3c);
+
+            if (linkMgr && isValidPtr(linkMgr)) {
+                using GetProcFn = void* (*)(void* mgr, uint32_t id, uint8_t flag);
+                auto getProc = WiiXLaunch::GetTargetFunction<GetProcFn>(0x0, 0x0378d8dc);
+                void* playerActor = getProc(linkMgr, procId, flag);
+                if (playerActor && isValidPtr(playerActor)) return playerActor;
+            }
+        }
+#endif
+        return impl::RawPlayerRef();
+    }
 
     // Registers a callback run once per frame, right after Player's own
     // cached state (weapon getters, position, attack tracking) has been
