@@ -81,13 +81,15 @@ inline int GetMaxLife() {
 // verifying is worse than no verify: it produces confident, wrong answers.
 // Observe the result with GetMaxLife() on a later frame instead.
 //
-// Returns true if the call was made. Bogus values are refused rather than
-// committed, since this writes persistent player progression - 4..120 raw units
-// is 1..30 hearts, the game's own normal range.
+// Returns true if the call was made.
+//
+// No range limit. The game does not impose one here either - gdt::setF32/setS32
+// validate the handle and write-protection bits, never the value, and neither
+// PlayerInfo::setMaxHeartValue nor setStaminaMax clamps. 30 hearts is where the
+// HUD stops drawing, not where the data stops accepting. This writes persistent
+// save data, so whatever you pass is what your playthrough gets.
 inline bool SetMaxLife(int rawUnits) {
 #if !WIIXL_SWITCH
-    if (rawUnits < 4 || rawUnits > 120) return false;
-
     void* playerInfo = impl::PlayerInfo();
     if (!playerInfo) return false;
 
@@ -164,6 +166,8 @@ inline float CallStaminaGetter(uintptr_t wiiuOffset) {
 static constexpr bool SupportsStamina = !WIIXL_SWITCH;
 
 constexpr float kStaminaPerWheel = 1000.0f;
+// What a fully upgraded player has, and where the HUD stops drawing - NOT an
+// enforced limit. Used only as a fallback when the real max cannot be read.
 constexpr float kStaminaMaxWheels = 3.0f;
 constexpr float kStaminaAbsoluteMax = kStaminaPerWheel * kStaminaMaxWheels;
 
@@ -177,15 +181,12 @@ inline float GetMaxStamina() { return impl::CallStaminaGetter(impl::kGetStaminaM
 // exposed so a disagreement is visible rather than mysterious.
 inline float GetActorMaxStamina() { return impl::CallStaminaGetter(impl::kGetActorMaxStaminaWiiU); }
 
-// Sets live stamina. Clamped to 0..max rather than refused, since "fill it up"
-// is the common case and the ceiling is whatever the player has earned.
+// Sets live stamina. No range limit - values above max or below zero are passed
+// through as given. The only rejection is NaN, which is not a range check but a
+// guard against handing the game a non-value.
 inline bool SetStamina(float wheelUnits) {
 #if !WIIXL_SWITCH
-    if (!(wheelUnits >= 0.0f)) return false;          // NaN-safe
-
-    float max = GetMaxStamina();
-    if (!(max > 0.0f)) max = kStaminaAbsoluteMax;     // no reading; fall back to the cap
-    if (wheelUnits > max) wheelUnits = max;
+    if (wheelUnits != wheelUnits) return false;       // NaN
 
     void* playerInfo = impl::PlayerInfo();
     if (!playerInfo) return false;
@@ -200,21 +201,25 @@ inline bool SetStamina(float wheelUnits) {
 #endif
 }
 
-// Restores stamina to full - what the game's own recoverStamina() does.
-inline bool RecoverStamina() { return SetStamina(kStaminaAbsoluteMax); }
+// Restores stamina to full - what the game's own recoverStamina() does. Reads
+// the actual max rather than assuming three wheels, which matters now that
+// SetMaxStamina will accept anything.
+inline bool RecoverStamina() {
+    float max = GetMaxStamina();
+    if (!(max > 0.0f)) max = kStaminaAbsoluteMax;
+    return SetStamina(max);
+}
 
 // Sets max stamina in both places the game keeps it: the StaminaMax flag (which
 // persists to the save) and the player actor's copy. Does NOT touch current
 // stamina - that is a separate value, and conflating them is what the flag
 // naming tempts you into.
 //
-// Refuses values outside 1000..3000 (one to three wheels) rather than
-// committing them, since the flag write is persistent.
+// No range limit, same as SetMaxLife - the three-wheel cap is a HUD limit, not
+// a data one. NaN is still rejected. The flag write is persistent.
 inline bool SetMaxStamina(float wheelUnits) {
 #if !WIIXL_SWITCH
-    if (!(wheelUnits >= kStaminaPerWheel) || !(wheelUnits <= kStaminaAbsoluteMax)) {
-        return false;   // NaN-safe: NaN fails both comparisons
-    }
+    if (wheelUnits != wheelUnits) return false;       // NaN
 
     void* playerInfo = impl::PlayerInfo();
     if (!playerInfo) return false;
