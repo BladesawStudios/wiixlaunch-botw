@@ -36,7 +36,23 @@ enum class Slot : int {
     ArmorHead = 4,
     ArmorUpper = 5,
     ArmorLower = 6,
+    Material = 7,
+    Food = 8,
+    KeyItem = 9,
 };
+
+// 7/8/9 are never equipped, so nothing keyed off the equipped byte will find
+// them - they are reachable only by enumerating the pouch. See ForEachOfType.
+inline bool IsEquippableSlot(Slot slot) { return static_cast<int>(slot) < 7; }
+
+// Whether an entry's value field means anything. It does for every type except
+// armour: durability for weapons, a count for arrows, materials and key items.
+// Armour entries carry a number too, but nothing reads it and the save path
+// ratchets it upward once per save/load cycle - see SetEquippedValue. Callers
+// should omit it rather than report a figure that invites a meaning.
+inline bool HasMeaningfulValue(Slot slot) {
+    return slot != Slot::ArmorHead && slot != Slot::ArmorUpper && slot != Slot::ArmorLower;
+}
 
 // The game's own setter refuses anything >= 4 (isPouchItemNotWeapon). Arrows
 // are type 2 and so still go through it; the armour slots are read-only here.
@@ -107,9 +123,16 @@ inline bool PlausiblePointer(uintptr_t addr) {
 // on the game thread out of the frame hook, the fields read here are single
 // aligned words that cannot tear, and taking a lock the game also takes from
 // inside a request handler is a stall risk with nothing to buy it.
-inline uintptr_t FindEquipped(int type, int* outIndex = nullptr) {
+// Walks the pouch in list order, calling visit(node, index) on each entry and
+// stopping early if it returns false. Returns entries visited.
+//
+// The traversal is the game's own, from 0x02eb67f4: start at +0x50, stop when
+// the node comes back around to the +0x4c sentinel, step through the link at
+// nodeOffset+4. The index it hands the visitor is the pouch index the
+// PorchItem_* flags are keyed by, not a position within one category.
+template <typename Fn>
+inline int WalkItems(Fn visit) {
 #if !WIIXL_SWITCH
-    if (outIndex) *outIndex = -1;
     void* manager = PauseMenuDataMgr();
     if (!manager) return 0;
 
@@ -118,19 +141,59 @@ inline uintptr_t FindEquipped(int type, int* outIndex = nullptr) {
     uintptr_t sentinel = base + kItemListHead - nodeOffset;
     uintptr_t node = *reinterpret_cast<uintptr_t*>(base + kItemListFirst) - nodeOffset;
 
-    for (int walked = 0; node != sentinel && walked < kMaxItemsWalked; ++walked) {
-        if (!PlausiblePointer(node)) return 0;
-        if (*reinterpret_cast<uint8_t*>(node + kItemEquipped) != 0 &&
-            *reinterpret_cast<int32_t*>(node + kItemType) == type) {
-            if (outIndex) *outIndex = walked;
-            return node;
-        }
+    int walked = 0;
+    while (node != sentinel && walked < kMaxItemsWalked) {
+        if (!PlausiblePointer(node)) break;
+        const bool keepGoing = visit(node, walked);
+        ++walked;
+        if (!keepGoing) break;
         node = *reinterpret_cast<uintptr_t*>(node + nodeOffset + 4) - nodeOffset;
     }
+    return walked;
+#else
+    (void)visit;
+    return 0;
+#endif
+}
+
+// The name pointer off an entry, validated. See GetEquippedName for why the
+// char* is at +0x18 rather than the +0x1c a plain sead::SafeString would use.
+inline const char* ReadName(uintptr_t item) {
+#if !WIIXL_SWITCH
+    uintptr_t text = *reinterpret_cast<uintptr_t*>(item + kItemName);
+    if (!PlausiblePointer(text)) return nullptr;
+
+    const char* name = reinterpret_cast<const char*>(text);
+    if (name[0] < 0x20 || name[0] > 0x7e) return nullptr;
+    return name;
+#else
+    (void)item;
+    return nullptr;
+#endif
+}
+
+inline uintptr_t FindEquipped(int type, int* outIndex = nullptr) {
+#if !WIIXL_SWITCH
+    if (outIndex) *outIndex = -1;
+
+    uintptr_t found = 0;
+    int foundIndex = -1;
+    WalkItems([&](uintptr_t node, int index) {
+        if (*reinterpret_cast<uint8_t*>(node + kItemEquipped) != 0 &&
+            *reinterpret_cast<int32_t*>(node + kItemType) == type) {
+            found = node;
+            foundIndex = index;
+            return false;
+        }
+        return true;
+    });
+
+    if (found && outIndex) *outIndex = foundIndex;
+    return found;
 #else
     (void)type; (void)outIndex;
-#endif
     return 0;
+#endif
 }
 
 } // namespace impl
@@ -210,16 +273,58 @@ inline const char* GetEquippedName(Slot slot) {
     uintptr_t item = impl::FindEquipped(static_cast<int>(slot));
     if (!item) return nullptr;
 
-    uintptr_t text = *reinterpret_cast<uintptr_t*>(item + impl::kItemName);
-    if (!impl::PlausiblePointer(text)) return nullptr;
-
-    const char* name = reinterpret_cast<const char*>(text);
-    if (name[0] < 0x20 || name[0] > 0x7e) return nullptr;
-    return name;
+    return impl::ReadName(item);
 #else
     (void)slot;
     return nullptr;
 #endif
+}
+
+// One pouch entry, as handed to ForEachOfType.
+struct Entry {
+    const char* name;   // null if the entry's name pointer did not validate
+    int value;          // count for materials, durability for weapons
+    int index;          // pouch index, the key the PorchItem_* flags use
+    bool equipped;
+};
+
+// Visits every entry of one type in pouch order. visit returns false to stop
+// early. Returns the number of MATCHING entries seen, which for an interrupted
+// walk is the number visited rather than the number that exist.
+//
+// This is the only way to reach Material (7), Food (8) and KeyItem (9): none of
+// them are ever equipped, so every lookup keyed off the equipped byte misses
+// them entirely. It works for the equippable types too - enumerating every
+// sword you own rather than just the one in hand.
+template <typename Fn>
+inline int ForEachOfType(Slot slot, Fn visit) {
+#if !WIIXL_SWITCH
+    const int type = static_cast<int>(slot);
+    int matched = 0;
+
+    impl::WalkItems([&](uintptr_t node, int index) {
+        if (*reinterpret_cast<int32_t*>(node + impl::kItemType) != type) return true;
+
+        Entry entry;
+        entry.name = impl::ReadName(node);
+        entry.value = *reinterpret_cast<int32_t*>(node + impl::kItemValue);
+        entry.index = index;
+        entry.equipped = *reinterpret_cast<uint8_t*>(node + impl::kItemEquipped) != 0;
+
+        ++matched;
+        return visit(entry);
+    });
+
+    return matched;
+#else
+    (void)slot; (void)visit;
+    return 0;
+#endif
+}
+
+// How many entries of a type the pouch holds.
+inline int CountOfType(Slot slot) {
+    return ForEachOfType(slot, [](const Entry&) { return true; });
 }
 
 } // namespace WiiXLaunch::BotW::Pouch
