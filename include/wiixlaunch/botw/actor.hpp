@@ -631,30 +631,20 @@ public:
 #endif
     }
 
-    void SetMaxLife(int maxLife) {
-#if !WIIXL_SWITCH
-        if (!m_Ptr) return;
-        uint8_t* ptr = static_cast<uint8_t*>(m_Ptr);
-        void** vtable = *reinterpret_cast<void***>(ptr + 0xe8);
-        if (!vtable) return;
-        uintptr_t vtAddr = reinterpret_cast<uintptr_t>(vtable);
-        if (vtAddr < 0x02000000 || vtAddr > 0x10600000) return;
+    // Max life cannot be set through the actor. getMaxLife() reads a cache at
+    // actor+0x1320; the authoritative, save-backed value is the GameData flag
+    // MaxHartValue, and nothing re-syncs the cache from it. Writing here shows
+    // the new value for a frame, then reverts, and the HUD plays the
+    // heart-container-removed (Horned Statue) effect on the way back down.
+    //
+    // Use GameData::SetMaxLife (gamedata.hpp), which calls the game's own
+    // PlayerInfo::setMaxHeartValue - flag and caches together. Kept here as an
+    // explicit no-op so this does not get reimplemented the wrong way again.
+    static constexpr bool SupportsSetMaxLife = false;
 
-        using GetLifePtrFn = int* (*)(void* actor);
-        auto fn = reinterpret_cast<GetLifePtrFn>(vtable[0x2bc / 4]);
-        if (!fn) return;
-        uintptr_t fnAddr = reinterpret_cast<uintptr_t>(fn);
-        if (fnAddr < 0x02000000 || fnAddr > 0x04000000) return;
-
-        int* pLife = fn(m_Ptr);
-        if (!pLife) return;
-        uintptr_t lifeAddr = reinterpret_cast<uintptr_t>(pLife);
-        if (lifeAddr < 0x10000000 || lifeAddr > 0xa0000000 || (lifeAddr & 3) != 0) return;
-
-        *(pLife + 1) = maxLife;
-#else
+    bool SetMaxLife(int maxLife) {
         (void)maxLife;
-#endif
+        return false;
     }
 
     // Convenience helpers converting between integer Life units (4 per heart) and floating-point hearts
@@ -662,7 +652,9 @@ public:
     void SetCurrentHearts(float hearts) { SetCurrentLife(static_cast<int>(hearts * 4.0f + 0.5f)); }
 
     float GetMaxHearts() const { return GetMaxLife() / 4.0f; }
-    void SetMaxHearts(float hearts) { SetMaxLife(static_cast<int>(hearts * 4.0f + 0.5f)); }
+    bool SetMaxHearts(float hearts) { return SetMaxLife(static_cast<int>(hearts * 4.0f + 0.5f)); }
+
+
 
     struct Vec3 {
         float x = 0.0f;

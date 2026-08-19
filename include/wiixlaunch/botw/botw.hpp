@@ -11,6 +11,7 @@
 
 #include "actor.hpp"
 #include "player.hpp"
+#include "gamedata.hpp"
 #include "controller.hpp"
 #include "camera.hpp"
 #include "flyt.hpp"
