@@ -522,11 +522,17 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(KPADReadExWrapperHook) {
 
             if (extensionType == kExtProController) {
                 uint32_t proHold = *reinterpret_cast<uint32_t*>(kpad + 0x60);
-                if (proHold == 0) continue;
                 float lx = *reinterpret_cast<float*>(kpad + 0x6C);
                 float ly = *reinterpret_cast<float*>(kpad + 0x70);
                 float rx = *reinterpret_cast<float*>(kpad + 0x74);
                 float ry = *reinterpret_cast<float*>(kpad + 0x78);
+                // The skip has to consider the sticks, not just the buttons.
+                // Testing proHold alone reads as "this slot is idle" whenever
+                // no button happens to be down, so a Pro Controller being
+                // pushed around with nothing held would fall through to the
+                // next slot and leave the cleared state in place - sticks that
+                // only report while some other button is held.
+                if (proHold == 0 && lx == 0.0f && ly == 0.0f && rx == 0.0f && ry == 0.0f) continue;
                 StoreState(KpadStateRef(), TranslateToCanonical(proHold, PadSource::WPAD_PRO), lx, ly, rx, ry);
                 break;
             } else if (extensionType == kExtNunchuk || extensionType == kExtMplusNunchuk) {

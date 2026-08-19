@@ -245,4 +245,154 @@ inline bool SetStaminaWheels(float wheels) { return SetStamina(wheels * kStamina
 inline float GetMaxStaminaWheels() { return GetMaxStamina() / kStaminaPerWheel; }
 inline bool SetMaxStaminaWheels(float wheels) { return SetMaxStamina(wheels * kStaminaPerWheel); }
 
+
+// ---------------------------------------------------------------------------
+// Rupees
+//
+// Rupees are not a pouch item and have nothing to do with PauseMenuDataMgr -
+// they are a plain scalar GameData flag named "CurrentRupee", which is why the
+// pouch walk never turns them up.
+//
+// Chain, the same one used for the other flags here: the string at 0x101fb72c
+// -> name accessor 0x02e1eb90 (a function whose whole body is `return
+// "CurrentRupee";`) -> the wrappers below.
+
+static constexpr bool SupportsRupees = !WIIXL_SWITCH;
+
+namespace impl {
+
+// gdt::increaseFlag_CurrentRupee(s32 delta, bool debug). NOT a setter, despite
+// the shape: it forwards to 0x02e147a4, which pushes {tag, nameHash, index,
+// delta} onto the per-thread ring buffer at manager+0x71c, and that queue holds
+// DELTAS. Proven by 0x03204a14, the rupee pickup path: its queued branch pushes
+// the pickup amount through the identical call, and its immediate branch reads
+// the flag and stores current + amount. Calling this with an absolute value
+// adds that value to the wallet - which reads as the total doubling if the
+// caller passes the current amount back in.
+constexpr uintptr_t kIncreaseFlagCurrentRupeeWiiU = 0x02e17f58;
+
+// gdt::setFlag_s32_byName(Manager*, s32 value, sead::SafeString* name). The
+// genuine absolute write, taken from the immediate branch of 0x03204a14, which
+// calls it with the already-summed total.
+constexpr uintptr_t kSetFlagS32ByNameWiiU = 0x0320400c;
+
+// The generic by-name s32 read. There is no dedicated CurrentRupee getter to
+// pair with the setter; this is how the game's own can-afford check at
+// 0x02a771bc reads the flag, and the argument shape below is taken from it
+// verbatim rather than reconstructed.
+constexpr uintptr_t kGetFlagS32ByNameWiiU = 0x0320fadc;
+
+// ksys::gdt::Manager singleton pointer.
+constexpr uintptr_t kGameDataManagerPtrWiiU = 0x1046d5b0;
+
+// sead::SafeString's vtable. A stack SafeString is built as { const char*,
+// vtable } - string pointer first, vtable second. That is the same inverted
+// order as PouchItem::mName, and it is worth not re-learning the hard way.
+constexpr uintptr_t kSeadSafeStringVtableWiiU = 0x10263910;
+
+struct SafeString {
+    const char* text;
+    const void* vtable;
+};
+
+using IncreaseFlagCurrentRupeeFn = void (*)(int delta, bool tag);
+using SetFlagS32ByNameFn = void (*)(void* manager, int value, const SafeString* name);
+using GetFlagS32ByNameFn = int (*)(void* core, int* out, const SafeString* name,
+                                   uint8_t flags, int one);
+
+inline void* GameDataManager() {
+#if !WIIXL_SWITCH
+    void* mgr = *reinterpret_cast<void**>(kGameDataManagerPtrWiiU);
+    uintptr_t addr = reinterpret_cast<uintptr_t>(mgr);
+    if (addr < 0x10000000 || addr > 0xa0000000) return nullptr;
+    return mgr;
+#else
+    return nullptr;
+#endif
+}
+
+} // namespace impl
+
+// Reads the CurrentRupee flag. False when there is no GameData manager yet (no
+// save loaded) or the flag read itself fails, in which case out is untouched.
+inline bool GetRupees(int& out) {
+#if !WIIXL_SWITCH
+    void* manager = impl::GameDataManager();
+    if (!manager) return false;
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(manager);
+
+    // 0x02a771bc reads this as **(u32**)(mgr + 0x700): the word at mgr+0x700
+    // points at a slot that in turn holds the object the read wants.
+    uintptr_t* slot = *reinterpret_cast<uintptr_t**>(base + 0x700);
+    if (!slot) return false;
+    void* core = *reinterpret_cast<void**>(slot);
+    if (!core) return false;
+
+    auto get = WiiXLaunch::GetTargetFunction<impl::GetFlagS32ByNameFn>(
+        0x0, impl::kGetFlagS32ByNameWiiU);
+    if (!get) return false;
+
+    impl::SafeString name = {
+        "CurrentRupee",
+        reinterpret_cast<const void*>(impl::kSeadSafeStringVtableWiiU),
+    };
+
+    int value = 0;
+    if (get(core, &value, &name, *reinterpret_cast<uint8_t*>(base + 0x704), 1) == 0) {
+        return false;
+    }
+
+    out = value;
+    return true;
+#else
+    (void)out;
+    return false;
+#endif
+}
+
+// Adds to the wallet, the same operation a picked-up rupee performs. Negative
+// deltas spend. This is the game's own primitive; SetRupees is layered on the
+// absolute write instead.
+inline bool AddRupees(int delta) {
+#if !WIIXL_SWITCH
+    auto add = WiiXLaunch::GetTargetFunction<impl::IncreaseFlagCurrentRupeeFn>(
+        0x0, impl::kIncreaseFlagCurrentRupeeWiiU);
+    if (!add) return false;
+
+    add(delta, false);
+    return true;
+#else
+    (void)delta;
+    return false;
+#endif
+}
+
+// Writes the CurrentRupee flag to an absolute value.
+//
+// No range limit, for the same reason the rest of this header has none: the
+// game clamps nothing here, and 999999 is a wallet display limit rather than a
+// storage one. This persists to your save.
+inline bool SetRupees(int value) {
+#if !WIIXL_SWITCH
+    void* manager = impl::GameDataManager();
+    if (!manager) return false;
+
+    auto set = WiiXLaunch::GetTargetFunction<impl::SetFlagS32ByNameFn>(
+        0x0, impl::kSetFlagS32ByNameWiiU);
+    if (!set) return false;
+
+    impl::SafeString name = {
+        "CurrentRupee",
+        reinterpret_cast<const void*>(impl::kSeadSafeStringVtableWiiU),
+    };
+
+    set(manager, value, &name);
+    return true;
+#else
+    (void)value;
+    return false;
+#endif
+}
+
 } // namespace WiiXLaunch::BotW::GameData
