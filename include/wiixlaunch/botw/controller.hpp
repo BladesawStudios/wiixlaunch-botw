@@ -222,16 +222,40 @@ struct State {
     float leftX = 0.0f, leftY = 0.0f, rightX = 0.0f, rightY = 0.0f;
 };
 
-inline State& StateRef() {
+// One state per input source, merged on read.
+//
+// They must stay separate: the VPAD hook runs every frame whether or not the
+// GamePad is being touched, so a single shared state let an idle GamePad
+// overwrite a Pro Controller's input with zeros a moment after the KPAD hook
+// had written it. Both hooks fire every frame, so last-writer-wins silently
+// discarded whichever source was actually being used.
+inline State& VpadStateRef() {
     static State s;
     return s;
+}
+
+inline State& KpadStateRef() {
+    static State s;
+    return s;
+}
+
+inline const State& StateRef() {
+    static State merged;
+    const State& vpad = VpadStateRef();
+    const State& kpad = KpadStateRef();
+
+    merged.hold = vpad.hold | kpad.hold;
+    merged.leftX  = (vpad.leftX  != 0.0f) ? vpad.leftX  : kpad.leftX;
+    merged.leftY  = (vpad.leftY  != 0.0f) ? vpad.leftY  : kpad.leftY;
+    merged.rightX = (vpad.rightX != 0.0f) ? vpad.rightX : kpad.rightX;
+    merged.rightY = (vpad.rightY != 0.0f) ? vpad.rightY : kpad.rightY;
+    return merged;
 }
 
 // Right-stick X is inverted here so the shared BotW::Controller reading
 // turns the same direction on both platforms (matches Freecam's original
 // per-platform inversion).
-inline void SetState(uint32_t hold, float lx, float ly, float rx, float ry) {
-    State& s = StateRef();
+inline void StoreState(State& s, uint32_t hold, float lx, float ly, float rx, float ry) {
     s.hold = hold;
     rx = -rx;
     s.leftX  = (std::abs(lx) > 0.1f) ? lx : 0.0f;
@@ -262,7 +286,7 @@ inline void ProcessNpadState(NpadState* state) {
     float ly = static_cast<float>(state->LStickY) / 32767.0f;
     float rx = static_cast<float>(state->RStickX) / 32767.0f;
     float ry = static_cast<float>(state->RStickY) / 32767.0f;
-    SetState(static_cast<uint32_t>(state->Buttons), lx, ly, rx, ry);
+    StoreState(VpadStateRef(), static_cast<uint32_t>(state->Buttons), lx, ly, rx, ry);
 }
 
 // nn::hid::GetNpadStates returns void, so there's no result to gate on -
@@ -473,7 +497,7 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(VPADReadWrapperHook) {
         float ly = *reinterpret_cast<float*>(vpad + 0x10);
         float rx = *reinterpret_cast<float*>(vpad + 0x14);
         float ry = *reinterpret_cast<float*>(vpad + 0x18);
-        SetState(hold, lx, ly, rx, ry);
+        StoreState(VpadStateRef(), hold, lx, ly, rx, ry);
 
         if (FrameCallback callback = FrameCallbackRef()) callback();
     }
@@ -482,6 +506,9 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(VPADReadWrapperHook) {
 WIIXL_HOOK_DEFINE_TRAMPOLINE(KPADReadExWrapperHook) {
     static void Callback(void* obj) {
         Orig(obj);
+        // Cleared every frame so letting go of a Wii U controller registers;
+        // the loop below only writes when it finds an active one.
+        KpadStateRef() = State{};
         for (int i = 0; i < 4; i++) {
             uint8_t* kpad = static_cast<uint8_t*>(obj) + 0x1118 + (i * 0xF08);
             uint32_t coreHold = *reinterpret_cast<uint32_t*>(kpad + 0x00);
@@ -500,7 +527,7 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(KPADReadExWrapperHook) {
                 float ly = *reinterpret_cast<float*>(kpad + 0x70);
                 float rx = *reinterpret_cast<float*>(kpad + 0x74);
                 float ry = *reinterpret_cast<float*>(kpad + 0x78);
-                SetState(TranslateToCanonical(proHold, PadSource::WPAD_PRO), lx, ly, rx, ry);
+                StoreState(KpadStateRef(), TranslateToCanonical(proHold, PadSource::WPAD_PRO), lx, ly, rx, ry);
                 break;
             } else if (extensionType == kExtNunchuk || extensionType == kExtMplusNunchuk) {
                 // nunchuk.stick@0x60, nunchuk.hold@0x7C (KPADStatus's
@@ -512,11 +539,11 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(KPADReadExWrapperHook) {
                 uint32_t nunchukHold = *reinterpret_cast<uint32_t*>(kpad + 0x7C);
                 uint32_t canonical = TranslateToCanonical(coreHold, PadSource::WPAD_NUNCHUK) | NunchukExtraBits(nunchukHold);
                 if (canonical == 0 && lx == 0.0f && ly == 0.0f) continue;
-                SetState(canonical, lx, ly, 0.0f, 0.0f);
+                StoreState(KpadStateRef(), canonical, lx, ly, 0.0f, 0.0f);
                 break;
             } else {
                 if (coreHold == 0) continue;
-                SetState(TranslateToCanonical(coreHold, PadSource::WPAD_CORE), 0.0f, 0.0f, 0.0f, 0.0f);
+                StoreState(KpadStateRef(), TranslateToCanonical(coreHold, PadSource::WPAD_CORE), 0.0f, 0.0f, 0.0f, 0.0f);
                 break;
             }
         }
@@ -552,12 +579,12 @@ public:
     }
 
     static void GetLeftStick(float& x, float& y) {
-        impl::State& s = impl::StateRef();
+        const impl::State& s = impl::StateRef();
         x = s.leftX; y = s.leftY;
     }
 
     static void GetRightStick(float& x, float& y) {
-        impl::State& s = impl::StateRef();
+        const impl::State& s = impl::StateRef();
         x = s.rightX; y = s.rightY;
     }
 
