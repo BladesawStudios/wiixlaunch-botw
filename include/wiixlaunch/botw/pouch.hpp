@@ -101,6 +101,95 @@ constexpr uintptr_t kItemName = 0x18;       // char* at +0x00, vptr at +0x04
 constexpr uintptr_t kItemModifierFlags = 0x6c;
 constexpr uintptr_t kItemModifierValue = 0x64;
 
+// Cook data, type 8 only - the same words the modifier uses, read differently.
+//
+// Which flag feeds which word is traced from loadFromGameData (0x02eb4518) and
+// the handles those readers use:
+//
+//   +0x64, +0x68   StaminaRecover  (vector2f, both components stored as ints)
+//                  via 0x02e1ac8c, handle 0x1046795c
+//   +0x6c          CookEffect1     (first component, as an int)
+//                  via 0x02e17d68, handle 0x10464770
+//   +0x70, +0x74   CookEffect0     (vector2f, kept as floats)
+//                  via 0x02e179c8, handle 0x1046476c
+//   +0x78, +0x80   ingredient count, then up to 5 names written through the
+//                  array at +0x80 from CookMaterialName0-4
+//
+// Meanings below are CONFIRMED against known meals, except where noted.
+constexpr uintptr_t kItemCookHealth = 0x64;       // quarter-hearts: 20 = 5 hearts
+constexpr uintptr_t kItemCookDuration = 0x68;     // seconds: 250 = 4:10
+constexpr uintptr_t kItemCookSellPrice = 0x6c;    // rupees, unverified
+constexpr uintptr_t kItemCookEffectId = 0x70;     // float; -1 none, 10 attack, 13 speed
+constexpr uintptr_t kItemCookEffectLevel = 0x74;  // float tier: 2 = "attack up 2"
+
+// NOT the ingredient count - it reads 5 on every item regardless of how many
+// ingredients went in, so it is the capacity of the name array at +0x80, which
+// is what loadFromGameData bounds its five reads against. The ingredients
+// themselves are the CookMaterialName0-4 entries in that array.
+constexpr uintptr_t kItemCookNameSlots = 0x78;
+
+// Pointer to the ingredient-name array. loadFromGameData writes five entries
+// through it as **(int**)(item + 0x80) and *(*(int**)(item+0x80) + 4) etc, so
+// it is an array of pointers to name objects - each laid out { char* text;
+// vtable } exactly like PouchItem::mName, pointer first.
+constexpr uintptr_t kItemCookNames = 0x80;
+constexpr int kItemCookNameCount = 5;
+
+// Food effect ids, as stored in the float at item+0x70.
+//
+// AttackUp and AllSpeed are confirmed against dishes of known effect, and
+// LifeMaxUp is all but certain - a dish reading id 2 had level 4 and a duration
+// of ZERO, and hearty meals are exactly the ones with no timer. DefenseUp was
+// seen on a plausible dish. The remainder are the mapping in common use and are
+// NOT verified here; the API takes the raw number so a wrong name costs
+// nothing.
+//
+// Note the id is NOT the CEI index from Cooking/CookData.sbyml - AttackUp is
+// CEI entry 8 but effect id 10. CookData's System.CEI does give the real per
+// effect tuning, which is what to respect when building a believable dish:
+// LifeRecover cap 120, LifeMaxUp 4-108, the resistances 1-2 or 1-3 with a
+// 120-second base, AllSpeed/AttackUp/DefenseUp 1-3 with 20-30 second bases,
+// Quietness 1-3 at 90, Fireproof 1-2 at 120.
+// There are exactly TWELVE cook effects - the full set, from System.CEI in
+// Cooking/CookData.sbyml with every name hash resolved. CEI also gives each
+// one's tuning, which is what to respect for a believable dish:
+//
+//   effect            base time  mult  tier range  crit add
+//   StaminaRecover        0      1.40     1-15         2
+//   GutsPerformance       0      0.50     1-20         2
+//   LifeRecover           0      2.00     1-120       12
+//   LifeMaxUp             0      1.00     4-108        4
+//   ResistHot           120      0.35     1-2          1
+//   ResistCold          120      0.35     1-2          1
+//   ResistElectric      120      0.50     1-3          1
+//   AllSpeed             30      0.45     1-3          1
+//   AttackUp             20      0.45     1-3          1
+//   DefenseUp            20      0.45     1-3          1
+//   Quietness            90      0.35     1-3          1
+//   Fireproof           120      0.30     1-2          1
+//
+// The CEI index is NOT the effect id. Every id below is CONFIRMED in game, by
+// writing each one onto a dish and reading what the menu showed.
+//
+// 3, 7, 8 and 9 are genuinely unused: setting one gives a timed effect with no
+// icon and no name, rather than falling back to anything. That the gaps behave
+// like gaps is good evidence the rest of the mapping is exactly right.
+enum CookEffectId : int {
+    CookEffectNone = -1,
+    CookLifeRecover = 1,
+    CookLifeMaxUp = 2,        // hearty - no duration
+    CookResistHot = 4,
+    CookResistCold = 5,
+    CookResistElectric = 6,
+    CookAttackUp = 10,
+    CookDefenseUp = 11,
+    CookQuietness = 12,       // stealth
+    CookAllSpeed = 13,
+    CookStaminaRecover = 14,  // CEI's name; "GutsRecover" elsewhere
+    CookGutsPerformance = 15, // extra stamina wheel
+    CookFireproof = 16,
+};
+
 constexpr uintptr_t kCritSection = 0x10;
 constexpr uintptr_t kIsPouchForQuest = 0x38128;
 
@@ -838,6 +927,176 @@ inline int32_t ModifierFloatBits(float value) {
     return bits.i;
 }
 
+// One ingredient name off a food item, or null. Slot is 0..4.
+inline const char* CookIngredient(uintptr_t item, int slot) {
+#if !WIIXL_SWITCH
+    if (slot < 0 || slot >= impl::kItemCookNameCount) return nullptr;
+
+    void** names = *reinterpret_cast<void***>(item + impl::kItemCookNames);
+    if (!impl::PlausiblePointer(reinterpret_cast<uintptr_t>(names))) return nullptr;
+
+    void* entry = names[slot];
+    if (!impl::PlausiblePointer(reinterpret_cast<uintptr_t>(entry))) return nullptr;
+
+    // same inverted layout as PouchItem::mName: text pointer first, vtable after
+    uintptr_t text = *reinterpret_cast<uintptr_t*>(entry);
+    if (!impl::PlausiblePointer(text)) return nullptr;
+
+    const char* name = reinterpret_cast<const char*>(text);
+    if (name[0] < 0x20 || name[0] > 0x7e) return nullptr;
+    return name;
+#else
+    (void)item; (void)slot;
+    return nullptr;
+#endif
+}
+
+// Overwrites a food item's cook data. Only the fields you pass are touched, so
+// nudging a duration will not blank the effect.
+//
+// Works on recipe dishes (Item_Cook_*), which never stack and so get one pouch
+// entry each to carry their own effect. It does NOT work on roasted or chilled
+// foods: those STACK - Item_Roast_01 at 5, Item_Chilled_02 at 9 - and a stack is
+// a single entry shared by every copy, with nowhere to hang per-instance data.
+// They all read health 0, duration 0, effect -1 untouched, and the write lands
+// but the game never reads it. Measured: replacement works on Item_Cook_*, not
+// on roast or chilled.
+//
+// Type 8 only: on a weapon these same words are the modifier, and writing cook
+// data there would silently corrupt the bonus. Direct writes rather than a game
+// call, because nothing found sets these outside loadFromGameData's bulk
+// restore - they are plain fields on the item, the same class of write as
+// durability.
+struct CookData {
+    bool setHealth = false;      int32_t health = 0;
+    bool setDuration = false;    int32_t duration = 0;
+    bool setSellPrice = false;   int32_t sellPrice = 0;
+    bool setEffectId = false;    float effectId = 0.0f;
+    bool setEffectLevel = false; float effectLevel = 0.0f;
+};
+
+inline bool SetCookData(uintptr_t item, const CookData& data) {
+#if !WIIXL_SWITCH
+    void* manager = impl::PauseMenuDataMgr();
+    if (!manager || !item) return false;
+    if (*reinterpret_cast<int32_t*>(item + impl::kItemType) != 8) return false;
+
+    auto lock = WiiXLaunch::GetTargetFunction<impl::CritSectionFn>(0x0, impl::kCritSectionLockWiiU);
+    auto unlock = WiiXLaunch::GetTargetFunction<impl::CritSectionFn>(0x0, impl::kCritSectionUnlockWiiU);
+    if (!lock || !unlock) return false;
+
+    void* critSection = reinterpret_cast<void*>(
+        reinterpret_cast<uintptr_t>(manager) + impl::kCritSection);
+
+    lock(critSection);
+    if (data.setHealth)
+        *reinterpret_cast<int32_t*>(item + impl::kItemCookHealth) = data.health;
+    if (data.setDuration)
+        *reinterpret_cast<int32_t*>(item + impl::kItemCookDuration) = data.duration;
+    if (data.setSellPrice)
+        *reinterpret_cast<int32_t*>(item + impl::kItemCookSellPrice) = data.sellPrice;
+    if (data.setEffectId)
+        *reinterpret_cast<float*>(item + impl::kItemCookEffectId) = data.effectId;
+    if (data.setEffectLevel)
+        *reinterpret_cast<float*>(item + impl::kItemCookEffectLevel) = data.effectLevel;
+    unlock(critSection);
+    return true;
+#else
+    (void)item; (void)data;
+    return false;
+#endif
+}
+
+// Finds a pouch entry. Pass a name, an index, or both.
+//
+//   name only          the first entry with that name
+//   index only         whatever occupies that pouch slot, whatever it is
+//   name and index     must AGREE, or nothing is returned
+//
+// Pouch indices are positions in one list shared by every category and they
+// shift whenever anything is added or removed, so a stale index addresses a
+// different item. When a caller supplies both, treating the mismatch as a
+// refusal is what stops a write landing on the wrong thing - cook data aimed at
+// a meal once landed on an Item_Chilled_03 sitting at the index. Index alone is
+// still allowed: with no name given there is nothing to contradict, and it is
+// the only way to target a slot whose actor you mean to change.
+inline uintptr_t FindItem(const char* name, int index = -1) {
+#if !WIIXL_SWITCH
+    const bool haveName = name && name[0];
+
+    uintptr_t found = 0;
+    impl::WalkItems([&](uintptr_t node, int at) {
+        if (index >= 0 && at != index) return true;
+
+        if (!haveName) {
+            // index-only: take the slot as it is
+            found = node;
+            return false;
+        }
+
+        const char* entry = impl::ReadName(node);
+        if (!entry) return index >= 0 ? false : true;
+
+        const char* a = entry;
+        const char* b = name;
+        while (*a && *a == *b) { ++a; ++b; }
+        if (*a != *b) return index >= 0 ? false : true;
+
+        found = node;
+        return false;
+    });
+    return found;
+#else
+    (void)name; (void)index;
+    return 0;
+#endif
+}
+
+// The actor name on a pouch entry, or "" - handy for echoing back which item a
+// write actually landed on, rather than which one the caller thought it meant.
+inline const char* ItemName(uintptr_t item) {
+#if !WIIXL_SWITCH
+    const char* name = item ? impl::ReadName(item) : nullptr;
+    return name ? name : "";
+#else
+    (void)item;
+    return "";
+#endif
+}
+
+// Whether a pouch entry holds more than one of something. Stacking foods are
+// the case that matters: their cook data is never read.
+inline bool ItemStacks(uintptr_t item) {
+#if !WIIXL_SWITCH
+    return item && *reinterpret_cast<int32_t*>(item + impl::kItemValue) > 1;
+#else
+    (void)item;
+    return false;
+#endif
+}
+
+// The LAST entry with this name, which after an add is the one just added -
+// addItem appends, and food never stacks, so a fresh meal is always last.
+inline uintptr_t FindNewestItem(const char* name) {
+#if !WIIXL_SWITCH
+    if (!name) return 0;
+    uintptr_t found = 0;
+    impl::WalkItems([&](uintptr_t node, int) {
+        const char* entry = impl::ReadName(node);
+        if (!entry) return true;
+        const char* a = entry;
+        const char* b = name;
+        while (*a && *a == *b) { ++a; ++b; }
+        if (*a == *b) found = node;
+        return true;   // keep going; we want the last match
+    });
+    return found;
+#else
+    (void)name;
+    return 0;
+#endif
+}
+
 // Reads a weapon's modifier. False when no entry of that name exists or it is
 // not a type the modifier union applies to (0-3: sword, bow, arrow, shield).
 inline bool GetModifier(const char* name, uint32_t& flags, int32_t& value) {
@@ -934,12 +1193,23 @@ inline bool SetModifier(const char* name, uint32_t flags, int32_t value) {
 
 // One pouch entry, as handed to ForEachOfType.
 struct Entry {
+    uintptr_t node;     // the PouchItem itself, for readers that need more
     const char* name;   // null if the entry's name pointer did not validate
     int value;          // count for materials, durability for weapons
     int index;          // pouch index, the key the PorchItem_* flags use
     bool equipped;
     uint32_t modifierFlags;   // weapons only (type 0-3); 0 for everything else
     int32_t modifierValue;
+
+    // food only (type 8) - the same words, read as cook data. isFood says
+    // which of the two readings applies.
+    bool isFood;
+    int32_t cookHealth;
+    int32_t cookDuration;
+    int32_t cookSellPrice;
+    float cookEffectId;
+    float cookEffectLevel;
+    int32_t cookNameSlots;   // array capacity, always 5 - not a count
 };
 
 // Visits every entry of one type in pouch order. visit returns false to stop
@@ -960,6 +1230,7 @@ inline int ForEachOfType(Slot slot, Fn visit) {
         if (*reinterpret_cast<int32_t*>(node + impl::kItemType) != type) return true;
 
         Entry entry;
+        entry.node = node;
         entry.name = impl::ReadName(node);
         entry.value = *reinterpret_cast<int32_t*>(node + impl::kItemValue);
         entry.index = index;
@@ -972,6 +1243,20 @@ inline int ForEachOfType(Slot slot, Fn visit) {
             ? *reinterpret_cast<uint32_t*>(node + impl::kItemModifierFlags) : 0u;
         entry.modifierValue = weapon
             ? *reinterpret_cast<int32_t*>(node + impl::kItemModifierValue) : 0;
+
+        entry.isFood = type == 8;
+        entry.cookHealth = entry.isFood
+            ? *reinterpret_cast<int32_t*>(node + impl::kItemCookHealth) : 0;
+        entry.cookDuration = entry.isFood
+            ? *reinterpret_cast<int32_t*>(node + impl::kItemCookDuration) : 0;
+        entry.cookSellPrice = entry.isFood
+            ? *reinterpret_cast<int32_t*>(node + impl::kItemCookSellPrice) : 0;
+        entry.cookEffectId = entry.isFood
+            ? *reinterpret_cast<float*>(node + impl::kItemCookEffectId) : 0.0f;
+        entry.cookEffectLevel = entry.isFood
+            ? *reinterpret_cast<float*>(node + impl::kItemCookEffectLevel) : 0.0f;
+        entry.cookNameSlots = entry.isFood
+            ? *reinterpret_cast<int32_t*>(node + impl::kItemCookNameSlots) : 0;
 
         ++matched;
         return visit(entry);
