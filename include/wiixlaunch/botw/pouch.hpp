@@ -100,11 +100,147 @@ constexpr uintptr_t kIsPouchForQuest = 0x38128;
 // ksys::gdt::setFlag_PorchItem_Value1(s32 value, s32 index, bool debug) and the
 // sead crit-section pair the pouch functions lock with.
 constexpr uintptr_t kSetFlagPorchItemValue1WiiU = 0x02e1a6f8;
+
+// gdt::setFlag_PorchItem_EquipFlag(bool value, int index, bool debug). Paired
+// with the value setter above; 0x02eb7988 clears both when it drops an item.
+constexpr uintptr_t kSetFlagPorchItemEquipWiiU = 0x02e1a6c8;
+
+// ksys::ui::getPouchItemType(sead::SafeString* name, int) -> PouchItemType, or
+// -1 when the name is not a pouch item at all.
+constexpr uintptr_t kGetPouchItemTypeWiiU = 0x02eae914;
+
+// PauseMenuDataMgr::registerEquipped(mgr, PouchItem*). NOT CALLED - see below.
+//
+// It appends the item to the 5-entry equipped cache at mgr+0x37ea8 (8 bytes
+// each: PouchItem* at +0, flags at +4 and +5), or flags the existing entry when
+// the item is already cached, then calls 0x02a116f0 with the item's name and
+// the object at *(0x10463f6c + 0x10).
+//
+// That trailing call was read as the pouch -> world equip link. It is not.
+// Tested live: calling this and then opening and closing the menu SPAWNS the
+// weapon as an actor in the world rather than swapping what Link is holding, so
+// 0x02a116f0 creates an actor from a name. The call is left out for that
+// reason; the constant stays because the cache mechanics it documents are real
+// and it is the wrong turn worth not repeating.
+//
+// What it did establish: the cache IS consumed when the menu closes. So the
+// menu-close path is the consumer to understand, and a correctly formed cache
+// entry is probably part of a real equip - just not sufficient on its own, and
+// not with this function's side effect attached.
+constexpr uintptr_t kRegisterEquippedWiiU = 0x02eba358;
+
+// ksys::act::Player equipment-REMOVED notify: (player, sead::SafeString* name).
+// NOT CALLED - see below.
+//
+// Resolves the named actor's profile and raises a per-category flag on the
+// player, each behind its own lock: WeaponSmallSword / LargeSword / Spear ->
+// +0xf00 (lock +0xec4), WeaponShield -> +0xf40 (lock +0xf04), WeaponBow ->
+// +0xf80 (lock +0xf44).
+//
+// Read as "re-read your equipment". It is not - it means "the thing you are
+// holding is gone". Its only caller is trashItem, which fires it when the item
+// being destroyed happens to be equipped. Tested live: calling it made the
+// player DROP the held weapon as a world actor while the pouch entry survived,
+// duplicating the item. Kept documented so the mistake is not repeated.
+constexpr uintptr_t kNotifyEquipRemovedWiiU = 0x02d36a10;
+constexpr uintptr_t kGetPlayerForEquipWiiU = 0x02d497c4;
+constexpr uintptr_t kPlayerHolderPtrWiiU = 0x10463f38;
+
+// PauseMenuDataMgr::rebuildEquippedArray(mgr). Zeroes the four entries at
+// manager+0x3812c, then walks the pouch and files every item with type < 4 and
+// the equipped byte set into its slot by type. A pure recompute from the same
+// +0x14 flags EquipItem writes, so it cannot spawn or drop anything - it just
+// makes the game's own equipped array agree with the pouch.
+//
+// The only site in the whole executable that builds manager+0x3812c.
+constexpr uintptr_t kRebuildEquippedWiiU = 0x02ebf690;
+
+// requestEquipmentActor(weaponMgr, slot, sead::SafeString* name, int value,
+//                       sead::SafeString* debugTag)
+//
+// Asks the equipment manager to load the actor for one slot. Each slot owns a
+// 0x5c-byte record at weaponMgr+0x4c; this fills one in, and once the record
+// reaches state 2 the player's equipment update takes the actor with
+// 0x02a157c8 and attaches it, clearing the record.
+//
+// Copied from PauseMenuDataMgr 0x02eb8180, which calls
+// FUN_02a15e44(DAT_10463708, 3, item + 0x18, *(int*)(item + 0x10), &tag) when
+// restoring a head-armour actor. The tag is only a debug label; the game passes
+// the literal "PauseMenuDataMgr".
+//
+// NOTE the player's update (0x02d6f224) takes and attaches UNCONDITIONALLY on
+// every pass - the dirty flags at player+0xf00/0xf40/0xf80 only drive the
+// DETACH half. That is why setting a flag dropped the held weapon and attached
+// nothing: the detach ran with no actor requested. Requesting the actor is the
+// whole job; the flag must stay untouched.
+constexpr uintptr_t kRequestEquipActorWiiU = 0x02a15e44;
+constexpr uintptr_t kEquipmentMgrPtrWiiU = 0x10463708;
+
+// Pouch type -> equipment-manager slot. 0 right hand, 1 left hand/shield,
+// 2 bow, 3/4/5 the armour pieces; from 0x02d6f224 and 0x02eb8180. Arrows are a
+// pouch type with no actor slot.
+inline int EquipSlotForType(int type) {
+    switch (type) {
+        case 0: return 0;   // sword
+        case 1: return 2;   // bow
+        case 3: return 1;   // shield
+        case 4: return 3;   // head
+        case 5: return 4;   // chest
+        case 6: return 5;   // legs
+        default: return -1; // arrows and everything else
+    }
+}
+
+// The REAL equipped array: 4 entries at manager+0x3812c, indexed by
+// PouchItemType 0-3 (sword, bow, arrow, shield). trashItem compares against it
+// to decide whether the item being dropped is the equipped one. Not to be
+// confused with manager+0x37ea8, which is the drop queue.
+constexpr uintptr_t kEquippedItems = 0x3812c;
+
+// PauseMenuDataMgr::addItem(mgr, name, type, list, value, a, b, c).
+//
+// The high-level add: it refuses items tagged 0x17919f47, dedupes key items by
+// name, stacks type 0 by name, then does the real insert and the bookkeeping
+// (0x02eb3d38 dirty flag, 0x02eb2884, 0x02eb3460 tab-head rebuild).
+//
+// Argument shape is not inferred - it is copied from 0x02eb5ab8, which calls
+// addItem(mgr, name, getPouchItemType(name, 0), mgr + 0x4c, 1, 0, 0, 0) between
+// a crit-section lock and a saveToGameData. The list argument is the item list
+// head at mgr+0x4c, the same list everything else here walks.
+constexpr uintptr_t kAddPouchItemWiiU = 0x02eb3df0;
+
+// PauseMenuDataMgr::saveToGameData(mgr, list). Called by 0x02eb5ab8 right after
+// an add so the new item reaches the save flags.
+constexpr uintptr_t kSaveToGameDataWiiU = 0x02eb3764;
+
+// sead::SafeString's vtable - see the same constant in gamedata.hpp. A stack
+// SafeString is { const char*, vtable }, pointer first.
+constexpr uintptr_t kSeadSafeStringVtableWiiU = 0x10263910;
+
+struct SafeString {
+    const char* text;
+    const void* vtable;
+};
 constexpr uintptr_t kCritSectionLockWiiU = 0x030bb668;
 constexpr uintptr_t kCritSectionUnlockWiiU = 0x030bb69c;
 
 using SetFlagIndexedFn = void (*)(int value, int index, bool debug);
 using CritSectionFn = void (*)(void* critSection);
+using GetPouchItemTypeFn = int (*)(const SafeString* name, int unused);
+using AddPouchItemFn = void (*)(void* manager, const SafeString* name, int type, void* list,
+                                int value, int a, int b, int c);
+using SaveToGameDataFn = void (*)(void* manager, void* list);
+using RegisterEquippedFn = void (*)(void* manager, void* item);
+using GetPlayerFn = void* (*)(void* holder);
+using NotifyEquipRemovedFn = void (*)(void* player, const void* name);
+using RebuildEquippedFn = void (*)(void* manager);
+using RequestEquipActorFn = void (*)(void* equipmentManager, int slot, const void* name,
+                                     int value, const void* debugTag);
+
+inline SafeString MakeSafeString(const char* text) {
+    SafeString s = { text, reinterpret_cast<const void*>(kSeadSafeStringVtableWiiU) };
+    return s;
+}
 
 // A hard stop on the walk. The pouch holds a few hundred entries at most, so
 // anything past this is a corrupt list rather than a long one, and spinning
@@ -277,6 +413,237 @@ inline const char* GetEquippedName(Slot slot) {
 #else
     (void)slot;
     return nullptr;
+#endif
+}
+
+// The PouchItemType the game would classify a name as, or -1 if it is not a
+// pouch item. Wraps 0x02eae914, which hashes the actor's profile and tags
+// rather than pattern-matching the name, so it is the game's own answer.
+inline int GetTypeForName(const char* name) {
+#if !WIIXL_SWITCH
+    if (!name) return -1;
+    auto getType = WiiXLaunch::GetTargetFunction<impl::GetPouchItemTypeFn>(
+        0x0, impl::kGetPouchItemTypeWiiU);
+    if (!getType) return -1;
+
+    impl::SafeString key = impl::MakeSafeString(name);
+    return getType(&key, 0);
+#else
+    (void)name;
+    return -1;
+#endif
+}
+
+// Adds an item to the pouch by actor name, e.g. "Item_Fruit_A" or
+// "Weapon_Sword_070". value is the stack count for things that stack and the
+// durability for weapons; the game passes 1 for an ordinary pickup.
+//
+// This mirrors 0x02eb5ab8 exactly: lock, classify, add, save, unlock. Stacking
+// behaviour is the game's own - materials merge into an existing entry, weapons
+// become new entries - because addItem decides that, not this.
+//
+// Returns false if there is no pouch yet or the name is not a pouch item.
+inline bool AddItem(const char* name, int value = 1) {
+#if !WIIXL_SWITCH
+    void* manager = impl::PauseMenuDataMgr();
+    if (!manager || !name) return false;
+
+    auto add = WiiXLaunch::GetTargetFunction<impl::AddPouchItemFn>(0x0, impl::kAddPouchItemWiiU);
+    auto save = WiiXLaunch::GetTargetFunction<impl::SaveToGameDataFn>(0x0, impl::kSaveToGameDataWiiU);
+    auto lock = WiiXLaunch::GetTargetFunction<impl::CritSectionFn>(0x0, impl::kCritSectionLockWiiU);
+    auto unlock = WiiXLaunch::GetTargetFunction<impl::CritSectionFn>(0x0, impl::kCritSectionUnlockWiiU);
+    if (!add || !save || !lock || !unlock) return false;
+
+    const int type = GetTypeForName(name);
+    if (type < 0) return false;
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(manager);
+    void* critSection = reinterpret_cast<void*>(base + impl::kCritSection);
+    void* list = reinterpret_cast<void*>(base + impl::kItemListHead);
+    impl::SafeString key = impl::MakeSafeString(name);
+
+    lock(critSection);
+    add(manager, &key, type, list, value, 0, 0, 0);
+    save(manager, list);
+    unlock(critSection);
+    return true;
+#else
+    (void)name; (void)value;
+    return false;
+#endif
+}
+
+// Removes count of an item by name, or everything of that name when count <= 0.
+// Returns how many were actually taken.
+//
+// Removal in this game does NOT unlink the list node: both 0x02eb7988 and the
+// arrow consume at 0x02eb6624 zero mValue (and mEquipped), then re-sync that
+// slot's save flags by index. This does the same, which is why it cannot
+// corrupt the list the way a hand-rolled unlink could. Counts cascade across
+// stacks exactly as the arrow consume does.
+inline int RemoveItem(const char* name, int count = 1) {
+#if !WIIXL_SWITCH
+    void* manager = impl::PauseMenuDataMgr();
+    if (!manager || !name) return 0;
+
+    auto lock = WiiXLaunch::GetTargetFunction<impl::CritSectionFn>(0x0, impl::kCritSectionLockWiiU);
+    auto unlock = WiiXLaunch::GetTargetFunction<impl::CritSectionFn>(0x0, impl::kCritSectionUnlockWiiU);
+    auto setValue = WiiXLaunch::GetTargetFunction<impl::SetFlagIndexedFn>(
+        0x0, impl::kSetFlagPorchItemValue1WiiU);
+    auto setEquip = WiiXLaunch::GetTargetFunction<impl::SetFlagIndexedFn>(
+        0x0, impl::kSetFlagPorchItemEquipWiiU);
+    if (!lock || !unlock || !setValue || !setEquip) return 0;
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(manager);
+    void* critSection = reinterpret_cast<void*>(base + impl::kCritSection);
+    const bool questPouch = *reinterpret_cast<uint8_t*>(base + impl::kIsPouchForQuest) != 0;
+
+    int taken = 0;
+    int remaining = count;
+
+    lock(critSection);
+    impl::WalkItems([&](uintptr_t node, int index) {
+        const char* entry = impl::ReadName(node);
+        if (!entry) return true;
+
+        // compare without pulling in <cstring>
+        const char* a = entry;
+        const char* b = name;
+        while (*a && *a == *b) { ++a; ++b; }
+        if (*a != *b) return true;
+
+        int32_t* value = reinterpret_cast<int32_t*>(node + impl::kItemValue);
+        const int have = *value;
+        if (have <= 0) return true;
+
+        const bool all = count <= 0 || remaining >= have;
+        const int32_t left = all ? 0 : have - remaining;
+        taken += all ? have : remaining;
+        if (!all) remaining = 0; else remaining -= have;
+
+        *value = left;
+        if (left == 0) *reinterpret_cast<uint8_t*>(node + impl::kItemEquipped) = 0;
+
+        // keep the save flags in step, the way the game's own removals do
+        if (!questPouch && index >= 0) {
+            setValue(left, index, false);
+            if (left == 0) setEquip(0, index, false);
+        }
+
+        return count <= 0 || remaining > 0;
+    });
+    unlock(critSection);
+
+    return taken;
+#else
+    (void)name; (void)count;
+    return 0;
+#endif
+}
+
+// Equips the first pouch entry matching name, and unequips whatever else of the
+// same type was equipped.
+//
+// NOT a call to a game function - no dedicated equip routine turned up. This
+// performs the two writes the game itself performs when equipment changes, in
+// the same order and behind the same guard:
+//
+//   * the equipped byte at item+0x14, which is what every lookup keys off -
+//     0x02eb67f4 finds "the equipped item of type N" as the first node with
+//     +0x14 set and +0x08 == N, which is exactly what this maintains
+//   * the matching PorchItem_EquipFlag by pouch index, skipped when the quest
+//     pouch byte at manager+0x38128 is set, copying 0x02eb7988
+//
+// What it does NOT touch is the equipped-pointer cache at manager+0x37ea8 that
+// saveToGameData consults for its +1 durability bump. Nothing here reads that
+// cache, but the game does, so treat a swap as settling rather than instant:
+// the menu and the actor holding the weapon may not catch up until they next
+// refresh. Verify in game before relying on it.
+//
+// Returns false when no entry of that name exists.
+inline bool EquipItem(const char* name) {
+#if !WIIXL_SWITCH
+    void* manager = impl::PauseMenuDataMgr();
+    if (!manager || !name) return false;
+
+    auto lock = WiiXLaunch::GetTargetFunction<impl::CritSectionFn>(0x0, impl::kCritSectionLockWiiU);
+    auto unlock = WiiXLaunch::GetTargetFunction<impl::CritSectionFn>(0x0, impl::kCritSectionUnlockWiiU);
+    auto setEquip = WiiXLaunch::GetTargetFunction<impl::SetFlagIndexedFn>(
+        0x0, impl::kSetFlagPorchItemEquipWiiU);
+    if (!lock || !unlock || !setEquip) return false;
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(manager);
+    void* critSection = reinterpret_cast<void*>(base + impl::kCritSection);
+    const bool questPouch = *reinterpret_cast<uint8_t*>(base + impl::kIsPouchForQuest) != 0;
+
+    lock(critSection);
+
+    // first pass: locate the target and learn its type
+    uintptr_t target = 0;
+    int targetIndex = -1;
+    int targetType = -1;
+    impl::WalkItems([&](uintptr_t node, int index) {
+        const char* entry = impl::ReadName(node);
+        if (!entry) return true;
+        const char* a = entry;
+        const char* b = name;
+        while (*a && *a == *b) { ++a; ++b; }
+        if (*a != *b) return true;
+
+        target = node;
+        targetIndex = index;
+        targetType = *reinterpret_cast<int32_t*>(node + impl::kItemType);
+        return false;
+    });
+
+    if (!target) {
+        unlock(critSection);
+        return false;
+    }
+
+    // second pass: exactly one item of this type ends up equipped
+    impl::WalkItems([&](uintptr_t node, int index) {
+        if (*reinterpret_cast<int32_t*>(node + impl::kItemType) != targetType) return true;
+
+        const bool wanted = node == target;
+        uint8_t* equipped = reinterpret_cast<uint8_t*>(node + impl::kItemEquipped);
+        if (*equipped == (wanted ? 1 : 0)) return true;
+
+        *equipped = wanted ? 1 : 0;
+        if (!questPouch && index >= 0) setEquip(wanted ? 1 : 0, index, false);
+        return true;
+    });
+
+    unlock(critSection);
+
+    // Bring the game's equipped array at manager+0x3812c into line with the
+    // flags just written. It takes the pouch lock itself, hence after unlock.
+    auto rebuild = WiiXLaunch::GetTargetFunction<impl::RebuildEquippedFn>(
+        0x0, impl::kRebuildEquippedWiiU);
+    if (rebuild) rebuild(manager);
+
+    // Ask the equipment manager to load this item's actor for its slot. The
+    // player's own update picks it up and attaches it on a later pass, which is
+    // what finally makes the swap visible in the world.
+    const int slot = impl::EquipSlotForType(targetType);
+    if (slot >= 0) {
+        auto request = WiiXLaunch::GetTargetFunction<impl::RequestEquipActorFn>(
+            0x0, impl::kRequestEquipActorWiiU);
+        void* equipment = *reinterpret_cast<void**>(impl::kEquipmentMgrPtrWiiU);
+        if (request && equipment) {
+            impl::SafeString tag = impl::MakeSafeString("BotW_API");
+            request(equipment, slot,
+                    reinterpret_cast<const void*>(target + impl::kItemName),
+                    *reinterpret_cast<int32_t*>(target + impl::kItemValue),
+                    &tag);
+        }
+    }
+
+    (void)targetIndex;
+    return true;
+#else
+    (void)name;
+    return false;
 #endif
 }
 
