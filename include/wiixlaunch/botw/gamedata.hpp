@@ -460,6 +460,19 @@ constexpr uintptr_t kSetFlagBoolByNameWiiU = 0x032002d4;
 // 0 here; nothing in the binary ever forces.
 constexpr uintptr_t kSetFlagBoolTypedWiiU = 0x032163cc;
 
+// The f32 trio, same shapes as bool and s32 one step along each table:
+//   by-name read  0x0320fb40   (getters are 0x64 apart: bool a78, s32 adc, f32 b40)
+//   indexed read  0x03234bac   (via stub 0x0320f9c4, which adds the 0x1c offset)
+//   typed setter  0x032164b4   (setters are 0x74 apart: bool 163cc, s32 16440)
+//
+// The setter takes its value in f1 rather than a GPR, so the C signature is
+// (core, float, name, flags, one, force) - core r3, value f1, name r4, flags
+// r5, one r6, force r7. That matches the decompiled argument order exactly;
+// writing it any other way silently passes the float in the wrong place.
+constexpr uintptr_t kGetFlagF32ByNameWiiU = 0x0320fb40;
+constexpr uintptr_t kGetFlagF32ByIndexWiiU = 0x03234bac;
+constexpr uintptr_t kSetFlagF32TypedWiiU = 0x032164b4;
+
 // Manager fields 0x032002d4 reads, mirrored here because forcing means
 // reimplementing that wrapper rather than calling it.
 constexpr uintptr_t kManagerStatusBits = 0x730;   // bit 0x12 blocks all writes
@@ -471,6 +484,7 @@ constexpr uintptr_t kManagerBoolCoreMirror = 0x710;
 
 constexpr uintptr_t kS32ContainerOffset = 0x10;
 constexpr uintptr_t kBoolContainerOffset = 0x04;
+constexpr uintptr_t kF32ContainerOffset = 0x1c;
 
 // The containers are 0x0c apart and the first is at core+0x04, not at the s32
 // one. Confirmed against a live v208 save: all 18 stores in the canonical gdt
@@ -505,6 +519,11 @@ using GetFlagBoolByNameFn = int (*)(void* core, uint32_t* out, const SafeString*
 using SetFlagBoolByNameFn = int (*)(void* manager, int value, const SafeString* name);
 using SetFlagBoolTypedFn = int (*)(void* core, int value, const SafeString* name,
                                    uint8_t flags, int one, int force);
+using GetFlagF32ByNameFn = int (*)(void* core, float* out, const SafeString* name,
+                                   uint8_t flags, int one);
+using GetFlagF32ByIndexFn = int (*)(float* out, void* container, int index, uint8_t flags);
+using SetFlagF32TypedFn = int (*)(void* core, float value, const SafeString* name,
+                                  uint8_t flags, int one, int force);
 using GetFlagHashFn = uint32_t (*)(void* flagObject);
 
 // Sanity check for a pointer read out of game memory: catches null, small
@@ -913,6 +932,101 @@ inline bool GetFlagBoolByIndex(int index, uint32_t& hash, bool& value) {
 
     hash = foundHash;
     value = readValue != 0;
+    return true;
+#else
+    (void)index; (void)hash; (void)value;
+    return false;
+#endif
+}
+
+// Reads any f32 flag by name.
+inline bool GetFlagF32(const char* name, float& out) {
+#if !WIIXL_SWITCH
+    impl::FlagAccess access;
+    if (!name || !impl::ResolveFlagAccess(access)) return false;
+
+    auto get = WiiXLaunch::GetTargetFunction<impl::GetFlagF32ByNameFn>(
+        0x0, impl::kGetFlagF32ByNameWiiU);
+    if (!get) return false;
+
+    impl::SafeString key = impl::MakeSafeString(name);
+    float value = 0.0f;
+    if (get(access.core, &value, &key, access.flags, 1) == 0) return false;
+
+    out = value;
+    return true;
+#else
+    (void)name; (void)out;
+    return false;
+#endif
+}
+
+// Writes any f32 flag by name. bypassLatch and bypassPermission mirror the bool
+// setter: IsOneTrigger blocks a repeat write, IsProgramWritable=false marks a
+// flag event-system-only. Both guards live in the shared 0x032354bc-equivalent
+// reached through the typed setter, so the same two arguments unlock them.
+inline bool SetFlagF32(const char* name, float value,
+                       bool bypassLatch = false, bool bypassPermission = false) {
+#if !WIIXL_SWITCH
+    impl::FlagAccess access;
+    if (!name || !impl::ResolveFlagAccess(access)) return false;
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(access.manager);
+    if ((*reinterpret_cast<uint32_t*>(base + impl::kManagerStatusBits) >> 0x12) & 1) return false;
+    if (*reinterpret_cast<char*>(base + impl::kManagerWriteGate) != 0) return false;
+
+    auto set = WiiXLaunch::GetTargetFunction<impl::SetFlagF32TypedFn>(
+        0x0, impl::kSetFlagF32TypedWiiU);
+    if (!set) return false;
+
+    uintptr_t* slot = *reinterpret_cast<uintptr_t**>(base + impl::kManagerBoolCore);
+    if (!impl::Plausible(slot)) return false;
+    void* core = *reinterpret_cast<void**>(slot);
+    if (!impl::Plausible(core)) return false;
+
+    impl::SafeString key = impl::MakeSafeString(name);
+    const uint8_t flags = bypassPermission
+                        ? 0
+                        : *reinterpret_cast<uint8_t*>(base + impl::kManagerFlagByte);
+
+    if (set(core, value, &key, flags, 1, bypassLatch ? 1 : 0) == 0) return false;
+
+    if (*reinterpret_cast<char*>(base + impl::kManagerMirrorGate) != 0) {
+        uintptr_t* mirrorSlot = *reinterpret_cast<uintptr_t**>(base + impl::kManagerBoolCoreMirror);
+        if (impl::Plausible(mirrorSlot)) {
+            void* mirror = *reinterpret_cast<void**>(mirrorSlot);
+            if (impl::Plausible(mirror)) set(mirror, value, &key, flags, 1, bypassLatch ? 1 : 0);
+        }
+    }
+    return true;
+#else
+    (void)name; (void)value; (void)bypassLatch; (void)bypassPermission;
+    return false;
+#endif
+}
+
+// How many f32 flags the save holds.
+inline int FlagF32Count() { return impl::StoreCount(impl::kF32ContainerOffset); }
+
+// One f32 flag by store index, giving its name hash and value.
+inline bool GetFlagF32ByIndex(int index, uint32_t& hash, float& value) {
+#if !WIIXL_SWITCH
+    impl::FlagAccess access;
+    void* container = nullptr;
+    uint32_t foundHash = 0;
+    if (!impl::StoreSlot(impl::kF32ContainerOffset, index, access, container, foundHash)) {
+        return false;
+    }
+
+    auto read = WiiXLaunch::GetTargetFunction<impl::GetFlagF32ByIndexFn>(
+        0x0, impl::kGetFlagF32ByIndexWiiU);
+    if (!read) return false;
+
+    float readValue = 0.0f;
+    if (read(&readValue, container, index, access.flags) == 0) return false;
+
+    hash = foundHash;
+    value = readValue;
     return true;
 #else
     (void)index; (void)hash; (void)value;
