@@ -473,6 +473,22 @@ constexpr uintptr_t kGetFlagF32ByNameWiiU = 0x0320fb40;
 constexpr uintptr_t kGetFlagF32ByIndexWiiU = 0x03234bac;
 constexpr uintptr_t kSetFlagF32TypedWiiU = 0x032164b4;
 
+// vector3f. Container core+0x58; value is 12 bytes so it travels by POINTER in
+// a GPR, unlike the f32 scalar which rides in f1.
+//   by-name read  0x0320fcd0
+//   indexed read  0x03234f3c   (via stub 0x0320fa04)
+//   typed setter  0x0321661c
+//
+// Worth knowing if more types get added: the tables are NOT uniformly spaced
+// here. Both the stub table and the by-name family SKIP vector2f entirely -
+// they run ...string256 (+0x40) then straight to vector3f (+0x58) - and the
+// setter table breaks stride around the string types. Predicting these by
+// arithmetic from the bool/s32/f32 spacing gives the wrong addresses; each was
+// confirmed by reading the container offset out of the disassembly.
+constexpr uintptr_t kGetFlagVec3ByNameWiiU = 0x0320fcd0;
+constexpr uintptr_t kGetFlagVec3ByIndexWiiU = 0x03234f3c;
+constexpr uintptr_t kSetFlagVec3TypedWiiU = 0x0321661c;
+
 // Manager fields 0x032002d4 reads, mirrored here because forcing means
 // reimplementing that wrapper rather than calling it.
 constexpr uintptr_t kManagerStatusBits = 0x730;   // bit 0x12 blocks all writes
@@ -485,6 +501,7 @@ constexpr uintptr_t kManagerBoolCoreMirror = 0x710;
 constexpr uintptr_t kS32ContainerOffset = 0x10;
 constexpr uintptr_t kBoolContainerOffset = 0x04;
 constexpr uintptr_t kF32ContainerOffset = 0x1c;
+constexpr uintptr_t kVec3ContainerOffset = 0x58;
 
 // The containers are 0x0c apart and the first is at core+0x04, not at the s32
 // one. Confirmed against a live v208 save: all 18 stores in the canonical gdt
@@ -524,6 +541,15 @@ using GetFlagF32ByNameFn = int (*)(void* core, float* out, const SafeString* nam
 using GetFlagF32ByIndexFn = int (*)(float* out, void* container, int index, uint8_t flags);
 using SetFlagF32TypedFn = int (*)(void* core, float value, const SafeString* name,
                                   uint8_t flags, int one, int force);
+
+// sead::Vector3f as the flag stores lay it out: three consecutive floats.
+struct Vec3 { float x, y, z; };
+
+using GetFlagVec3ByNameFn = int (*)(void* core, Vec3* out, const SafeString* name,
+                                    uint8_t flags, int one);
+using GetFlagVec3ByIndexFn = int (*)(Vec3* out, void* container, int index, uint8_t flags);
+using SetFlagVec3TypedFn = int (*)(void* core, const Vec3* value, const SafeString* name,
+                                   uint8_t flags, int one, int force);
 using GetFlagHashFn = uint32_t (*)(void* flagObject);
 
 // Sanity check for a pointer read out of game memory: catches null, small
@@ -1023,6 +1049,104 @@ inline bool GetFlagF32ByIndex(int index, uint32_t& hash, float& value) {
     if (!read) return false;
 
     float readValue = 0.0f;
+    if (read(&readValue, container, index, access.flags) == 0) return false;
+
+    hash = foundHash;
+    value = readValue;
+    return true;
+#else
+    (void)index; (void)hash; (void)value;
+    return false;
+#endif
+}
+
+// A three-float flag value, e.g. PlayerSavePos or Horse_Pos.
+using Vec3 = impl::Vec3;
+
+// Reads any vector3f flag by name.
+inline bool GetFlagVec3(const char* name, Vec3& out) {
+#if !WIIXL_SWITCH
+    impl::FlagAccess access;
+    if (!name || !impl::ResolveFlagAccess(access)) return false;
+
+    auto get = WiiXLaunch::GetTargetFunction<impl::GetFlagVec3ByNameFn>(
+        0x0, impl::kGetFlagVec3ByNameWiiU);
+    if (!get) return false;
+
+    impl::SafeString key = impl::MakeSafeString(name);
+    Vec3 value = { 0.0f, 0.0f, 0.0f };
+    if (get(access.core, &value, &key, access.flags, 1) == 0) return false;
+
+    out = value;
+    return true;
+#else
+    (void)name; (void)out;
+    return false;
+#endif
+}
+
+// Writes any vector3f flag by name. The two bypasses behave as they do for the
+// other types - see SetFlagBoolForced for what IsOneTrigger and
+// IsProgramWritable actually gate.
+inline bool SetFlagVec3(const char* name, const Vec3& value,
+                        bool bypassLatch = false, bool bypassPermission = false) {
+#if !WIIXL_SWITCH
+    impl::FlagAccess access;
+    if (!name || !impl::ResolveFlagAccess(access)) return false;
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(access.manager);
+    if ((*reinterpret_cast<uint32_t*>(base + impl::kManagerStatusBits) >> 0x12) & 1) return false;
+    if (*reinterpret_cast<char*>(base + impl::kManagerWriteGate) != 0) return false;
+
+    auto set = WiiXLaunch::GetTargetFunction<impl::SetFlagVec3TypedFn>(
+        0x0, impl::kSetFlagVec3TypedWiiU);
+    if (!set) return false;
+
+    uintptr_t* slot = *reinterpret_cast<uintptr_t**>(base + impl::kManagerBoolCore);
+    if (!impl::Plausible(slot)) return false;
+    void* core = *reinterpret_cast<void**>(slot);
+    if (!impl::Plausible(core)) return false;
+
+    impl::SafeString key = impl::MakeSafeString(name);
+    const uint8_t flags = bypassPermission
+                        ? 0
+                        : *reinterpret_cast<uint8_t*>(base + impl::kManagerFlagByte);
+    const int force = bypassLatch ? 1 : 0;
+
+    if (set(core, &value, &key, flags, 1, force) == 0) return false;
+
+    if (*reinterpret_cast<char*>(base + impl::kManagerMirrorGate) != 0) {
+        uintptr_t* mirrorSlot = *reinterpret_cast<uintptr_t**>(base + impl::kManagerBoolCoreMirror);
+        if (impl::Plausible(mirrorSlot)) {
+            void* mirror = *reinterpret_cast<void**>(mirrorSlot);
+            if (impl::Plausible(mirror)) set(mirror, &value, &key, flags, 1, force);
+        }
+    }
+    return true;
+#else
+    (void)name; (void)value; (void)bypassLatch; (void)bypassPermission;
+    return false;
+#endif
+}
+
+// How many vector3f flags the save holds.
+inline int FlagVec3Count() { return impl::StoreCount(impl::kVec3ContainerOffset); }
+
+// One vector3f flag by store index, giving its name hash and value.
+inline bool GetFlagVec3ByIndex(int index, uint32_t& hash, Vec3& value) {
+#if !WIIXL_SWITCH
+    impl::FlagAccess access;
+    void* container = nullptr;
+    uint32_t foundHash = 0;
+    if (!impl::StoreSlot(impl::kVec3ContainerOffset, index, access, container, foundHash)) {
+        return false;
+    }
+
+    auto read = WiiXLaunch::GetTargetFunction<impl::GetFlagVec3ByIndexFn>(
+        0x0, impl::kGetFlagVec3ByIndexWiiU);
+    if (!read) return false;
+
+    Vec3 readValue = { 0.0f, 0.0f, 0.0f };
     if (read(&readValue, container, index, access.flags) == 0) return false;
 
     hash = foundHash;
