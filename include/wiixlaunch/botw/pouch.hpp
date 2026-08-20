@@ -176,6 +176,24 @@ constexpr uintptr_t kRebuildEquippedWiiU = 0x02ebf690;
 constexpr uintptr_t kRequestEquipActorWiiU = 0x02a15e44;
 constexpr uintptr_t kEquipmentMgrPtrWiiU = 0x10463708;
 
+// ksys::act::Player equipment update. The game runs it on menu close, which is
+// why an equip only became visible after pausing and unpausing. Calling it
+// ourselves applies the swap without touching the menu.
+constexpr uintptr_t kPlayerEquipUpdateWiiU = 0x02d6f224;
+
+// Slot record geometry, from 0x02a157c8: records start at equipmentMgr+0x4c and
+// are 0x17 words (0x5c bytes) each, with the state word at index 0x13. State 2
+// means the actor has finished loading and is ready to be taken.
+constexpr uintptr_t kEquipRecordsBase = 0x4c;
+constexpr uintptr_t kEquipRecordStride = 0x5c;
+constexpr uintptr_t kEquipRecordState = 0x4c;
+constexpr int kEquipRecordReady = 2;
+
+// Frames to wait for the actor before giving up. The request is asynchronous,
+// so firing the update immediately just takes nothing; polling the state word
+// beats guessing a delay.
+constexpr int kEquipRefreshTimeout = 180;
+
 // Pouch type -> equipment-manager slot. 0 right hand, 1 left hand/shield,
 // 2 bow, 3/4/5 the armour pieces; from 0x02d6f224 and 0x02eb8180. Arrows are a
 // pouch type with no actor slot.
@@ -236,6 +254,11 @@ using NotifyEquipRemovedFn = void (*)(void* player, const void* name);
 using RebuildEquippedFn = void (*)(void* manager);
 using RequestEquipActorFn = void (*)(void* equipmentManager, int slot, const void* name,
                                      int value, const void* debugTag);
+using PlayerEquipUpdateFn = void (*)(void* player);
+
+// Slot whose actor we are waiting on, and how many frames are left to wait.
+inline int& PendingEquipSlot() { static int slot = -1; return slot; }
+inline int& PendingEquipFrames() { static int frames = 0; return frames; }
 
 inline SafeString MakeSafeString(const char* text) {
     SafeString s = { text, reinterpret_cast<const void*>(kSeadSafeStringVtableWiiU) };
@@ -636,6 +659,11 @@ inline bool EquipItem(const char* name) {
                     reinterpret_cast<const void*>(target + impl::kItemName),
                     *reinterpret_cast<int32_t*>(target + impl::kItemValue),
                     &tag);
+
+            // Watch for the actor to finish loading, then run the update that
+            // attaches it - see TickEquipRefresh.
+            impl::PendingEquipSlot() = slot;
+            impl::PendingEquipFrames() = impl::kEquipRefreshTimeout;
         }
     }
 
@@ -644,6 +672,52 @@ inline bool EquipItem(const char* name) {
 #else
     (void)name;
     return false;
+#endif
+}
+
+// Applies a pending equip without waiting for the player to open the menu.
+//
+// Call once per frame from the game thread. Equipping only files a request; the
+// actor loads asynchronously and is attached by the player's equipment update,
+// which the game itself only runs on menu close. So this waits for the slot
+// record to reach the ready state and then runs that update directly, which is
+// what makes a swap appear immediately instead of on the next pause.
+//
+// Deliberately polls rather than sleeping a fixed number of frames: load time
+// varies, and calling the update early simply takes nothing and wastes the
+// request. Gives up after kEquipRefreshTimeout frames so a failed load cannot
+// leave this running forever.
+inline void TickEquipRefresh() {
+#if !WIIXL_SWITCH
+    int& slot = impl::PendingEquipSlot();
+    if (slot < 0) return;
+
+    int& frames = impl::PendingEquipFrames();
+    if (--frames <= 0) {
+        slot = -1;
+        return;
+    }
+
+    void* equipment = *reinterpret_cast<void**>(impl::kEquipmentMgrPtrWiiU);
+    if (!equipment) { slot = -1; return; }
+
+    uintptr_t record = reinterpret_cast<uintptr_t>(equipment) + impl::kEquipRecordsBase
+                     + static_cast<uintptr_t>(slot) * impl::kEquipRecordStride;
+    if (*reinterpret_cast<int32_t*>(record + impl::kEquipRecordState) != impl::kEquipRecordReady) {
+        return;   // still loading, try again next frame
+    }
+
+    auto getPlayer = WiiXLaunch::GetTargetFunction<impl::GetPlayerFn>(
+        0x0, impl::kGetPlayerForEquipWiiU);
+    auto update = WiiXLaunch::GetTargetFunction<impl::PlayerEquipUpdateFn>(
+        0x0, impl::kPlayerEquipUpdateWiiU);
+    slot = -1;
+    if (!getPlayer || !update) return;
+
+    void* holder = *reinterpret_cast<void**>(impl::kPlayerHolderPtrWiiU);
+    if (!holder) return;
+    void* player = getPlayer(holder);
+    if (player) update(player);
 #endif
 }
 
