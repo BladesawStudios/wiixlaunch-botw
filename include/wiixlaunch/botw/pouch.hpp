@@ -94,6 +94,13 @@ constexpr uintptr_t kItemValue = 0x10;
 constexpr uintptr_t kItemEquipped = 0x14;
 constexpr uintptr_t kItemName = 0x18;       // char* at +0x00, vptr at +0x04
 
+// Weapon modifier, from 0x02eb0a1c: the bitmask lands at item+0x6c and its
+// magnitude at item+0x64, and only for types 0-3. Those two words are the same
+// union food uses for cook data, which is why the game gates on type here - a
+// meal and a sword cannot both be using it.
+constexpr uintptr_t kItemModifierFlags = 0x6c;
+constexpr uintptr_t kItemModifierValue = 0x64;
+
 constexpr uintptr_t kCritSection = 0x10;
 constexpr uintptr_t kIsPouchForQuest = 0x38128;
 
@@ -231,6 +238,18 @@ constexpr uintptr_t kAddPouchItemWiiU = 0x02eb3df0;
 // an add so the new item reaches the save flags.
 constexpr uintptr_t kSaveToGameDataWiiU = 0x02eb3764;
 
+// PauseMenuDataMgr::setItemModifier(mgr, PouchItem*, const s32 pair[2]).
+//
+// pair[0] is the modifier bitmask, pair[1] its magnitude. A null pointer, or a
+// zero bitmask, clears the modifier instead. addItem routes its 7th argument
+// through here for types 0/1/3, which is how a weapon loaded from a save gets
+// the bonus recorded in PorchSword_FlagSp / PorchSword_ValueSp.
+//
+// Preferred over writing item+0x6c and item+0x64 directly: it owns the type
+// gate, so it cannot corrupt a food item's cook data by writing weapon fields
+// into the shared union.
+constexpr uintptr_t kSetItemModifierWiiU = 0x02eb0a1c;
+
 // sead::SafeString's vtable - see the same constant in gamedata.hpp. A stack
 // SafeString is { const char*, vtable }, pointer first.
 constexpr uintptr_t kSeadSafeStringVtableWiiU = 0x10263910;
@@ -248,6 +267,7 @@ using GetPouchItemTypeFn = int (*)(const SafeString* name, int unused);
 using AddPouchItemFn = void (*)(void* manager, const SafeString* name, int type, void* list,
                                 int value, int a, int b, int c);
 using SaveToGameDataFn = void (*)(void* manager, void* list);
+using SetItemModifierFn = void (*)(void* manager, void* item, const int32_t* pair);
 using RegisterEquippedFn = void (*)(void* manager, void* item);
 using GetPlayerFn = void* (*)(void* holder);
 using NotifyEquipRemovedFn = void (*)(void* player, const void* name);
@@ -259,6 +279,7 @@ using PlayerEquipUpdateFn = void (*)(void* player);
 // Slot whose actor we are waiting on, and how many frames are left to wait.
 inline int& PendingEquipSlot() { static int slot = -1; return slot; }
 inline int& PendingEquipFrames() { static int frames = 0; return frames; }
+
 
 inline SafeString MakeSafeString(const char* text) {
     SafeString s = { text, reinterpret_cast<const void*>(kSeadSafeStringVtableWiiU) };
@@ -352,6 +373,33 @@ inline uintptr_t FindEquipped(int type, int* outIndex = nullptr) {
 #else
     (void)type; (void)outIndex;
     return 0;
+#endif
+}
+
+// Asks the equipment manager to load an item's actor for its slot, and arms the
+// per-frame watcher that attaches it. Shared by EquipItem and SetModifier: a
+// changed modifier is only visible once the weapon actor is rebuilt, which is
+// the same problem equipping has.
+inline void RequestActorForItem(uintptr_t item, int type) {
+#if !WIIXL_SWITCH
+    const int slot = EquipSlotForType(type);
+    if (slot < 0) return;
+
+    auto request = WiiXLaunch::GetTargetFunction<RequestEquipActorFn>(
+        0x0, kRequestEquipActorWiiU);
+    void* equipment = *reinterpret_cast<void**>(kEquipmentMgrPtrWiiU);
+    if (!request || !equipment) return;
+
+    SafeString tag = MakeSafeString("BotW_API");
+    request(equipment, slot,
+            reinterpret_cast<const void*>(item + kItemName),
+            *reinterpret_cast<int32_t*>(item + kItemValue),
+            &tag);
+
+    PendingEquipSlot() = slot;
+    PendingEquipFrames() = kEquipRefreshTimeout;
+#else
+    (void)item; (void)type;
 #endif
 }
 
@@ -645,27 +693,7 @@ inline bool EquipItem(const char* name) {
         0x0, impl::kRebuildEquippedWiiU);
     if (rebuild) rebuild(manager);
 
-    // Ask the equipment manager to load this item's actor for its slot. The
-    // player's own update picks it up and attaches it on a later pass, which is
-    // what finally makes the swap visible in the world.
-    const int slot = impl::EquipSlotForType(targetType);
-    if (slot >= 0) {
-        auto request = WiiXLaunch::GetTargetFunction<impl::RequestEquipActorFn>(
-            0x0, impl::kRequestEquipActorWiiU);
-        void* equipment = *reinterpret_cast<void**>(impl::kEquipmentMgrPtrWiiU);
-        if (request && equipment) {
-            impl::SafeString tag = impl::MakeSafeString("BotW_API");
-            request(equipment, slot,
-                    reinterpret_cast<const void*>(target + impl::kItemName),
-                    *reinterpret_cast<int32_t*>(target + impl::kItemValue),
-                    &tag);
-
-            // Watch for the actor to finish loading, then run the update that
-            // attaches it - see TickEquipRefresh.
-            impl::PendingEquipSlot() = slot;
-            impl::PendingEquipFrames() = impl::kEquipRefreshTimeout;
-        }
-    }
+    impl::RequestActorForItem(target, targetType);
 
     (void)targetIndex;
     return true;
@@ -721,12 +749,197 @@ inline void TickEquipRefresh() {
 #endif
 }
 
+// Weapon modifier bits. ALL CONFIRMED from the decoder at 0x02eb7e24, which
+// maps a mask to a display/sort index and covers every bit exhaustively:
+//
+//   0x1   AddPower     attack up          index 1  (0 when yellow)
+//   0x2   AddLife      durability up      index 5  (4 when yellow)
+//   0x4   Critical     critical hit       index 7
+//   0x8   LongThrow    throw distance     index 6
+//   0x10  SpreadFire   multishot          index 10
+//   0x20  ZoomRapid    burst AND zoom     index 11
+//   0x40  RapidFire    quick shot         index 9
+//   0x80  SurfMaster   shield surf        index 8
+//   0x100 AddGuard     guard up           index 3  (2 when yellow)
+//   none                                  index 12
+//
+// The yellow tier bit is only consulted for AddPower, AddLife and AddGuard -
+// the decoder tests it in exactly those three branches and nowhere else - which
+// matches the name table having Plus forms only for those three. Setting it
+// alongside any other bonus does nothing.
+//
+// PRIORITY, straight from the order of the decoder's tests, is what makes a
+// combined mask show a single bonus:
+//
+//   0x1 > 0x2 > 0x8 > 0x4 > 0x100 > 0x80 > 0x10 > 0x20 > 0x40
+//
+// That predicts the observed cases: 3 (0x1|0x2) shows Attack Up, 6 (0x2|0x4)
+// shows Durability Up, and 100 decimal (0x4|0x20|0x40) shows Critical Hit.
+//
+// Names come from the effect table built at 0x0308b9b8. Which bits a weapon
+// class actually honours is a separate question - a sword ignores the bow bits.
+//
+// THE MAGNITUDE AT item+0x64 IS NOT ALWAYS AN INTEGER. Weapon param lists
+// declare a roll range per modifier, and the declared types differ:
+//
+//   0x1   AddPower    int    flat attack     (rolls 0-9, yellow to 16)
+//   0x2   AddLife     int    flat durability (1-7, yellow to 18)
+//   0x100 AddGuard    int    flat guard      (0-12, yellow to 26)
+//   0x8   LongThrow   int    throw distance  (range declared 1.5-2.0 as floats,
+//                                              but the stored magnitude is an
+//                                              int - large values throw far)
+//   0x40  RapidFire   FLOAT  multiplier      (1.0 - 1.3), float BITS
+//   0x4, 0x10, 0x20, 0x80  Critical, SpreadFire, ZoomRapid, SurfMaster:
+//                          declared True/False, so no RANDOM range - but they
+//                          do still use the magnitude. SpreadFire and
+//                          SurfMaster were both seen changing with it in play.
+//                          Their type (int or float) is not established.
+//
+// So for LongThrow and RapidFire the word holds float BITS, not a number.
+// Writing integer 1 there is a denormal near zero, which is why Quick Shot with
+// a magnitude of 1 does nothing observable. Use ModifierWantsFloat to decide.
+//
+// From SharpWeaponAddAtkMin/Max, AddLifeMin/Max, AddCrit, AddGuardMin/Max and
+// the Powered variants across 193 weapon param lists; SharpWeaponPer is 10.0
+// everywhere, the chance of rolling a bonus at all.
+enum ModifierBit : uint32_t {
+    ModifierNone       = 0,
+    ModifierAttackUp   = 0x001,   // AddPower
+    ModifierDurability = 0x002,   // AddLife
+    ModifierCritical   = 0x004,   // Critical
+    ModifierLongThrow  = 0x008,   // LongThrow
+    ModifierMultiShot  = 0x010,   // SpreadFire
+    ModifierZoomRapid  = 0x020,   // ZoomRapid - burst and zoom together
+    ModifierRapidFire  = 0x040,   // RapidFire, shown as Quick Shot
+    ModifierSurfMaster = 0x080,   // SurfMaster
+    ModifierGuardUp    = 0x100,   // AddGuard
+    ModifierYellow     = 0x80000000,   // tier; only for AttackUp/Durability/GuardUp
+};
+
+// Whether a modifier's magnitude is float bits rather than an integer.
+//
+// RapidFire only, and that is measured rather than inferred: written as the
+// float 1.3 it visibly speeds the draw, while integer 1 did nothing (as float
+// bits, 1 is a denormal near zero).
+//
+// LongThrow is an INT despite its roll range being declared in floats
+// (PoweredSharpAddThrowMin/Max are 1.5 and 2.0). Large integers make throws go
+// a long way, and switching it to float parsing broke that - so the param range
+// and the stored magnitude are not the same units here. Trusting the behaviour
+// over the declaration.
+inline bool ModifierWantsFloat(uint32_t flags) {
+    return (flags & ModifierRapidFire) != 0;
+}
+
+// Reinterprets a float as the raw word the magnitude field expects.
+inline int32_t ModifierFloatBits(float value) {
+    union { float f; int32_t i; } bits;
+    bits.f = value;
+    return bits.i;
+}
+
+// Reads a weapon's modifier. False when no entry of that name exists or it is
+// not a type the modifier union applies to (0-3: sword, bow, arrow, shield).
+inline bool GetModifier(const char* name, uint32_t& flags, int32_t& value) {
+#if !WIIXL_SWITCH
+    if (!name) return false;
+
+    uintptr_t found = 0;
+    impl::WalkItems([&](uintptr_t node, int) {
+        const char* entry = impl::ReadName(node);
+        if (!entry) return true;
+        const char* a = entry;
+        const char* b = name;
+        while (*a && *a == *b) { ++a; ++b; }
+        if (*a != *b) return true;
+        found = node;
+        return false;
+    });
+
+    if (!found) return false;
+    if (*reinterpret_cast<int32_t*>(found + impl::kItemType) > 3) return false;
+
+    flags = *reinterpret_cast<uint32_t*>(found + impl::kItemModifierFlags);
+    value = *reinterpret_cast<int32_t*>(found + impl::kItemModifierValue);
+    return true;
+#else
+    (void)name; (void)flags; (void)value;
+    return false;
+#endif
+}
+
+// Sets a weapon's modifier, or clears it when flags is 0. Goes through the
+// game's own setter so the type gate is respected.
+//
+// The pouch is updated immediately; the weapon Link is holding keeps whatever
+// stats it spawned with, so re-equip the item to see a change in the world.
+inline bool SetModifier(const char* name, uint32_t flags, int32_t value) {
+#if !WIIXL_SWITCH
+    void* manager = impl::PauseMenuDataMgr();
+    if (!manager || !name) return false;
+
+    auto set = WiiXLaunch::GetTargetFunction<impl::SetItemModifierFn>(
+        0x0, impl::kSetItemModifierWiiU);
+    auto lock = WiiXLaunch::GetTargetFunction<impl::CritSectionFn>(0x0, impl::kCritSectionLockWiiU);
+    auto unlock = WiiXLaunch::GetTargetFunction<impl::CritSectionFn>(0x0, impl::kCritSectionUnlockWiiU);
+    if (!set || !lock || !unlock) return false;
+
+    uintptr_t found = 0;
+    impl::WalkItems([&](uintptr_t node, int) {
+        const char* entry = impl::ReadName(node);
+        if (!entry) return true;
+        const char* a = entry;
+        const char* b = name;
+        while (*a && *a == *b) { ++a; ++b; }
+        if (*a != *b) return true;
+        found = node;
+        return false;
+    });
+
+    if (!found) return false;
+    if (*reinterpret_cast<int32_t*>(found + impl::kItemType) > 3) return false;
+
+    const int32_t pair[2] = { static_cast<int32_t>(flags), value };
+    uintptr_t base = reinterpret_cast<uintptr_t>(manager);
+    void* critSection = reinterpret_cast<void*>(base + impl::kCritSection);
+
+    const int type = *reinterpret_cast<int32_t*>(found + impl::kItemType);
+    const bool equipped = *reinterpret_cast<uint8_t*>(found + impl::kItemEquipped) != 0;
+
+    lock(critSection);
+    set(manager, reinterpret_cast<void*>(found), pair);
+    unlock(critSection);
+
+    // Deliberately NOT refreshing the actor here.
+    //
+    // The obvious move is to rebuild the held weapon so the change shows at
+    // once, and that is what this did for a while. It made things worse:
+    // 0x02a15e44 takes only a name and a durability, carrying no modifier, so
+    // the rebuilt actor comes back WITHOUT the bonus - measured, Long Throw and
+    // Shield Surf stopped having any effect once the refresh was added, having
+    // worked when the item was re-equipped by hand.
+    //
+    // Re-equipping through the game applies it properly, because that path
+    // reads the whole PouchItem. EquipItem still refreshes, since there the
+    // name and durability are all the request needs.
+    (void)equipped;
+    (void)type;
+
+    return true;
+#else
+    (void)name; (void)flags; (void)value;
+    return false;
+#endif
+}
+
 // One pouch entry, as handed to ForEachOfType.
 struct Entry {
     const char* name;   // null if the entry's name pointer did not validate
     int value;          // count for materials, durability for weapons
     int index;          // pouch index, the key the PorchItem_* flags use
     bool equipped;
+    uint32_t modifierFlags;   // weapons only (type 0-3); 0 for everything else
+    int32_t modifierValue;
 };
 
 // Visits every entry of one type in pouch order. visit returns false to stop
@@ -751,6 +964,14 @@ inline int ForEachOfType(Slot slot, Fn visit) {
         entry.value = *reinterpret_cast<int32_t*>(node + impl::kItemValue);
         entry.index = index;
         entry.equipped = *reinterpret_cast<uint8_t*>(node + impl::kItemEquipped) != 0;
+
+        // the modifier union only means this for types 0-3; on food the same
+        // words are cook data, so reporting them there would be nonsense
+        const bool weapon = type <= 3;
+        entry.modifierFlags = weapon
+            ? *reinterpret_cast<uint32_t*>(node + impl::kItemModifierFlags) : 0u;
+        entry.modifierValue = weapon
+            ? *reinterpret_cast<int32_t*>(node + impl::kItemModifierValue) : 0;
 
         ++matched;
         return visit(entry);
