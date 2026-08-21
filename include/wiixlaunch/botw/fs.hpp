@@ -118,20 +118,37 @@ inline bool ReadFile(const char* path, void* outBuffer, size_t maxBufferSize, si
         return false;
     }
 
-    struct {
+    // MUST be the full 0x64 bytes coreinit's FSStat occupies (wut asserts that
+    // size). This was 96 bytes for a while, and FSGetStatFile duly wrote four
+    // bytes past the end of it - straight onto the adjacent stack slot, which
+    // the compiler had given to toRead. FSStat's tail is its `attributes` array
+    // and reads back as zeroes, so toRead became 0, FSReadFile was asked for
+    // zero bytes, and every read "succeeded" having transferred nothing.
+    struct FsStatBuf {
         uint32_t flags;
         uint32_t mode;
         uint32_t owner;
         uint32_t group;
         uint32_t size;
-        uint32_t pad[19];
-    } statBuf{};
+        uint32_t rest[20];
+    };
+    static_assert(sizeof(FsStatBuf) == 0x64, "must match coreinit FSStat exactly");
+    alignas(64) FsStatBuf statBuf{};
 
     size_t toRead = maxBufferSize;
-    if (getStat && getStat(impl::g_FSClient, impl::g_FSCmdBlock, handle, &statBuf, 0xFFFFFFFF) == 0) {
-        if (statBuf.size > 0 && statBuf.size <= maxBufferSize) {
-            toRead = statBuf.size;
-        }
+    int32_t statStatus = getStat ? getStat(impl::g_FSClient, impl::g_FSCmdBlock, handle, &statBuf, 0xFFFFFFFF)
+                                 : -1;
+    if (statStatus == 0 && statBuf.size > 0 && statBuf.size <= maxBufferSize) {
+        toRead = statBuf.size;
+    }
+
+    // Belt and braces after the above: asking FSReadFile for zero bytes reads
+    // nothing and reports success, which is indistinguishable from a genuinely
+    // empty file and took a while to spot the first time.
+    if (toRead == 0) {
+        WIIXL_LOG("WiiXLaunch: ReadFile '%s' aborted - computed a zero-byte read", openedPath);
+        closeFile(impl::g_FSClient, impl::g_FSCmdBlock, handle, 0xFFFFFFFF);
+        return false;
     }
 
     int32_t readBytes = readFile(impl::g_FSClient, impl::g_FSCmdBlock, outBuffer, 1, toRead, handle, 0, 0xFFFFFFFF);
@@ -139,7 +156,8 @@ inline bool ReadFile(const char* path, void* outBuffer, size_t maxBufferSize, si
 
     if (readBytes >= 0) {
         if (outReadSize) *outReadSize = static_cast<size_t>(readBytes);
-        WIIXL_LOG("WiiXLaunch: ReadFile '%s' OK (%d bytes)", openedPath, readBytes);
+        WIIXL_LOG("WiiXLaunch: ReadFile '%s' OK (%d bytes, stat=%d size=%u)",
+                  openedPath, readBytes, statStatus, (unsigned)statBuf.size);
         return true;
     }
 
@@ -220,9 +238,15 @@ inline bool WriteFile(const char* path, const void* buffer, size_t size, size_t*
                                  path, "w", &handle, FS_ERROR_FLAG_ALL);
     if (status != FS_STATUS_OK) return false;
 
+    // wut declares FSWriteFile's buffer as a non-const uint8_t* even though the
+    // call only reads from it, so the const has to come off somewhere. Doing it
+    // here keeps WriteFile's own signature honest (`const void* buffer`); before
+    // this, the mismatch made the whole header fail to compile on the Wii U
+    // target, which is why callers had to avoid including it at all.
     int32_t writtenBytes = FSWriteFile(reinterpret_cast<FSClient*>(impl::g_FSClient),
                                        reinterpret_cast<FSCmdBlock*>(impl::g_FSCmdBlock),
-                                       reinterpret_cast<uint8_t*>(const_cast<void*>(buffer)), 1, size, handle, 0, FS_ERROR_FLAG_ALL);
+                                       const_cast<uint8_t*>(reinterpret_cast<const uint8_t*>(buffer)),
+                                       1, size, handle, 0, FS_ERROR_FLAG_ALL);
     FSCloseFile(reinterpret_cast<FSClient*>(impl::g_FSClient),
                 reinterpret_cast<FSCmdBlock*>(impl::g_FSCmdBlock),
                 handle, FS_ERROR_FLAG_ALL);
