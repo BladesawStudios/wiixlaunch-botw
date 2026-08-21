@@ -13,6 +13,7 @@
 #include "player.hpp"
 #include "gamedata.hpp"
 #include "pouch.hpp"
+#include "armour.hpp"
 #include "controller.hpp"
 #include "camera.hpp"
 #include "flyt.hpp"

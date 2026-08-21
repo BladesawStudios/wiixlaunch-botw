@@ -31,6 +31,7 @@ projects that want it.
 | `botw/player.hpp` | `Player` - equipped sword/shield/bow, position, per-swing attack detection, a per-frame `OnTick` callback |
 | `botw/actor.hpp` | `Actor` - a thin wrapper around a raw actor pointer (`GetName()`, `Delete()`), plus `Actor::Spawn(name, anchor, x, y, z)` |
 | `botw/pouch.hpp` | `Pouch` - equipped-item values through `PauseMenuDataMgr`, so durability changes reach the menu and the save rather than only the actor |
+| `botw/armour.hpp` | `Armour` - the special-status effects worn armour grants (`GetArmourEffects`/`SetArmourEffects`, per-piece get/set), read from and written to the pieces' `ArmorEffect` GParamList |
 | `botw/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core) |
 | `botw/camera.hpp` | `Camera` - typed get/set accessors for a live camera object's position/look-at/up |
 | `botw/nvn.hpp` | `NVN` - Switch NVN graphics injection, custom textures, packaged data, samplers, and 2D/3D drawing |
@@ -90,6 +91,7 @@ a runtime check:
 | Graphics injection (`NVN::SupportsNVN`) | ✅ | N/A |
 | Graphics injection (`GX2::SupportsGX2`) | N/A | ✅ |
 | Equipped item value (`Pouch::SupportsEquippedValue`) | ❌ | ✅ |
+| Armour effects (`Armour::SupportsArmourEffects`) | ❌ | ✅ |
 | Player position (`Player::SupportsPosition`) | ❌ | ✅ |
 | Attack-swing tracking (`Player::SupportsAttackTracking`) | ❌ | ✅ |
 | Actor spawning (`Actor::SupportsSpawn`) | ❌ | ✅ (see caveat) |
