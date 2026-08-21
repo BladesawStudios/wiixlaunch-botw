@@ -1127,15 +1127,13 @@ inline bool GetModifier(const char* name, uint32_t& flags, int32_t& value) {
 #endif
 }
 
-// Sets a weapon's modifier, or clears it when flags is 0. Goes through the
-// game's own setter so the type gate is respected.
-//
-// The pouch is updated immediately; the weapon Link is holding keeps whatever
-// stats it spawned with, so re-equip the item to see a change in the world.
-inline bool SetModifier(const char* name, uint32_t flags, int32_t value) {
+// Writes the modifier onto an already-resolved entry. Take this overload when
+// the caller has picked a slot: a name alone always finds the FIRST match, so
+// two copies of the same weapon are otherwise indistinguishable.
+inline bool SetModifierAt(uintptr_t found, uint32_t flags, int32_t value) {
 #if !WIIXL_SWITCH
     void* manager = impl::PauseMenuDataMgr();
-    if (!manager || !name) return false;
+    if (!manager || !found) return false;
 
     auto set = WiiXLaunch::GetTargetFunction<impl::SetItemModifierFn>(
         0x0, impl::kSetItemModifierWiiU);
@@ -1143,19 +1141,6 @@ inline bool SetModifier(const char* name, uint32_t flags, int32_t value) {
     auto unlock = WiiXLaunch::GetTargetFunction<impl::CritSectionFn>(0x0, impl::kCritSectionUnlockWiiU);
     if (!set || !lock || !unlock) return false;
 
-    uintptr_t found = 0;
-    impl::WalkItems([&](uintptr_t node, int) {
-        const char* entry = impl::ReadName(node);
-        if (!entry) return true;
-        const char* a = entry;
-        const char* b = name;
-        while (*a && *a == *b) { ++a; ++b; }
-        if (*a != *b) return true;
-        found = node;
-        return false;
-    });
-
-    if (!found) return false;
     if (*reinterpret_cast<int32_t*>(found + impl::kItemType) > 3) return false;
 
     const int32_t pair[2] = { static_cast<int32_t>(flags), value };
@@ -1185,6 +1170,20 @@ inline bool SetModifier(const char* name, uint32_t flags, int32_t value) {
     (void)type;
 
     return true;
+#else
+    (void)found; (void)flags; (void)value;
+    return false;
+#endif
+}
+
+// Sets a weapon's modifier, or clears it when flags is 0. Goes through the
+// game's own setter so the type gate is respected.
+//
+// The pouch is updated immediately; the weapon Link is holding keeps whatever
+// stats it spawned with, so re-equip the item to see a change in the world.
+inline bool SetModifier(const char* name, uint32_t flags, int32_t value) {
+#if !WIIXL_SWITCH
+    return SetModifierAt(FindItem(name), flags, value);
 #else
     (void)name; (void)flags; (void)value;
     return false;
