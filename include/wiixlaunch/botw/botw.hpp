@@ -15,6 +15,7 @@
 #include "pouch.hpp"
 #include "armour.hpp"
 #include "gametime.hpp"
+#include "weather.hpp"
 #include "controller.hpp"
 #include "camera.hpp"
 #include "flyt.hpp"
