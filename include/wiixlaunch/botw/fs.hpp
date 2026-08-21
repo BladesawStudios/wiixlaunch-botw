@@ -222,7 +222,7 @@ inline bool WriteFile(const char* path, const void* buffer, size_t size, size_t*
 
     int32_t writtenBytes = FSWriteFile(reinterpret_cast<FSClient*>(impl::g_FSClient),
                                        reinterpret_cast<FSCmdBlock*>(impl::g_FSCmdBlock),
-                                       reinterpret_cast<const uint8_t*>(buffer), 1, size, handle, 0, FS_ERROR_FLAG_ALL);
+                                       reinterpret_cast<uint8_t*>(const_cast<void*>(buffer)), 1, size, handle, 0, FS_ERROR_FLAG_ALL);
     FSCloseFile(reinterpret_cast<FSClient*>(impl::g_FSClient),
                 reinterpret_cast<FSCmdBlock*>(impl::g_FSCmdBlock),
                 handle, FS_ERROR_FLAG_ALL);

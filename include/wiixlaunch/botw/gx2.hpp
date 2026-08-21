@@ -15,6 +15,8 @@
 #if WIIXL_CEMU
 #include "gx2_imports.hpp"
 #elif WIIXL_WIIU
+#include <gx2/context.h>
+#include <gx2/state.h>
 #include <gx2/draw.h>
 #include <gx2/shaders.h>
 #include <gx2/mem.h>
