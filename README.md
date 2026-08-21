@@ -32,6 +32,7 @@ projects that want it.
 | `botw/actor.hpp` | `Actor` - a thin wrapper around a raw actor pointer (`GetName()`, `Delete()`), plus `Actor::Spawn(name, anchor, x, y, z)` |
 | `botw/pouch.hpp` | `Pouch` - equipped-item values through `PauseMenuDataMgr`, so durability changes reach the menu and the save rather than only the actor |
 | `botw/armour.hpp` | `Armour` - the special-status effects worn armour grants (`GetArmourEffects`/`SetArmourEffects`, per-piece get/set), read from and written to the pieces' `ArmorEffect` GParamList |
+| `botw/gametime.hpp` | `Time` - the in-game clock (`GetGameTime`/`SetGameTime`), day counter, time division and clock speed, through the world manager's own pending-jump path |
 | `botw/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core) |
 | `botw/camera.hpp` | `Camera` - typed get/set accessors for a live camera object's position/look-at/up |
 | `botw/nvn.hpp` | `NVN` - Switch NVN graphics injection, custom textures, packaged data, samplers, and 2D/3D drawing |
@@ -92,6 +93,7 @@ a runtime check:
 | Graphics injection (`GX2::SupportsGX2`) | N/A | ✅ |
 | Equipped item value (`Pouch::SupportsEquippedValue`) | ❌ | ✅ |
 | Armour effects (`Armour::SupportsArmourEffects`) | ❌ | ✅ |
+| In-game clock (`Time::SupportsGameTime`) | ❌ | ✅ |
 | Player position (`Player::SupportsPosition`) | ❌ | ✅ |
 | Attack-swing tracking (`Player::SupportsAttackTracking`) | ❌ | ✅ |
 | Actor spawning (`Actor::SupportsSpawn`) | ❌ | ✅ (see caveat) |
