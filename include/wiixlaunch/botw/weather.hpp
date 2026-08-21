@@ -16,9 +16,21 @@
 //   * On top of that sits a single OVERRIDE byte at +0x649. It is 0xff for
 //     "nobody is forcing anything", and 0-8 to pin the weather to one type.
 //     The resolver (0x036723a8) gives it absolute priority over the climate
-//     roll, so an override does not expire - it holds until something writes
-//     that byte again. In the retail game only three script-driven callers
-//     ever set it, so during normal play it stays 0xff.
+//     roll. In the retail game only three script-driven callers ever set it,
+//     so during normal play it stays 0xff.
+//
+//   * An override EXPIRES, and quickly. +0x60c is a frame countdown, not a
+//     state: the world manager's update (0x03677ef0) decrements it every frame
+//     and, once it reaches zero, puts +0x649 back to 0xff and clears +0x64d
+//     and +0x64e. setWeather seeds it with 4, so an unlocked override lasts
+//     four frames. That is long enough for the forecast UI to notice and far
+//     too short for the sky to finish changing, which is exactly what it looks
+//     like: the weather visibly tries to change and then gives up.
+//
+//     The lock is what prevents this. 0x03677ef0 skips the countdown entirely
+//     while +0x64e is set, so a LOCKED override is the only one that holds.
+//     (The skip is itself gated on 0x031cad5c, a cutscene/loading check, so
+//     even a locked override expires during those.)
 //
 //   * Above even that is "magic weather" - the Wizzrobe storms - at +0x610,
 //     -1 when idle. It beats both, and nothing here writes it.
@@ -83,11 +95,16 @@ constexpr uintptr_t kOverride = 0x649;
 // does NOT pass that argument is refused outright - a lock, not a priority.
 constexpr uintptr_t kLocked = 0x64e;
 
-// u8 and s32 that setWeather also writes: the former is its third argument,
-// the latter it always sets to 4. Both are zero after the manager's init, so
-// ClearWeather restores them to that rather than leaving half a request
-// standing - a stale +0x60c would make the game's own priority-respecting
-// callers refuse to change the weather.
+// u8 and s32 that setWeather also writes. +0x64d is its third argument; the
+// sky code at 0x03655de8 snaps its haze value instantly when +0x64d is zero
+// and eases into it otherwise, so 1 is the smooth transition.
+//
+// +0x60c is the override's lifetime IN FRAMES, which setWeather always seeds
+// with 4. 0x03677ef0 counts it down and clears the override at zero unless the
+// lock is set. Both are zero after the manager's init, so ClearWeather
+// restores them to that rather than leaving half a request standing - a stale
+// +0x60c would also make the game's own priority-respecting callers refuse to
+// change the weather.
 constexpr uintptr_t kRequestFlag = 0x64d;
 constexpr uintptr_t kRequestState = 0x60c;
 
@@ -279,16 +296,24 @@ inline bool IsWeatherLocked() {
 
 // Forces the weather, through the game's own setter.
 //
-// The override does not time out: it holds until ClearWeather, which is what
-// makes "keep it raining" a one-line mod, and equally what stops the game's
-// natural weather ever coming back on its own. Clear it when you are done.
+// A locked override holds until ClearWeather, which is what makes "keep it
+// raining" a one-line mod, and equally what stops the game's natural weather
+// ever coming back on its own. Clear it when you are done. An UNLOCKED one
+// times out after four frames - see lockOut below.
 //
-// lockOut passes the setter's last argument. With it, the override additionally
-// REFUSES every later unlocked setWeather - including the game's own scripted
-// ones - so a cutscene cannot take the weather off you. Without it (the
-// default) the request is polite: anything else that sets the weather wins.
-// Note the same flag works against you, so a lockOut already standing makes an
-// ordinary SetWeather fail; use ClearWeather first, or pass lockOut again.
+// lockOut passes the setter's last argument, and it does two things. It makes
+// the override REFUSE every later unlocked setWeather, the game's own scripted
+// ones included, so a cutscene cannot take the weather off you - and, the part
+// that matters more, it is what stops the four-frame countdown described at
+// the top of this header from wiping the override almost immediately.
+//
+// So lockOut is not a refinement: without it a forced weather reverts within
+// four frames, having got just far enough for the forecast to flicker. Pass it
+// for anything you want to persist.
+//
+// The refusal works against the caller too, so a lockOut already standing
+// makes an ordinary SetWeather fail; use ClearWeather first, or pass lockOut
+// again.
 //
 // Deliberately skips the setter's priority gate (the "never downgrade to a
 // milder type while a request is standing" rule), because a caller asking for
