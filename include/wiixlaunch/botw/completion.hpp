@@ -126,7 +126,23 @@ constexpr uintptr_t kGetFlagMaxByNameWiiU = 0x0321072c;
 using GetFlagMaxFn = int (*)(void* core, int* out, const void* name);
 
 inline bool PlausiblePointer(uintptr_t addr) {
-    return addr >= 0x10000000 && addr < 0xa0000000;
+    // 0xf0000000, not the 0xa0000000 most of these headers use. That lower cap
+    // is wrong for this game: gamedata.hpp already had to widen its own after a
+    // gdt write core turned up at 0xa0000238 and every forced flag write was
+    // being refused as an implausible pointer. Singletons allocated up there
+    // read as null through the smaller bound, which is silent - the manager
+    // just looks like it does not exist yet.
+    return addr >= 0x10000000 && addr < 0xf0000000;
+}
+
+// The same question for a FUNCTION pointer, which needs the opposite range.
+// Code lives low - .text starts at 0x02000020 and the highest address this
+// framework calls into is around 0x0421xxxx - so every code pointer fails
+// PlausiblePointer's data-and-heap bound. Using that one on the Divine Beast
+// predicate table skipped all four entries and reported nought of four on a
+// save with all four flags set.
+inline bool PlausibleCode(uintptr_t addr) {
+    return addr >= 0x02000000 && addr < 0x10000000 && (addr & 3) == 0;
 }
 
 // ksys::ui map completion display. Never CALLED - it writes into a layout it
@@ -191,7 +207,13 @@ inline char* AppendInt(char* p, char* end, int value, int minDigits) {
 // "<whole><sep><hh>/100", the same shape the game formats - its own format
 // string is "%d%s%02d/100" with the separator from 0x0308405c.
 inline const char* FormatOverride() {
-    static char buf[32];
+    // 33 rather than 32, and aligned, because of how the Cemu build resolves
+    // references: `end` below is a real relocation to an interior byte of this
+    // buffer, and the packager can only emit a label for a WORD-ALIGNED target.
+    // At 32 bytes end lands on buf+0x1f and the build fails outright. At 33 it
+    // is buf+0x20, which with alignas(4) on the buffer is word-aligned. The
+    // usable capacity is unchanged - the extra byte is never written.
+    alignas(4) static char buf[33];
     char* p = buf;
     char* const end = buf + sizeof(buf) - 1;
 
@@ -288,7 +310,7 @@ inline void CountBeasts(int& done, int& outOf) {
     outOf = count;
     for (int i = 0; i < count; ++i) {
         uintptr_t fn = *reinterpret_cast<uintptr_t*>(table + 4 * static_cast<uintptr_t>(i));
-        if (!PlausiblePointer(fn)) continue;
+        if (!PlausibleCode(fn)) continue;
         if (reinterpret_cast<BeastFlagFn>(fn)(0) != 0) ++done;
     }
 #endif
