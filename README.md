@@ -34,8 +34,10 @@ projects that want it.
 | `botw/armour.hpp` | `Armour` - the special-status effects worn armour grants (`GetArmourEffects`/`SetArmourEffects`, per-piece get/set), read from and written to the pieces' `ArmorEffect` GParamList |
 | `botw/gametime.hpp` | `Time` - the in-game clock (`GetGameTime`/`SetGameTime`), day counter, time division and clock speed, through the world manager's own pending-jump path |
 | `botw/weather.hpp` | `Weather` - the weather system (`GetWeather`/`SetWeather`), the override the game resolves above the climate roll, plus the current climate |
+| `botw/climate.hpp` | `Climate` - the ambient temperature (`GetTemperature`/`SetTemperature`, aliased `Get`/`SetClimate`), recomputed from the climate curves, altitude and the clock |
 | `botw/completion.hpp` | `Completion` - the map's completion percentage (`GetCompletionPercent`), recomputed from the same four counters the UI uses, plus `SetKorokCount` for the one term worth writing and an optional hook (`Init` + `SetDisplayedPercent`) that forces the number on screen |
 | `botw/map.hpp` | `Map` - map reveal: the fifteen tower regions (`Get`/`SetMapRegionUnlock`) and shrine travel destinations (`Get`/`SetMapUnlock`) |
+| `botw/events.hpp` | `Events` - edge-triggered callbacks: `OnKorokGet`, `OnShrineComplete`, `OnTowerOpen`, polled by index so a per-frame check costs nothing to speak of |
 | `botw/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core) |
 | `botw/camera.hpp` | `Camera` - typed get/set accessors for a live camera object's position/look-at/up |
 | `botw/nvn.hpp` | `NVN` - Switch NVN graphics injection, custom textures, packaged data, samplers, and 2D/3D drawing |
@@ -98,8 +100,10 @@ a runtime check:
 | Armour effects (`Armour::SupportsArmourEffects`) | ❌ | ✅ |
 | In-game clock (`Time::SupportsGameTime`) | ❌ | ✅ |
 | Weather (`Weather::SupportsWeather`) | ❌ | ✅ |
+| Ambient temperature (`Climate::SupportsClimate`) | ❌ | ✅ |
 | Completion percent (`Completion::SupportsCompletion`) | ❌ | ✅ |
 | Map reveal (`Map::SupportsMap`) | ❌ | ✅ |
+| Progress events (`Events::SupportsEvents`) | ❌ | ✅ |
 | Player position (`Player::SupportsPosition`) | ❌ | ✅ |
 | Attack-swing tracking (`Player::SupportsAttackTracking`) | ❌ | ✅ |
 | Actor spawning (`Actor::SupportsSpawn`) | ❌ | ✅ (see caveat) |
