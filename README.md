@@ -35,6 +35,7 @@ projects that want it.
 | `botw/gametime.hpp` | `Time` - the in-game clock (`GetGameTime`/`SetGameTime`), day counter, time division and clock speed, through the world manager's own pending-jump path |
 | `botw/weather.hpp` | `Weather` - the weather system (`GetWeather`/`SetWeather`), the override the game resolves above the climate roll, plus the current climate |
 | `botw/completion.hpp` | `Completion` - the map's completion percentage (`GetCompletionPercent`), recomputed from the same four counters the UI uses, plus `SetKorokCount` for the one term worth writing and an optional hook (`Init` + `SetDisplayedPercent`) that forces the number on screen |
+| `botw/map.hpp` | `Map` - map reveal: the fifteen tower regions (`Get`/`SetMapRegionUnlock`) and shrine travel destinations (`Get`/`SetMapUnlock`) |
 | `botw/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core) |
 | `botw/camera.hpp` | `Camera` - typed get/set accessors for a live camera object's position/look-at/up |
 | `botw/nvn.hpp` | `NVN` - Switch NVN graphics injection, custom textures, packaged data, samplers, and 2D/3D drawing |
@@ -98,6 +99,7 @@ a runtime check:
 | In-game clock (`Time::SupportsGameTime`) | ❌ | ✅ |
 | Weather (`Weather::SupportsWeather`) | ❌ | ✅ |
 | Completion percent (`Completion::SupportsCompletion`) | ❌ | ✅ |
+| Map reveal (`Map::SupportsMap`) | ❌ | ✅ |
 | Player position (`Player::SupportsPosition`) | ❌ | ✅ |
 | Attack-swing tracking (`Player::SupportsAttackTracking`) | ❌ | ✅ |
 | Actor spawning (`Actor::SupportsSpawn`) | ❌ | ✅ (see caveat) |

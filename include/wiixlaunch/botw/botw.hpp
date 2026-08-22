@@ -17,6 +17,7 @@
 #include "gametime.hpp"
 #include "weather.hpp"
 #include "completion.hpp"
+#include "map.hpp"
 #include "controller.hpp"
 #include "camera.hpp"
 #include "flyt.hpp"
