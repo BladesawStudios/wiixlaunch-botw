@@ -37,6 +37,7 @@ projects that want it.
 | `botw/climate.hpp` | `Climate` - the ambient temperature (`GetTemperature`/`SetTemperature`, aliased `Get`/`SetClimate`), recomputed from the climate curves, altitude and the clock |
 | `botw/completion.hpp` | `Completion` - the map's completion percentage (`GetCompletionPercent`), recomputed from the same four counters the UI uses, plus `SetKorokCount` for the one term worth writing and an optional hook (`Init` + `SetDisplayedPercent`) that forces the number on screen |
 | `botw/map.hpp` | `Map` - map reveal: the fifteen tower regions (`Get`/`SetMapRegionUnlock`) and shrine travel destinations (`Get`/`SetMapUnlock`) |
+| `botw/region.hpp` | `Region` - the fifteen regions as PLACES: which one a world position is in (`GetRegionAt`, off the game's own `Ecosystem/MapTower.beco` raster), whether the player may enter it (`Get`/`SetRegionUnlock`, `SyncFromTowers`), and invisible walls built along the borders of the locked ones from spawned `AirWallCurseGanon` panels - see `docs/region-walls.md` |
 | `botw/events.hpp` | `Events` - edge-triggered callbacks: `OnKorokGet`, `OnShrineComplete`, `OnTowerOpen`, polled by index so a per-frame check costs nothing to speak of |
 | `botw/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core) |
 | `botw/camera.hpp` | `Camera` - typed get/set accessors for a live camera object's position/look-at/up |
@@ -66,6 +67,11 @@ column and the evidence behind it:
   decompilation, but not yet exercised at runtime.
 * `behaviour-confirmed-name-unknown` - behaviour is certain, the C++ name is
   not. Recorded rather than named.
+
+`docs/region-walls.md` is the companion to the region rows: the `Ecosystem/MapTower.beco`
+raster the fifteen regions are actually defined by, why the map's `OpenCenterPos` flags are
+not that, the five `AirWall` actors and which one survives a runtime spawn, and the `"@S"`
+scale creation param. It ends with what has *not* been run, which is all of it.
 
 `docs/actor-transforms.md` is the long-form companion to those rows: the actor
 transform layout, how to enumerate every live actor off `BaseProcMgr`, the map
@@ -103,6 +109,7 @@ a runtime check:
 | Ambient temperature (`Climate::SupportsClimate`) | ❌ | ✅ |
 | Completion percent (`Completion::SupportsCompletion`) | ❌ | ✅ |
 | Map reveal (`Map::SupportsMap`) | ❌ | ✅ |
+| Region lookup + border walls (`Region::SupportsRegion`) | ❌ | ✅ (untested) |
 | Progress events (`Events::SupportsEvents`) | ❌ | ✅ |
 | Player position (`Player::SupportsPosition`) | ❌ | ✅ |
 | Attack-swing tracking (`Player::SupportsAttackTracking`) | ❌ | ✅ |

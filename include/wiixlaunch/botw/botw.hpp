@@ -19,6 +19,7 @@
 #include "climate.hpp"
 #include "completion.hpp"
 #include "map.hpp"
+#include "region.hpp"
 #include "events.hpp"
 #include "controller.hpp"
 #include "camera.hpp"

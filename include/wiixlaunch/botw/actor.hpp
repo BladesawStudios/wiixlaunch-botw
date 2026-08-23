@@ -36,6 +36,8 @@ struct PendingSpawn {
     const char* name = nullptr;
     void* anchor = nullptr;
     float pos[3] = {};
+    bool hasScale = false;
+    float scale[3] = {1.0f, 1.0f, 1.0f};
 };
 
 inline PendingSpawn& PendingSpawnRef() {
@@ -72,6 +74,18 @@ using InitParamPackBufferFn = void* (*)(void* buffer);
 
 constexpr uintptr_t kPositionKeyWord0 = 0x10072ed4;  // DAT_10072ed4, from doSpawn_Conf98's direct FUN_031f9870 call
 constexpr uintptr_t kSafeStringVtable = 0x10263910;  // DAT_10263910, the shared resolver vtable reused everywhere
+
+// "@S", the InstParamPack scale key, at 0x1031b4ec - the same kind of two-byte
+// named param as "@P" and written exactly the same way: 12 bytes, type tag 4.
+//
+// Found from the game's own setter, ksys::act::ActorCreator::addScale at
+// 0x037b55a4, which takes ONE float, splats it into a stack vec3 and calls
+// 0x031f9870(pack+4, &vec, &key, 0xc, 4). That is the uniform-scale overload;
+// the decompilation has a second one taking a sead::Vector3f and writing the
+// same key, so a NON-UNIFORM scale is representable and is what SpawnScaled
+// writes. The key string sits in a run of them - 0x1031b4ef is "@W",
+// 0x1031b514 "@DD", 0x1031b518 "@RL", 0x1031b51c "@TV".
+constexpr uintptr_t kScaleKeyWord0 = 0x1031b4ec;
 
 constexpr uintptr_t kActorCreateMgrAddr = 0x1047c2b8;   // global: manager pointer, passed straight through
 constexpr uintptr_t kHeapProviderAddr = 0x10463f6c;     // global: pointer to a struct; +0x10 field is the spawn heap
@@ -253,7 +267,8 @@ inline bool& ForcedCreateBaseProcThisSpawn() {
     return v;
 }
 
-inline void ExecuteSpawn(const char* actorName, void* anchor, float x, float y, float z) {
+inline void ExecuteSpawn(const char* actorName, void* anchor, float x, float y, float z,
+                         const float* scale) {
     ForcedCreateBaseProcThisSpawn() = false;
 
     void* mgr = *reinterpret_cast<void**>(kActorCreateMgrAddr);
@@ -284,6 +299,14 @@ inline void ExecuteSpawn(const char* actorName, void* anchor, float x, float y, 
     alignas(8) static SafeStringRef positionKey = { reinterpret_cast<void*>(kPositionKeyWord0), reinterpret_cast<void*>(kSafeStringVtable) };
     float position[3] = { x, y, z };
     writeParam(&pack.count, position, &positionKey, 0xc, 4);
+
+    // "@S", only when asked for. Left out entirely otherwise, so an ordinary
+    // Spawn() writes exactly the pack it always did.
+    if (scale) {
+        alignas(8) static SafeStringRef scaleKey = { reinterpret_cast<void*>(kScaleKeyWord0), reinterpret_cast<void*>(kSafeStringVtable) };
+        float scaleValue[3] = { scale[0], scale[1], scale[2] };
+        writeParam(&pack.count, scaleValue, &scaleKey, 0xc, 4);
+    }
 
     auto spawnActor = WiiXLaunch::GetTargetFunction<SpawnActorFn>(0x0, 0x037b5e8c);
     InOurSpawnCall() = true;
@@ -341,7 +364,8 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(SpawnFlushHook) {
             PendingSpawn& pending = PendingSpawnRef();
             if (pending.valid) {
                 pending.valid = false;
-                ExecuteSpawn(pending.name, pending.anchor, pending.pos[0], pending.pos[1], pending.pos[2]);
+                ExecuteSpawn(pending.name, pending.anchor, pending.pos[0], pending.pos[1],
+                             pending.pos[2], pending.hasScale ? pending.scale : nullptr);
             }
 
             if (RawCallbackFn cb = CallbackRef()) {
@@ -550,6 +574,51 @@ public:
         pending.pos[0] = x;
         pending.pos[1] = y;
         pending.pos[2] = z;
+        pending.hasScale = false;
+        return true;
+#endif
+    }
+
+    // Spawn() with a per-axis scale, written into the creation params as "@S".
+    //
+    // The scale a map placement carries is a vec3 and so is this: the game's
+    // own uniform-scale helper (0x037b55a4) splats a single float into three
+    // and writes the same key, and the second overload in the decompilation
+    // takes a sead::Vector3f directly. AirWallCurseGanon is placed at
+    // {8, 5, 6} in E-4, so non-uniform is what the game itself ships.
+    //
+    // NOT MEASURED, and the reason to be careful with it: the physics side of
+    // scaling that this repo could read is uniform-only - phys::RigidBody and
+    // phys::BoxShape both take setScale(float), which multiplies all three
+    // extents by the same number. phys::BoxShape::setExtents does take a vec3,
+    // so a per-axis box IS representable and the placement data says the game
+    // builds them, but the path from "@S" to those extents was not traced. If a
+    // non-uniform wall comes out cubic, that is where it went - fall back to
+    // equal components and more, smaller panels.
+    //
+    // Scale multiplies the actor's own shape, it does not replace it. An
+    // AirWallCurseGanon is a 2 x 2 x 2 box, so {t, h, w} gives 2t x 2h x 2w.
+    //
+    // One request is queued at a time, same as Spawn - a caller placing
+    // several actors issues one per tick.
+    static bool SpawnScaled(const char* actorName, const Actor& anchor, float x, float y, float z,
+                            float scaleX, float scaleY, float scaleZ) {
+#if WIIXL_SWITCH
+        (void)actorName; (void)anchor; (void)x; (void)y; (void)z;
+        (void)scaleX; (void)scaleY; (void)scaleZ;
+        return false;
+#else
+        impl::PendingSpawn& pending = impl::PendingSpawnRef();
+        pending.valid = true;
+        pending.name = actorName;
+        pending.anchor = anchor.GetRaw();
+        pending.pos[0] = x;
+        pending.pos[1] = y;
+        pending.pos[2] = z;
+        pending.hasScale = true;
+        pending.scale[0] = scaleX;
+        pending.scale[1] = scaleY;
+        pending.scale[2] = scaleZ;
         return true;
 #endif
     }
