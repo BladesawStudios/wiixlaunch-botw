@@ -89,10 +89,20 @@ inline void* PhysObject(void* actor) {
     return PlausibleActorPtr(obj) ? obj : nullptr;
 }
 
-// Writes the physics-side position. Both the current and the previous copy, so
-// the delta 0x0383b398 computes comes out as zero rather than as one enormous
-// frame of velocity - a teleport that reads as a thousand-unit step is asking
-// for whatever consumes that number to do something silly.
+// Writes the physics-side position at +0xAC.
+//
+// DOES NOT MOVE THE PLAYER, and is kept only so the finding is not lost. It was
+// SetPosition's implementation until it was measured: the write lands, and
+// Actor::updateMtxFromPhysics republishes the matrix from the character
+// controller on the next frame, so the player is back before anything draws.
+// Re-applying it every frame does not help either - a 300-frame hold that was
+// still running reverted just the same, because the sync runs after the tick
+// hook. +0xAC is a mirror of the Havok body, not an input to it.
+//
+// Use Actor::SetMtx / Actor::WarpTo. Nothing in this file calls this any more.
+//
+// It writes both the current and the previous copy, so the delta 0x0383b398
+// computes comes out as zero rather than as one enormous frame of velocity.
 inline bool WritePhysPosition(void* actor, float x, float y, float z) {
     void* obj = PhysObject(actor);
     if (!obj) return false;
@@ -154,7 +164,9 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(PlayerTickHook) {
         // whatever physics last wrote.
         if (HeldFrames() > 0) {
             float* held = HeldPosition();
-            WritePhysPosition(player, held[0], held[1], held[2]);
+            // Through setMtx, the same as SetPosition - re-applying the old
+            // physics-mirror write would pin nothing.
+            Actor(player).WarpTo(held[0], held[1], held[2]);
             --HeldFrames();
         }
 #endif
@@ -262,32 +274,38 @@ public:
 
     // Moves the player.
     //
-    // READ THE CAVEAT. docs/actor-transforms.md measured that writing the actor
-    // - the matrix, the position copies, the capsule centre, the velocity -
-    // never sticks: the physics sync restores the bit-identical prior value on
-    // the next tick. This writes the physics object instead, at the offset the
-    // game's own speed telemetry reads the position from (see
-    // impl::kPhysPositionOffset), which is a target that has NOT been tried
-    // before. It may well work. It may also turn out to be another mirror of
-    // the Havok body, in which case it will not, and the real setter is still
-    // unfound.
+    // Goes through ksys::act::Actor::setMtx (virtual index 85) - the path every
+    // Warp* action in the game uses, with uking::action::WarpToPos::oneShot_ as
+    // the reference. See Actor::SetMtx.
     //
-    // Three writes, because between them they cover both possibilities:
+    // WHY THE EARLIER ATTEMPTS DID NOT WORK, since this file used to say the
+    // real setter was unfound: writing the actor matrix, the position fields or
+    // the physics position mirror at +0xAC were all reverted within a frame,
+    // and the cause is Actor::updateMtxFromPhysics (virtual index 84), which
+    // runs every frame and does
     //
-    //   * the physics position at +0xAC and its previous copy at +0xC4
-    //   * the actor matrix, through Actor::SetPosition, so everything that
-    //     reads the actor side agrees immediately rather than for one frame
-    //   * a hold, re-applied from the tick hook for holdFrames frames, which is
-    //     the fallback if a single write loses to the sync
+    //     if (physics && characterController)  mMtx <- characterController
+    //     else if (mainBody)                   mMtx <- mainBody
+    //     else if (physicsMtx && flag)         mMtx <- physicsMtx
     //
-    // holdFrames defaults to 4 - enough to survive the sync running after the
-    // hook a few times, short enough that control comes back at once. Raise it
-    // to pin Link in place; pass 0 for a single write and no hold. The hold
-    // needs Init() to have run, since it rides the tick hook.
+    // Link has a character controller, so his matrix is republished from it
+    // every frame; the third branch - the one a mirror write aims at - is only
+    // reachable for an actor with no body at all. setMtx works because it
+    // writes the controller itself.
     //
-    // Returns whether the physics write landed. False means the player has no
-    // physics object, which is also the case where nothing was going to work.
-    static bool SetPosition(float x, float y, float z, int holdFrames = 4) {
+    // Confirmed moving the player on Wii U V208 under Cemu: a 50-unit move in
+    // X and Z held to within 0.15 and stayed there. Judge a teleport on X and Z
+    // and never on Y - teleport straight up and the player falls back to the
+    // same ground, which is indistinguishable from a failed write.
+    //
+    // holdFrames re-applies the move from the tick hook for that many frames.
+    // It defaults to 0 now: it existed to fight the physics sync, and the
+    // correct call does not need to. Pass a positive count to PIN the player in
+    // place - that is now its only real use - and note it needs Init() to have
+    // run, since it rides the tick hook.
+    //
+    // Returns whether the call was made.
+    static bool SetPosition(float x, float y, float z, int holdFrames = 0) {
 #if WIIXL_SWITCH
         (void)x; (void)y; (void)z; (void)holdFrames;
         return false;
@@ -295,18 +313,14 @@ public:
         void* player = GetRaw();
         if (!player) return false;
 
-        const bool physOk = impl::WritePhysPosition(player, x, y, z);
-
-        // The actor side too, so a GetPosition taken straight afterwards agrees
-        // and anything reading the matrix this frame sees the new place.
-        Actor(player).SetPosition(x, y, z);
+        if (!Actor(player).WarpTo(x, y, z)) return false;
 
         if (holdFrames > 0) {
             float* held = impl::HeldPosition();
             held[0] = x; held[1] = y; held[2] = z;
             impl::HeldFrames() = holdFrames;
         }
-        return physOk;
+        return true;
 #endif
     }
 

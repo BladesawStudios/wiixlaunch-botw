@@ -108,11 +108,20 @@ constexpr uint32_t kPosZOffset = kActorMatrixOffset + 0x2c;  // 0x224
 // this was identified and why it is a different kind of field to the position.
 constexpr uint32_t kVelocityOffset = 0x25c;
 
-// ksys::act::Actor::setMtx(const sead::Matrix34f&, const sead::Vector3f* vel)
-// at 0x03798ae8 - the reason writing +0x204/+0x214/+0x224 by hand never moved
+// setActorMtxOnly(actor, const sead::Matrix34f&, const sead::Vector3f* vel) at
+// 0x03798ae8 - the reason writing +0x204/+0x214/+0x224 by hand never moved
 // anything. That matrix is the actor's *input* transform; the game reads the
 // transform it actually uses from a second matrix at +0x22C, and 0x03798ae8 is
-// what keeps the two in step:
+// what keeps the two in step.
+//
+// NOT ksys::act::Actor::setMtx, despite an earlier comment here saying so. That
+// is 0x0379fb54, reached as virtual index 85, and the two are siblings rather
+// than caller and callee - this one never calls it. The difference is the whole
+// story for anything physics drives: 0x03798ae8 writes the actor side and
+// stops, so for an actor with a character controller or a rigid body,
+// Actor::updateMtxFromPhysics (virtual index 84) republishes the matrix from
+// physics on the very next frame and the write is gone. Use it to place an
+// actor physics does not drive; use SetMtx() below for anything else.
 //
 //   0x03798ae8(actor, mtx, vel):
 //     0x03c6fe5c(mtx, actor + 0x1F8)   // copy into ACTOR_MATRIX
@@ -128,6 +137,36 @@ constexpr uint32_t kVelocityOffset = 0x25c;
 // normal way to place an actor, not a back door.
 using SetActorMtxFn = void (*)(void* actor, const float* mtx34, const float* velocity);
 constexpr uintptr_t kSetActorMtxAddr = 0x03798ae8;
+
+// --- ksys::act::Actor::setMtx, the authoritative placement path -------------
+//
+// virtual void setMtx(const sead::Matrix34f&, bool setActorMtx, bool refresh)
+//
+// The only function that pushes a transform into every representation at once:
+// the actor matrix (+0x1F8), the render model's matrix, and the PHYSICS side -
+// preferring the character controller, falling back to the main rigid body -
+// then refreshing the physics instance set so cloth and ragdoll do not stretch
+// across the move. Every Warp* AI action in the game calls it;
+// uking::action::WarpToPos::oneShot_ is the reference, and passes (mtx, 1, 1).
+//
+// Called virtually rather than by address, because the player OVERRIDES it -
+// on this build the base is 0x0379fb54 and Link's override is 0x02d66abc, which
+// additionally updates his facing from the matrix basis and his own position
+// copies. Going through the vtable gets the right one for whatever actor it is.
+//
+//   setActorMtx  true  write the actor and model matrices now. false stages
+//                      into the +0x228 mirror and sets ActorFlag bit 2, which
+//                      updateMtxFromPhysics only ever picks up for an actor
+//                      with NO body at all - so false is not what you want for
+//                      anything physics drives.
+//   refresh      true  reset the physics instance set afterwards (cloth,
+//                      ragdoll). Both of the game's warp actions pass true.
+//
+// Confirmed against a running game: index 85 resolved to Link's override, and
+// the two slots this file already pinned by byte offset (getMaxLife, getLife)
+// land on real functions under the same arithmetic.
+constexpr uint32_t kSetMtxVtableSlot = 0x2ac;   // virtual index 85
+using ActorSetMtxFn = void (*)(void* actor, const float* mtx34, int setActorMtx, int refresh);
 
 // --- ksys::act::BaseProcMgr job lists (Wii U V208) ---
 // Container geometry for Actor::ForEachDynamic; the derivation and the
@@ -556,8 +595,24 @@ public:
 
     // Health / Life accessors (Wii U / Cemu confirmed):
     // On Wii U, Actor+0xe8 is the primary actor vtable pointer.
-    // Slot +0xf4 (index 61) is GetMaxLife(actor) -> int
-    // Slot +0x2bc (700, index 175) is GetCurrentLifePtr(actor) -> int*
+    //
+    // Byte offsets here are right; the index numbers this comment used to give
+    // were not. A Wii U vtable entry is EIGHT bytes - {s16 delta; s16 index;
+    // void* fn} - with the function pointer at entry+4, so virtual index N
+    // lives at byte offset N*8 + 4. Dividing an offset by 4 produces an index
+    // that does not exist, which is what "index 61" and "index 175" were.
+    //
+    //   +0xf4  = 30*8 + 4  -> index 30, GetMaxLife(actor) -> int
+    //   +0x2bc = 87*8 + 4  -> index 87, GetCurrentLifePtr(actor) -> int*
+    //   +0x2ac = 85*8 + 4  -> index 85, setMtx  (see kSetMtxVtableSlot)
+    //   +0x2a4 = 84*8 + 4  -> index 84, updateMtxFromPhysics
+    //
+    // Verified by reading a live player's vtable: every entry showed delta=0
+    // and a .text pointer at +4, and both slots below landed on real functions.
+    //
+    // Indexing vtable[byteOffset / 4] as a void** still lands on the right word
+    // - that is the function pointer's own address - so the code below is
+    // correct as written; only the stated indices were wrong.
     int GetCurrentLife() const {
 #if !WIIXL_SWITCH
         if (!m_Ptr) return 0;
@@ -922,6 +977,64 @@ public:
         return false;
 #endif
     }
+
+    // Places the actor through ksys::act::Actor::setMtx - virtual index 85 -
+    // which is what the game's own Warp* actions call.
+    //
+    // Use this rather than SetPosition for anything physics drives. SetPosition
+    // writes the actor side only, and Actor::updateMtxFromPhysics (index 84)
+    // republishes the matrix from the character controller or the rigid body
+    // every frame, so the write is gone before it is drawn. setMtx writes the
+    // physics side itself, which is why it sticks.
+    //
+    // Called through the vtable on purpose: the player overrides this, and the
+    // override also updates facing and his own position copies.
+    //
+    // Returns false when the actor, its vtable or the slot do not look right -
+    // never a blind call into whatever the slot happened to hold, so a game
+    // update that moves the layout fails visibly instead of crashing.
+    bool SetMtx(const float mtx34[12], bool setActorMtx = true,
+                bool refreshPhysics = true) const {
+#if !WIIXL_SWITCH
+        if (!m_Ptr || !IsReadablePtr(m_Ptr) || m_Kind == Kind::Placement) return false;
+        if (!mtx34) return false;
+
+        uintptr_t base = reinterpret_cast<uintptr_t>(m_Ptr);
+        uintptr_t vtable = *reinterpret_cast<uintptr_t*>(base + 0xe8);
+        if (vtable < 0x10000000 || vtable >= 0xa0000000 || (vtable & 3)) return false;
+
+        uintptr_t fn = *reinterpret_cast<uintptr_t*>(vtable + impl::kSetMtxVtableSlot);
+        if (fn < 0x02000020 || fn >= 0x04347c2c || (fn & 3)) return false;
+
+        reinterpret_cast<impl::ActorSetMtxFn>(fn)(
+            m_Ptr, mtx34, setActorMtx ? 1 : 0, refreshPhysics ? 1 : 0);
+        return true;
+#else
+        (void)mtx34; (void)setActorMtx; (void)refreshPhysics;
+        return false;
+#endif
+    }
+
+    // Moves the actor, keeping its current facing, through setMtx.
+    //
+    // Reads the current matrix and replaces only the translation column, so a
+    // move does not also spin the actor. This is the one to reach for when
+    // SetPosition "works" and then the actor snaps back.
+    bool WarpTo(float x, float y, float z) const {
+#if !WIIXL_SWITCH
+        float mtx[12];
+        if (!GetMatrix(mtx)) return false;
+        mtx[3] = x;
+        mtx[7] = y;
+        mtx[11] = z;
+        return SetMtx(mtx, true, true);
+#else
+        (void)x; (void)y; (void)z;
+        return false;
+#endif
+    }
+
+    bool WarpTo(const Vec3& pos) const { return WarpTo(pos.x, pos.y, pos.z); }
 
     Vec3 GetPosition() const {
         Vec3 pos;
