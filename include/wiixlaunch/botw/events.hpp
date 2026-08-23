@@ -17,13 +17,23 @@
 //   OnKorokGet         HiddenKorok_Number going UP. Reports the new total and
 //                      how many were gained, so a stack of seeds handed over at
 //                      once reads correctly.
-//   OnShrineComplete   Clear_DungeonNNN going false -> true. That family is
+//   OnShrineComplete   Clear_DungeonNNN going false -> true. The flag family is
 //                      established repo knowledge - gamedata.hpp already names
-//                      Clear_Dungeon000 as one of the IsOneTrigger flags - and
-//                      it is the "Clear_" half of the pair every shrine's map
-//                      marker caches (0x02e95e2c). "Cleared", not "entered":
-//                      Enter_DungeonNNN is the other half, and is what
-//                      botw/map.hpp uses for travel.
+//                      Clear_Dungeon000 as one of the IsOneTrigger flags, and
+//                      being one-trigger is itself consistent with "completed",
+//                      since those are the flags the ordinary setter refuses to
+//                      clear once true.
+//
+//                      NOTE this header used to justify the choice by calling
+//                      it the other half of the Enter_/Clear_ pair each
+//                      shrine's map marker caches. That was wrong: the marker
+//                      class carrying that pair (0x02e95e2c) turned out to be
+//                      the DIVINE BEAST marker, and shrine markers are a
+//                      different class entirely - see the correction at the top
+//                      of botw/map.hpp. The flag name is still believed right;
+//                      the reasoning that backed it is not, and no write site
+//                      has been traced. Verify before trusting the exact frame
+//                      it fires on.
 //   OnTowerOpen        MapTower_NN going false -> true, towers 1-15.
 //
 // COST. Polling 136 shrines by name every frame would mean 136 string hashes

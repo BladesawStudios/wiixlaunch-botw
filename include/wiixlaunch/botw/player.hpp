@@ -39,6 +39,73 @@ inline TickCallback& TickCallbackRef() {
 // Attack counter at +0x4d8 (increments by 1 per swing).
 constexpr uint32_t kAttackCounterOffset = 0x4d8;
 
+// --- moving the player ----------------------------------------------------
+//
+// docs/actor-transforms.md is emphatic that nothing written on the ACTOR
+// sticks: setMtx, the three position copies, the capsule centre at phys+0x1F0
+// and the linear velocity were all measured being restored to the
+// bit-identical prior value on the next tick. The authoritative position lives
+// on the physics object the +0xE8 vtable hands out at slot 0x30C.
+//
+// What is new here is WHERE on that object. The doc only ever wrote +0x1F0.
+// 0x0383b398 - the telemetry pass that computes how fast Link is moving -
+// fetches the physics object through slot 0x30C and reads a Vector3f at +0xAC
+// and another at +0xC4, differencing them to get a per-frame delta. So +0xAC
+// is the current position and +0xC4 the previous one, and neither has been
+// tried as a write target.
+//
+// UNVERIFIED. +0xAC may itself be an output of the Havok body hanging off
+// phys+0x14, in which case writing it reverts like everything else. Finding a
+// real setter would mean going through that body, and it was not found in this
+// pass. Hence the hold below: if a single write loses to the sync, re-applying
+// every frame is the next best thing, and it is what SetPosition arms by
+// default.
+constexpr uint32_t kPhysObjectVtableSlot = 0x30c;
+constexpr uint32_t kPhysPositionOffset = 0xac;
+constexpr uint32_t kPhysPrevPositionOffset = 0xc4;
+
+using GetPhysObjectFn = void* (*)(void* actor);
+
+inline float* HeldPosition() { static float p[3] = {}; return p; }
+inline int& HeldFrames() { static int f = 0; return f; }
+
+inline bool PlausibleActorPtr(const void* p) {
+    uintptr_t v = reinterpret_cast<uintptr_t>(p);
+    return v >= 0x10000000 && v < 0xf0000000;
+}
+
+// The physics object, or null for an actor physics does not drive.
+inline void* PhysObject(void* actor) {
+    if (!PlausibleActorPtr(actor)) return nullptr;
+
+    uintptr_t vtable = *reinterpret_cast<uintptr_t*>(
+        reinterpret_cast<uintptr_t>(actor) + 0xe8);
+    if (!PlausibleActorPtr(reinterpret_cast<void*>(vtable))) return nullptr;
+
+    auto get = *reinterpret_cast<GetPhysObjectFn*>(vtable + kPhysObjectVtableSlot);
+    if (!get) return nullptr;
+
+    void* obj = get(actor);
+    return PlausibleActorPtr(obj) ? obj : nullptr;
+}
+
+// Writes the physics-side position. Both the current and the previous copy, so
+// the delta 0x0383b398 computes comes out as zero rather than as one enormous
+// frame of velocity - a teleport that reads as a thousand-unit step is asking
+// for whatever consumes that number to do something silly.
+inline bool WritePhysPosition(void* actor, float x, float y, float z) {
+    void* obj = PhysObject(actor);
+    if (!obj) return false;
+
+    uintptr_t base = reinterpret_cast<uintptr_t>(obj);
+    float* current = reinterpret_cast<float*>(base + kPhysPositionOffset);
+    float* previous = reinterpret_cast<float*>(base + kPhysPrevPositionOffset);
+
+    current[0] = x;  current[1] = y;  current[2] = z;
+    previous[0] = x; previous[1] = y; previous[2] = z;
+    return true;
+}
+
 inline float* PositionCache() {
     static float pos[3] = {};
     return pos;
@@ -80,6 +147,15 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(PlayerTickHook) {
         } else if (count != LastAttackCount()) {
             LastAttackCount() = count;
             AttackEventPending() = true;
+        }
+
+        // Re-apply a held position before the user callback, so a mod polling
+        // GetPosition in its own OnTick sees the held value rather than
+        // whatever physics last wrote.
+        if (HeldFrames() > 0) {
+            float* held = HeldPosition();
+            WritePhysPosition(player, held[0], held[1], held[2]);
+            --HeldFrames();
         }
 #endif
 
@@ -161,10 +237,102 @@ public:
         (void)x; (void)y; (void)z;
         return false;
 #else
-        if (!impl::RawPlayerRef()) return false;
-        float* pos = impl::PositionCache();
-        x = pos[0]; y = pos[1]; z = pos[2];
+        if (impl::RawPlayerRef()) {
+            float* pos = impl::PositionCache();
+            x = pos[0]; y = pos[1]; z = pos[2];
+            return true;
+        }
+
+        // Cache is cold - Init() has not run, or no frame has passed since it
+        // did. Resolve the player directly and read the live matrix instead of
+        // refusing. GetRaw does not depend on the tick hook, so this works for
+        // a mod that never calls Init at all.
+        auto* base = static_cast<const uint8_t*>(GetRaw());
+        if (!base) return false;
+
+        uintptr_t addr = reinterpret_cast<uintptr_t>(base);
+        if (addr < 0x10000000 || addr >= 0xf0000000) return false;
+
+        x = *reinterpret_cast<const float*>(base + impl::kPosXOffset);
+        y = *reinterpret_cast<const float*>(base + impl::kPosYOffset);
+        z = *reinterpret_cast<const float*>(base + impl::kPosZOffset);
         return true;
+#endif
+    }
+
+    // Moves the player.
+    //
+    // READ THE CAVEAT. docs/actor-transforms.md measured that writing the actor
+    // - the matrix, the position copies, the capsule centre, the velocity -
+    // never sticks: the physics sync restores the bit-identical prior value on
+    // the next tick. This writes the physics object instead, at the offset the
+    // game's own speed telemetry reads the position from (see
+    // impl::kPhysPositionOffset), which is a target that has NOT been tried
+    // before. It may well work. It may also turn out to be another mirror of
+    // the Havok body, in which case it will not, and the real setter is still
+    // unfound.
+    //
+    // Three writes, because between them they cover both possibilities:
+    //
+    //   * the physics position at +0xAC and its previous copy at +0xC4
+    //   * the actor matrix, through Actor::SetPosition, so everything that
+    //     reads the actor side agrees immediately rather than for one frame
+    //   * a hold, re-applied from the tick hook for holdFrames frames, which is
+    //     the fallback if a single write loses to the sync
+    //
+    // holdFrames defaults to 4 - enough to survive the sync running after the
+    // hook a few times, short enough that control comes back at once. Raise it
+    // to pin Link in place; pass 0 for a single write and no hold. The hold
+    // needs Init() to have run, since it rides the tick hook.
+    //
+    // Returns whether the physics write landed. False means the player has no
+    // physics object, which is also the case where nothing was going to work.
+    static bool SetPosition(float x, float y, float z, int holdFrames = 4) {
+#if WIIXL_SWITCH
+        (void)x; (void)y; (void)z; (void)holdFrames;
+        return false;
+#else
+        void* player = GetRaw();
+        if (!player) return false;
+
+        const bool physOk = impl::WritePhysPosition(player, x, y, z);
+
+        // The actor side too, so a GetPosition taken straight afterwards agrees
+        // and anything reading the matrix this frame sees the new place.
+        Actor(player).SetPosition(x, y, z);
+
+        if (holdFrames > 0) {
+            float* held = impl::HeldPosition();
+            held[0] = x; held[1] = y; held[2] = z;
+            impl::HeldFrames() = holdFrames;
+        }
+        return physOk;
+#endif
+    }
+
+    // Drops a hold early.
+    static void ClearPositionHold() {
+#if !WIIXL_SWITCH
+        impl::HeldFrames() = 0;
+#endif
+    }
+
+    // Whether a hold is still re-applying.
+    static bool IsPositionHeld() {
+#if WIIXL_SWITCH
+        return false;
+#else
+        return impl::HeldFrames() > 0;
+#endif
+    }
+
+    // The player's physics object, for anything not wrapped here. Null when
+    // physics does not drive the actor.
+    static void* GetPhysicsObject() {
+#if WIIXL_SWITCH
+        return nullptr;
+#else
+        return impl::PhysObject(GetRaw());
 #endif
     }
 
