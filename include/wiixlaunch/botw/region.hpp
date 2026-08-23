@@ -581,6 +581,63 @@ inline void SetPushbackEnabled(bool enabled) {
 #endif
 }
 
+// Reading the configuration back.
+//
+// Setters without getters make a partial update impossible: SetWallGeometry
+// takes all three values at once, so a caller changing only the height has no
+// way to pass the other two through at their current values without reaching
+// into impl. These exist so it does not have to.
+//
+// Note the setters ignore values below their floors rather than clamping to
+// them, so a get/modify/set round trip is lossless.
+inline float GetCellSize() {
+#if !WIIXL_SWITCH
+    return impl::CellSize();
+#else
+    return 0.0f;
+#endif
+}
+
+inline float GetWallHeight() {
+#if !WIIXL_SWITCH
+    return impl::WallHeight();
+#else
+    return 0.0f;
+#endif
+}
+
+inline float GetWallThickness() {
+#if !WIIXL_SWITCH
+    return impl::WallThickness();
+#else
+    return 0.0f;
+#endif
+}
+
+inline float GetBuildRadius() {
+#if !WIIXL_SWITCH
+    return impl::BuildRadius();
+#else
+    return 0.0f;
+#endif
+}
+
+inline bool GetWallsEnabled() {
+#if !WIIXL_SWITCH
+    return impl::WallsEnabled();
+#else
+    return false;
+#endif
+}
+
+inline bool GetPushbackEnabled() {
+#if !WIIXL_SWITCH
+    return impl::PushbackEnabled();
+#else
+    return false;
+#endif
+}
+
 // How many panels are standing right now, queued ones included.
 inline int GetWallCount() {
 #if !WIIXL_SWITCH
