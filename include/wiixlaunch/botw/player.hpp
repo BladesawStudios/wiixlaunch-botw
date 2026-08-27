@@ -324,6 +324,26 @@ public:
 #endif
     }
 
+    // SetPosition for corrections applied every frame.
+    //
+    // Goes through Actor::NudgeTo, which skips setMtx's physics-instance
+    // reset. SetPosition is a warp and resets that set every call - fine once,
+    // ruinous at sixty times a second: a region pushback built on it dragged a
+    // swimming player under, because the swim state was being reset each frame.
+    //
+    // No hold option on purpose. A hold re-applies the position for N frames,
+    // which is the same repetition problem wearing a different hat.
+    static bool NudgePosition(float x, float y, float z) {
+#if WIIXL_SWITCH
+        (void)x; (void)y; (void)z;
+        return false;
+#else
+        void* player = GetRaw();
+        if (!player) return false;
+        return Actor(player).NudgeTo(x, y, z);
+#endif
+    }
+
     // Drops a hold early.
     static void ClearPositionHold() {
 #if !WIIXL_SWITCH

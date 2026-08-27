@@ -76,19 +76,23 @@
 //                        Undefined - built to stop horses.
 //   CastleBarrier        the castle malice barrier. PhysicsUser Dummy again.
 //
-// So AirWallCurseGanon is the one to spawn, and the reason is specific: its
-// collision is a property of the ACTOR, defined in its own physics resource, so
-// it arrives with the actor rather than being assembled by the map loader from
-// a placement record a spawned actor does not have. It is also the only one on
-// the dedicated EntityAirWall layer with the AirWall material, which is the
-// game's own "this is an invisible wall" pairing.
+// That reasoning led to AirWallCurseGanon, and it was WRONG - not about the
+// physics resource, but about what the resource does. Tested live, with the
+// player sealed inside a box of five confirmed-live panels: he walked out.
+// So did the Dark Beast arena line (FldObj_GanonBeast_BattleAreaLine_A_01),
+// which is on EntityGround and names nobody in its ignore mask.
 //
-// The half-attached spawn caveat on Actor::Spawn does not bite here. A Fixed
-// rigid body is built when the actor is constructed and does nothing per frame
-// afterwards, and the decompiled AirWallCurseGanon::calc_ is a straight chain
-// to its parent with no body of its own - there is nothing for the Calc it
-// never reaches to do. It is also an actor the game itself places (four of
-// them, in E-4), which is the stated condition for spawn and delete to behave.
+// The layer is the point. EntityAirWall is not a layer the player's character
+// controller tests, and AirWallHorse - EntityGround, but listing Player in its
+// ignore mask - is the barrier that keeps horses out of Death Mountain and
+// Gerudo. The whole AirWall family is built to let Link through selectively.
+// No amount of scaling, height or spawn-queue fixing changes that.
+//
+// What works is ordinary solid geometry. A treasure chest stops the player; so
+// does a shrine stone block, which is what kWallActor now names. Both were
+// verified the same way - ringed around the player, who could not get out.
+// Being visible is a feature, not a side effect: an invisible barrier teaches
+// the player nothing about where the boundary is.
 //
 // Size comes from the creation params: Actor::SpawnScaled writes "@S", the same
 // per-axis scale a map placement carries. The four real ones are placed at
@@ -123,15 +127,81 @@ constexpr int kLastRegion = kFirstRegion + kRegionCount - 1;
 // DISTINCT from a valid region - do not treat it as region 0.
 constexpr int kNoRegion = 0;
 
-// The actor spawned as a wall panel. Public because swapping it is a
-// legitimate experiment - AirWallHorse is the obvious alternative if the
-// EntityAirWall layer turns out to let something through.
-constexpr const char* kWallActor = "AirWallCurseGanon";
+// The actor spawned as a wall panel.
+//
+// This must be ordinary SOLID GEOMETRY, not one of the AirWall actors.
+// Those are gameplay-filtered volumes: AirWallCurseGanon sits on the
+// EntityAirWall layer, which the player's character controller never
+// tests, and AirWallHorse is on EntityGround but names Player in its
+// ignore mask - it is the barrier that keeps HORSES out of Death
+// Mountain and Gerudo, and Link walks through it by design. Both were
+// tried live, sealed in a box around the player, and both let him out.
+//
+// A shrine stone block collides, holds its spawn position, honours the
+// "@S" scale, and - unlike every AirWall - can actually be SEEN, which
+// a barrier the player is expected to respect rather needs.
+constexpr const char* kWallActor = "CastleBarrier";
 
-// How many panels can stand at once. A border crossing a 2 x kBuildRadius box
-// produces on the order of ten to thirty; the rest is headroom for a corner
-// where three regions meet.
-constexpr int kMaxWalls = 96;
+// Roughly how big the tile is, in world units - measured by eye in game, not
+// read from the pack. Used as the vertical course height so a stacked band
+// meets edge to edge rather than overlapping or leaving gaps.
+constexpr float kWallActorTileSize = 8.0f;
+
+// Default distance the marker panel sits past the corrected position, in
+// world units. Runtime-tunable via regionConfig markerOffset.
+//
+// The correction puts the player just inside the border, so a panel drawn at
+// that exact point is centred on Link. It only needs nudging off him - three
+// units put it visibly out in front, which read as wrong.
+constexpr float kMarkerOffsetDefault = 0.5f;
+
+// CastleBarrier - the Hyrule Castle malice barrier - is the wall.
+//
+// It brings three things no other candidate did, in ONE actor per tile:
+//   * collision, so it actually stops the player;
+//   * the game's own "You can't go any further" message;
+//   * it only becomes visible when the player is nearly touching it, so a
+//     border reads as a boundary rather than as a stone monolith.
+//
+// It is a small square, roughly eight to ten units, so a border is a LINE of
+// tiles - which is why cell size wants to be around eight rather than twenty.
+//
+// This replaced a stone-block wall that needed ten stacked courses and ~170
+// actors for one border patch, because collision scaled uniformly from X only
+// and the creation scale capped at 12. None of that applies here: the tile is
+// spawned at its authored scale and never resized.
+//
+// Rotation is applied AFTER spawning - Actor::Spawn sets position and scale
+// and nothing else. Measured: setMtx does turn the actor and the basis holds
+// (identity -> 90 degree yaw, still there 2.5s later).
+// Eight steps of 45 degrees, not four of 90.
+//
+// Quarter turns can only align a tile to an axis, and a region border rarely
+// runs along one - seen in game as scattered slabs at odd angles rather than a
+// line. Diagonals are what let consecutive tiles meet edge to edge.
+constexpr int kWallYawCount = 8;
+inline const float* WallYawCos() { static const float v[8] = { 1.000000f, 0.707107f, 0.000000f, -0.707107f, -1.000000f, -0.707107f, 0.000000f, 0.707107f }; return v; }
+inline const float* WallYawSin() { static const float v[8] = { 0.000000f, 0.707107f, 1.000000f, 0.707107f, 0.000000f, -0.707107f, -1.000000f, -0.707107f }; return v; }
+
+// Hard ceiling on live panels.
+//
+// Lowered from 256 after a live crash: cellSize 3 with eight courses asked for
+// 248 panels, 88 had spawned when the game died. The spawn queue drains one
+// per tick, so a large request is also a long stall - the table cap is the
+// only thing standing between a bad config and a crash, so it is set where a
+// bad config merely looks sparse.
+//
+// Walls are an opt-in extra anyway; PUSHBACK is what enforces region locking.
+constexpr int kMaxWalls = 64;
+
+// Smallest pushback correction worth applying, in world units.
+//
+// Pushback is a position write, and a position write costs state: it resets
+// swimming, and at one per frame it pinned the player underwater. Below this
+// distance the correction is invisible, so it is skipped and the frame is left
+// alone. Large enough to silence the standing-still case, small enough that
+// nobody walks through a border a fraction of a unit at a time.
+constexpr float kMinCorrection = 0.05f;
 
 namespace impl {
 
@@ -271,6 +341,8 @@ struct WallRecord {
     int8_t axis = 0;        // 0 = panel faces along X, 1 = faces along Z
     int32_t cellX = 0;
     int32_t cellZ = 0;
+    int8_t layer = 0;      // vertical course; 0 is the bottom of the stack
+    bool oriented = false; // rotation applied; spawning cannot set facing
     float pos[3] = {};
 };
 
@@ -288,6 +360,21 @@ inline float& BuildRadius() { static float v = 160.0f; return v; }
 inline float& WallHeight() { static float v = 80.0f; return v; }
 inline float& WallThickness() { static float v = 4.0f; return v; }
 
+// Which quarter turn a face-along-X panel gets; a face-along-Z panel gets the
+// next one round. 0..3.
+//
+// Tunable because the wall actor's authored facing is not written down and was
+// wrong the first time it was tried in game - guessing once and hard-coding it
+// would mean a rebuild per guess.
+inline int& WallYawIndex() { static int v = 0; return v; }
+
+// Quarter turns about X. 0..3, and 0 is correct for this actor.
+//
+// The tile is already a VERTICAL panel - do not pitch it. Kept only because
+// a different wall actor might ship a flat plate, and because guessing this
+// wrong once already cost a build.
+inline int& WallPitchIndex() { static int v = 0; return v; }
+
 // The cell the last rebuild was centred on, and the height it was built at.
 // A rebuild is edge-triggered off these, not run every frame.
 inline int32_t& LastCellX() { static int32_t v = 0x7fffffff; return v; }
@@ -298,6 +385,71 @@ inline uint32_t& LastMask() { static uint32_t v = 0xffffffffu; return v; }
 // Last position the player stood in an allowed region, for the pushback net.
 inline float* SafePosition() { static float p[3] = {}; return p; }
 inline bool& SafePositionValid() { static bool v = false; return v; }
+
+// The single barrier panel shown where the player is being stopped.
+//
+// This replaces tiling the whole border. Per-cell placement needed one actor
+// per face and multiplied combinatorially when the spacing was tightened -
+// 22 panels at one setting, 248 at the next, which crashed the game. The
+// boundary does not need covering: it needs a visual AT THE CONTACT POINT,
+// which is what the game's own Dark Beast barrier does.
+//
+// One actor, moved as the player slides along the border, not respawned.
+inline bool& MarkerSpawned() { static bool v = false; return v; }
+inline float* MarkerPos() { static float p[3] = {}; return p; }
+inline int& MarkerIdleTicks() { static int v = 0; return v; }
+// Consecutive ticks the marker actor could not be found.
+//
+// A spawn request is accepted a frame or more before the actor exists, so a
+// single failed search means nothing. Treating it as "gone" and spawning a
+// replacement leaks a panel every time the first one then turns up - seen in
+// game as stray panels standing around.
+inline int& MarkerMissTicks() { static int v = 0; return v; }
+inline bool& MarkerEnabled() { static bool v = true; return v; }
+inline float& MarkerOffset() { static float v = kMarkerOffsetDefault; return v; }
+// How much bigger than authored the marker panel is drawn.
+//
+// Applied at spawn AND in the matrix basis: setMtx writes the whole
+// transform, so moving the panel with a unit basis would quietly reset it to
+// its authored size on the first move.
+inline float& MarkerScale() { static float v = 10.0f; return v; }
+
+// Which way the last slide turned: +1, -1, or 0 for undecided.
+//
+// Only used to break ties. Trying the side that worked last frame first stops
+// the search alternating between mirror-image answers on a serrated border.
+inline int8_t& LastTurnSide() { static int8_t v = 0; return v; }
+
+// Rotations applied when searching for a direction the player can still move,
+// as cos/sin pairs. The payload has no libm, so they are precomputed.
+//
+// The correction used to choose between exactly two outcomes - keep X or keep
+// Z - which quantises movement along a diagonal border into axis-aligned
+// jerks. Rotating the player's own movement in small steps and taking the
+// first angle that is still legal is continuous instead, so it is felt as
+// sliding along a surface.
+//
+// A smoothed normal was tried first and REVERTED: averaging a ring of samples
+// around the player does not reliably point inward near a concave stretch, so
+// it pushed the player the wrong way across the border and pinned them there.
+// Every candidate here is tested with AllowedAt before it is used, so that
+// failure cannot happen - the worst case is no movement, never a trap.
+struct TurnStep { float cosA, sinA; };
+inline const TurnStep* TurnSteps() {
+    static const TurnStep steps[9] = {
+    { 1.000000f, 0.000000f },
+    { 0.980785f, 0.195090f },
+    { 0.923880f, 0.382683f },
+    { 0.831470f, 0.555570f },
+    { 0.707107f, 0.707107f },
+    { 0.555570f, 0.831470f },
+    { 0.382683f, 0.923880f },
+    { 0.195090f, 0.980785f },
+    { 0.000000f, 1.000000f },
+    };
+    return steps;
+}
+constexpr int kTurnStepCount = 9;
 
 inline int32_t FloorDiv(float value, float size) {
     const float q = value / size;
@@ -321,11 +473,11 @@ inline bool CellBlocked(const EcoMapInfo* info, int32_t cellX, int32_t cellZ) {
     return (UnlockMask() & (1u << (region - 1))) == 0;
 }
 
-inline int FindWall(int8_t axis, int32_t cellX, int32_t cellZ) {
+inline int FindWall(int8_t axis, int32_t cellX, int32_t cellZ, int8_t layer) {
     WallRecord* walls = Walls();
     for (int i = 0; i < kMaxWalls; ++i) {
         if (walls[i].used && walls[i].axis == axis && walls[i].cellX == cellX &&
-            walls[i].cellZ == cellZ) {
+            walls[i].cellZ == cellZ && walls[i].layer == layer) {
             return i;
         }
     }
@@ -343,8 +495,9 @@ inline int FreeWallSlot() {
 // Marks the face between (cellX, cellZ) and its neighbour one step along
 // `axis` as needed. The face is named by the LOWER of the two cells, so the
 // same face requested from either side lands on one record.
-inline void WantFace(int8_t axis, int32_t cellX, int32_t cellZ, float buildY) {
-    int existing = FindWall(axis, cellX, cellZ);
+inline void WantFace(int8_t axis, int32_t cellX, int32_t cellZ, float buildY,
+                     int8_t layer, float cubeSide, float totalHeight) {
+    int existing = FindWall(axis, cellX, cellZ, layer);
     if (existing >= 0) {
         Walls()[existing].wanted = true;
         return;
@@ -361,6 +514,7 @@ inline void WantFace(int8_t axis, int32_t cellX, int32_t cellZ, float buildY) {
     w.axis = axis;
     w.cellX = cellX;
     w.cellZ = cellZ;
+    w.layer = layer;
 
     if (axis == 0) {
         // The face between cellX and cellX + 1: a plane at their shared edge,
@@ -371,7 +525,9 @@ inline void WantFace(int8_t axis, int32_t cellX, int32_t cellZ, float buildY) {
         w.pos[0] = CellCentre(cellX, size);
         w.pos[2] = static_cast<float>(cellZ + 1) * size;
     }
-    w.pos[1] = buildY;
+    // Courses are stacked around the build height, so the wall reaches as far
+    // below the player as above - a border on a slope still gets sealed.
+    w.pos[1] = buildY - totalHeight * 0.5f + cubeSide * (static_cast<float>(layer) + 0.5f);
 }
 
 }  // namespace impl
@@ -401,6 +557,18 @@ inline int GetRegionAt(float x, float z) {
     (void)x; (void)z;
     return kNoRegion;
 #endif
+}
+
+// Whether the player is allowed to stand at (x, z).
+//
+// Deliberately matches the inLocked test in Tick, including treating a failed
+// lookup as allowed: a raster that has not finished loading must not trap the
+// player inside a region it cannot identify.
+inline bool AllowedAt(float x, float z) {
+    const int region = GetRegionAt(x, z);
+    if (region == kNoRegion) return true;
+    if (!impl::ValidRegion(region)) return true;
+    return (impl::UnlockMask() & (1u << (region - 1))) != 0;
 }
 
 // The region the player is standing in, or kNoRegion. Needs Player::Init() to
@@ -709,6 +877,45 @@ inline int RemoveAllWalls() {
 #endif
 }
 
+// Sets the quarter turn applied to wall panels (0..3), and forces a rebuild so
+// existing panels are re-made at the new facing.
+inline void SetWallYaw(int index) {
+#if !WIIXL_SWITCH
+    impl::WallYawIndex() = index & (kWallYawCount - 1);
+    RemoveAllWalls();
+    impl::LastCellX() = 0x7fffffff;
+#else
+    (void)index;
+#endif
+}
+
+// Sets the quarter turn about X (0..3) that stands the tile up, and rebuilds.
+inline void SetWallPitch(int index) {
+#if !WIIXL_SWITCH
+    impl::WallPitchIndex() = index & 3;
+    RemoveAllWalls();
+    impl::LastCellX() = 0x7fffffff;
+#else
+    (void)index;
+#endif
+}
+
+inline int GetWallPitch() {
+#if !WIIXL_SWITCH
+    return impl::WallPitchIndex();
+#else
+    return 0;
+#endif
+}
+
+inline int GetWallYaw() {
+#if !WIIXL_SWITCH
+    return impl::WallYawIndex();
+#else
+    return 0;
+#endif
+}
+
 inline void SetWallsEnabled(bool enabled) {
 #if !WIIXL_SWITCH
     if (impl::WallsEnabled() == enabled) return;
@@ -730,6 +937,196 @@ inline bool Init() {
     impl::Armed() = true;
     impl::LastCellX() = 0x7fffffff;
     return true;
+#else
+    return false;
+#endif
+}
+
+inline void HideMarker();
+
+// Shows the barrier panel at a point on the border, facing the player.
+//
+// Spawns it once and MOVES it thereafter: Actor::Spawn cannot hand the actor
+// back, so it is re-found by name near where it was last put - the same trick
+// RemoveAllWalls uses - and then placed with setMtx.
+//
+// The facing is built straight from the direction to the player rather than
+// from an angle, because the payload has no atan2. WallYawIndex composes an
+// extra quarter turn on top, since the actor's authored facing is not
+// documented and was wrong on the first attempt.
+inline void ShowMarkerAt(float x, float y, float z, float towardX, float towardZ) {
+#if !WIIXL_SWITCH
+    if (!impl::MarkerEnabled()) return;
+
+    // Face the BORDER, not the player.
+    //
+    // Deriving the facing from the direction to Link made the panel swing
+    // round as he moved - it tracked him instead of lying along the boundary.
+    // Sampling which side of the point is allowed gives a normal that belongs
+    // to the border itself and does not move when the player does.
+    //
+    // The probe reaches past the raster's own step (about two units) so it
+    // reads the local run of the border rather than one stair tread.
+    const float probe = 4.0f;
+    float dx = 0.0f;
+    float dz = 0.0f;
+    if (AllowedAt(x + probe, z)) dx += 1.0f;
+    if (AllowedAt(x - probe, z)) dx -= 1.0f;
+    if (AllowedAt(x, z + probe)) dz += 1.0f;
+    if (AllowedAt(x, z - probe)) dz -= 1.0f;
+
+    float len2 = dx * dx + dz * dz;
+    if (len2 < 1.0e-6f) {
+        // Ring gave nothing to steer by - fall back to the caller's direction.
+        dx = towardX - x;
+        dz = towardZ - z;
+        len2 = dx * dx + dz * dz;
+    }
+    if (len2 < 1.0e-6f) { dx = 0.0f; dz = 1.0f; }
+    else {
+        float len = len2;
+        for (int k = 0; k < 12; ++k) len = 0.5f * (len + len2 / len);
+        dx /= len;
+        dz /= len;
+    }
+
+    // Compose the direction with the tuning offset: angles add.
+    const int idx = impl::WallYawIndex() & (kWallYawCount - 1);
+    const float co = WallYawCos()[idx];
+    const float so = WallYawSin()[idx];
+    const float c = dz * co - dx * so;
+    const float sn = dx * co + dz * so;
+
+    float* mp = impl::MarkerPos();
+
+    if (!impl::MarkerSpawned()) {
+        void* anchor = Player::GetRaw();
+        if (!anchor) return;
+        const float sc = impl::MarkerScale();
+        if (!Actor::SpawnScaled(kWallActor, Actor(anchor), x, y, z, sc, sc, sc)) return;
+        impl::MarkerSpawned() = true;
+        mp[0] = x; mp[1] = y; mp[2] = z;
+        return;                     // it exists next tick; orient it then
+    }
+
+    Actor found;
+    float best = 400.0f;            // generous: it may have been nudged
+    Actor::ForEachDynamic([&](const Actor& actor) {
+        const char* name = actor.GetName();
+        if (!name) return true;
+        bool match = true;
+        for (const char* a = name, *b = kWallActor;; ++a, ++b) {
+            if (*a != *b) { match = false; break; }
+            if (*a == 0) break;
+        }
+        if (!match) return true;
+        float ax = 0.0f, ay = 0.0f, az = 0.0f;
+        if (!actor.GetPosition(ax, ay, az)) return true;
+        const float ddx = ax - mp[0];
+        const float ddz = az - mp[2];
+        const float d2 = ddx * ddx + ddz * ddz;
+        if (d2 <= best) { best = d2; found = actor; }
+        return true;
+    });
+
+    if (!found.IsValid()) {
+        // Not necessarily gone: a spawn is accepted before the actor exists.
+        // Only give up after a run of misses, and sweep first, so a late
+        // arrival cannot leave a second panel standing.
+        if (++impl::MarkerMissTicks() > 30) {
+            HideMarker();
+            impl::MarkerMissTicks() = 0;
+        }
+        return;
+    }
+    impl::MarkerMissTicks() = 0;
+
+    // Basis scaled, or the move resets the panel to its authored size.
+    const float ms = impl::MarkerScale();
+    const float mtx[12] = {
+        c * ms,  0.0f,   sn * ms, x,
+          0.0f,    ms,      0.0f, y,
+       -sn * ms,  0.0f,    c * ms, z,
+    };
+    found.SetMtx(mtx, true, false);
+    mp[0] = x; mp[1] = y; mp[2] = z;
+#else
+    (void)x; (void)y; (void)z; (void)towardX; (void)towardZ;
+#endif
+}
+
+// Removes the marker panel, if one is up.
+inline void HideMarker() {
+#if !WIIXL_SWITCH
+    if (!impl::MarkerSpawned()) return;
+    float* mp = impl::MarkerPos();
+    Actor::ForEachDynamic([&](const Actor& actor) {
+        const char* name = actor.GetName();
+        if (!name) return true;
+        bool match = true;
+        for (const char* a = name, *b = kWallActor;; ++a, ++b) {
+            if (*a != *b) { match = false; break; }
+            if (*a == 0) break;
+        }
+        if (!match) return true;
+        float ax = 0.0f, ay = 0.0f, az = 0.0f;
+        if (!actor.GetPosition(ax, ay, az)) return true;
+        const float ddx = ax - mp[0];
+        const float ddz = az - mp[2];
+        if (ddx * ddx + ddz * ddz <= 400.0f) actor.Delete();
+        return true;
+    });
+    impl::MarkerSpawned() = false;
+#endif
+}
+
+inline void SetMarkerEnabled(bool on) {
+#if !WIIXL_SWITCH
+    impl::MarkerEnabled() = on;
+    if (!on) HideMarker();
+#else
+    (void)on;
+#endif
+}
+
+inline void SetMarkerOffset(float units) {
+#if !WIIXL_SWITCH
+    impl::MarkerOffset() = units;
+#else
+    (void)units;
+#endif
+}
+
+inline void SetMarkerScale(float scale) {
+#if !WIIXL_SWITCH
+    if (scale < 0.1f) scale = 0.1f;
+    if (scale > 40.0f) scale = 40.0f;   // the spawn scale cap bites well below this
+    impl::MarkerScale() = scale;
+    HideMarker();                        // respawn at the new size
+#else
+    (void)scale;
+#endif
+}
+
+inline float GetMarkerScale() {
+#if !WIIXL_SWITCH
+    return impl::MarkerScale();
+#else
+    return 0.0f;
+#endif
+}
+
+inline float GetMarkerOffset() {
+#if !WIIXL_SWITCH
+    return impl::MarkerOffset();
+#else
+    return 0.0f;
+#endif
+}
+
+inline bool GetMarkerEnabled() {
+#if !WIIXL_SWITCH
+    return impl::MarkerEnabled();
 #else
     return false;
 #endif
@@ -773,9 +1170,109 @@ inline bool Tick() {
         float* safe = impl::SafePosition();
         safe[0] = px; safe[1] = py; safe[2] = pz;
         impl::SafePositionValid() = true;
+
+        // Back inside: drop the panel after a moment, so brushing the border
+        // does not leave one standing in open ground behind you.
+        if (impl::MarkerSpawned()) {
+            if (++impl::MarkerIdleTicks() > 90) HideMarker();
+        }
+
+        // Back inside, so the next crossing starts its search fresh.
+        impl::LastTurnSide() = 0;
     } else if (impl::PushbackEnabled() && impl::SafePositionValid()) {
         float* safe = impl::SafePosition();
-        Player::SetPosition(safe[0], safe[1], safe[2]);
+
+        // Velocity was tried and does NOT work from outside the engine.
+        // motion+0x1b0 is the real Havok storage - the actor cache at +0x25c
+        // is copied from it - but the character controller recomputes it every
+        // frame from its own input, so a write is an output being overwritten.
+        // Measured with the player verifiably still (0.00 idle drift): writing
+        // +/-20 on X and on Z moved him 0.0 units on every axis. Changing this
+        // to a velocity push silently disables pushback.
+        //
+        // Y is never corrected: a region boundary is a 2D shape, and restoring
+        // the old height fights whatever owns the vertical motion - it sank a
+        // swimming player to the river bed.
+        const float ny = py;
+
+        // Take this frame's movement and rotate it until it fits.
+        //
+        // The player wanted to move from safe to (px, pz). Straight ahead is
+        // blocked, so try the same distance turned a little to each side and
+        // take the first angle that is still inside the region. Small steps
+        // make that continuous, which is what "sliding along a wall" feels
+        // like; the old keep-X-or-keep-Z rule had only two answers and so
+        // moved in jerks along a diagonal border.
+        //
+        // Every candidate is checked with AllowedAt before use, so the worst
+        // outcome is no movement - never a position outside the region.
+        float dx = px - safe[0];
+        float dz = pz - safe[2];
+
+        float nx = safe[0], nz = safe[2];
+        const impl::TurnStep* turns = impl::TurnSteps();
+        int8_t& side = impl::LastTurnSide();
+
+        bool resolved = false;
+        for (int step = 0; step < impl::kTurnStepCount && !resolved; ++step) {
+            const float c = turns[step].cosA;
+            const float s = turns[step].sinA;
+
+            // Prefer whichever way we turned last frame, so the search does
+            // not flip between mirror-image answers on a serrated border.
+            for (int attempt = 0; attempt < 2 && !resolved; ++attempt) {
+                const bool positive = (attempt == 0) == (side >= 0);
+                const float sn = positive ? s : -s;
+
+                const float rx = dx * c - dz * sn;
+                const float rz = dx * sn + dz * c;
+
+                const float cx = safe[0] + rx;
+                const float cz = safe[2] + rz;
+                if (AllowedAt(cx, cz)) {
+                    nx = cx; nz = cz;
+                    if (step > 0) side = positive ? 1 : -1;
+                    resolved = true;
+                }
+
+                if (s == 0.0f) break;      // straight ahead has no mirror
+            }
+        }
+
+
+        // Only write when the correction is worth something. This ran every
+        // frame the player was outside, including while floating still against
+        // the boundary, and a position write per frame resets swim state.
+        const float cdx = nx - px;
+        const float cdz = nz - pz;
+        if (cdx * cdx + cdz * cdz > kMinCorrection * kMinCorrection) {
+            Player::NudgePosition(nx, ny, nz);
+
+            // A panel where the player was stopped, turned to face them.
+            // Put the panel ON THE BORDER, not on the player.
+            //
+            // (nx, nz) is where the player was just pushed TO, so using it
+            // directly spawned the panel centred on Link. The boundary is
+            // outward of that - along the direction he was trying to go - so
+            // the panel is offset that way and turned to face back inside.
+            float ox = px - nx;
+            float oz = pz - nz;
+            float ol2 = ox * ox + oz * oz;
+            if (ol2 > 1.0e-6f) {
+                float ol = ol2;
+                for (int k = 0; k < 12; ++k) ol = 0.5f * (ol + ol2 / ol);
+                ox /= ol;
+                oz /= ol;
+            } else {
+                ox = 0.0f; oz = 1.0f;
+            }
+            const float mx = nx + ox * impl::MarkerOffset();
+            const float mz = nz + oz * impl::MarkerOffset();
+            ShowMarkerAt(mx, ny, mz, nx, nz);
+            impl::MarkerIdleTicks() = 0;
+        }
+
+        safe[0] = nx; safe[1] = py; safe[2] = nz;
     }
 
     // Everything below this line is wall building, and none of it is worth a
@@ -809,6 +1306,30 @@ inline bool Tick() {
         impl::LastBuildY() = py;
 
         impl::WallRecord* walls = impl::Walls();
+        // Stack geometry. Collision is a CUBE of half-extent scale*4 taken
+        // from the X scale alone, and the creation scale is capped, so
+        // height comes from stacking courses rather than from a taller block.
+        // The cube must also be at least as wide as a cell or the courses
+        // would not meet side to side.
+        // The actor's box is authored to size, so it is spawned at scale 1
+        // and stacked only if a taller wall than the box is asked for.
+        // A vertical BAND of tiles, not a single sheet.
+        //
+        // WantFace puts a panel at the height the rebuild happened, so on any
+        // slope every tile sat at one elevation and floated or sank - seen in
+        // game. There is no terrain-height query available here, so instead of
+        // guessing the ground the band is stacked around the player's height
+        // and some course lands at the right level whatever the slope does.
+        //
+        // Courses are one tile tall so they meet rather than overlap. The
+        // count comes from WallHeight, so regionConfig {"height": N} tunes how
+        // much vertical range is covered - and how many actors it costs.
+        const float wallHeight = impl::WallHeight();
+        const float cubeSide = kWallActorTileSize;
+        int8_t layers = static_cast<int8_t>(wallHeight / cubeSide);
+        if (layers < 1) layers = 1;
+        if (layers > 4) layers = 4;        // 8 courses x many faces crashed the game
+
         for (int i = 0; i < kMaxWalls; ++i) walls[i].wanted = false;
 
         const int reach = static_cast<int>(impl::BuildRadius() / size) + 1;
@@ -821,10 +1342,19 @@ inline bool Tick() {
                 // An allowed cell walls off each blocked neighbour. Naming the
                 // face by its lower cell means the pair only ever produces one
                 // panel, whichever side is visited first.
-                if (impl::CellBlocked(info, cx + 1, cz)) impl::WantFace(0, cx, cz, py);
-                if (impl::CellBlocked(info, cx - 1, cz)) impl::WantFace(0, cx - 1, cz, py);
-                if (impl::CellBlocked(info, cx, cz + 1)) impl::WantFace(1, cx, cz, py);
-                if (impl::CellBlocked(info, cx, cz - 1)) impl::WantFace(1, cx, cz - 1, py);
+                // Every course of the stack is its own record. Marking only
+                // the bottom one would leave a wall the height of a single
+                // block, which a windbomb clears trivially.
+                for (int8_t k = 0; k < layers; ++k) {
+                    if (impl::CellBlocked(info, cx + 1, cz))
+                        impl::WantFace(0, cx, cz, py, k, cubeSide, wallHeight);
+                    if (impl::CellBlocked(info, cx - 1, cz))
+                        impl::WantFace(0, cx - 1, cz, py, k, cubeSide, wallHeight);
+                    if (impl::CellBlocked(info, cx, cz + 1))
+                        impl::WantFace(1, cx, cz, py, k, cubeSide, wallHeight);
+                    if (impl::CellBlocked(info, cx, cz - 1))
+                        impl::WantFace(1, cx, cz - 1, py, k, cubeSide, wallHeight);
+                }
             }
         }
 
@@ -888,19 +1418,116 @@ inline bool Tick() {
     for (int i = 0; i < kMaxWalls; ++i) {
         if (!walls[i].used || walls[i].spawned) continue;
 
-        // AirWallCurseGanon's box is 2 x 2 x 2, so its half-extents are 1 and
-        // the scale IS the half-extent in each axis.
-        const float halfThick = impl::WallThickness() * 0.5f;
-        const float halfHeight = impl::WallHeight() * 0.5f;
-        const float halfSpan = size * 0.5f;
-
-        const float sx = walls[i].axis == 0 ? halfThick : halfSpan;
-        const float sz = walls[i].axis == 0 ? halfSpan : halfThick;
+        // ONE uniform scale, not a per-axis panel shape.
+        //
+        // The creation param scales the MODEL per axis but the COLLISION
+        // shape only uniformly, from the X component. Measured on a live
+        // block by dropping the player onto it: resting height came out at
+        // exactly sx * 4 for every combination tried, with sy and sz making
+        // no difference at all (sx=1,sy=10,sz=10 -> 4.0; sx=10,sy=1,sz=1 ->
+        // 40.0; sx=3 -> 12.0).
+        //
+        // A thin panel therefore rendered as a wall but collided as a small
+        // cube in the middle of it, so faces running along Z stopped the
+        // player and faces running along X did not - a barrier that works
+        // half the time, which is worse than one that never works.
+        //
+        // The cost of uniform scale is that a panel is as THICK as it is
+        // tall. That is accepted deliberately: neighbouring panels overlap
+        // heavily at kCellSize spacing, which also removes the corner gaps
+        // the per-axis version left.
+        // Same cube the build step sized the stack around: one course per
+        // record, side == cell size. Deriving it
+        // twice is deliberate - the spawn step runs on ticks where no
+        // rebuild happened and has no other way to know it.
+        // Scale 1: the pack's own box is the panel. Scaling it would hit the
+        // uniform-from-X collision bug that made half the block wall a
+        // hologram.
+        // Same scale as the marker panel. At authored size these tiles are
+        // ~8 units and read as scattered squares; scaled up they cover real
+        // ground, so far fewer are needed to line a border.
+        const float s = impl::MarkerScale();
+        (void)size;
 
         if (Actor::SpawnScaled(kWallActor, Actor(anchor), walls[i].pos[0],
-                               walls[i].pos[1], walls[i].pos[2], sx, halfHeight, sz)) {
+                               walls[i].pos[1], walls[i].pos[2], s, s, s)) {
             walls[i].spawned = true;
+            walls[i].oriented = false;
         }
+        break;
+    }
+
+    // Turn one freshly spawned panel to face its border.
+    //
+    // Spawning sets position and scale only, and cannot hand the actor back,
+    // so the panel is re-found by name and position - the same trick
+    // RemoveAllWalls uses - and then rotated through setMtx. Measured live:
+    // the basis goes identity -> yaw and stays put.
+    //
+    // One per tick, like spawning: this walks the proc list, which is not
+    // free, and a panel being unrotated for a frame is not visible anyway
+    // since the tile only draws when the player is nearly touching it.
+    for (int i = 0; i < kMaxWalls; ++i) {
+        if (!walls[i].used || !walls[i].spawned || walls[i].oriented) continue;
+
+        // A face along X wants the tile turned a quarter turn from a face
+        // along Z. WallYawIndex picks which of the two is which, because the
+        // authored facing is not documented anywhere and was simply wrong the
+        // first time it was tried in game.
+        const int yawIdx = (impl::WallYawIndex() + (walls[i].axis == 0 ? 0 : 2))
+                           & (kWallYawCount - 1);
+        const float cy = WallYawCos()[yawIdx];
+        const float sy = WallYawSin()[yawIdx];
+
+        // Pitch stands the plate up; yaw then turns it to face the border.
+        const int pitchIdx = (impl::WallPitchIndex() * 2) & (kWallYawCount - 1);
+        const float cp = WallYawCos()[pitchIdx];
+        const float sp = WallYawSin()[pitchIdx];
+
+        const float wx = walls[i].pos[0];
+        const float wz = walls[i].pos[2];
+
+        Actor found;
+        float best = size * size;          // within a cell of where it was put
+        Actor::ForEachDynamic([&](const Actor& actor) {
+            const char* name = actor.GetName();
+            if (!name) return true;
+            bool match = true;
+            for (const char* a = name, *b = kWallActor;; ++a, ++b) {
+                if (*a != *b) { match = false; break; }
+                if (*a == '\0') break;
+            }
+            if (!match) return true;
+
+            float ax = 0.0f, ay = 0.0f, az = 0.0f;
+            if (!actor.GetPosition(ax, ay, az)) return true;
+            const float dx = ax - wx;
+            const float dz = az - wz;
+            const float d2 = dx * dx + dz * dz;
+            if (d2 <= best) { best = d2; found = actor; }
+            return true;
+        });
+
+        if (found.IsValid()) {
+            float px2 = 0.0f, py2 = 0.0f, pz2 = 0.0f;
+            found.GetPosition(px2, py2, pz2);
+            // Ry(yaw) * Rx(pitch), row-major 3x4 with translation in column 3.
+            // Basis scaled: setMtx writes the whole transform, so turning a
+            // panel with a unit basis would snap it back to authored size.
+            const float ws = impl::MarkerScale();
+            const float mtx[12] = {
+                  cy * ws,  sy * sp * ws,  sy * cp * ws, px2,
+                     0.0f,       cp * ws,      -sp * ws, py2,
+                 -sy * ws,  cy * sp * ws,  cy * cp * ws, pz2,
+            };
+            // refresh=false - turning a settled actor, not warping it.
+            found.SetMtx(mtx, true, false);
+        }
+
+        // Marked either way: a panel whose actor cannot be found is not going
+        // to be found next tick either, and retrying forever would walk the
+        // proc list every frame for nothing.
+        walls[i].oriented = true;
         break;
     }
 

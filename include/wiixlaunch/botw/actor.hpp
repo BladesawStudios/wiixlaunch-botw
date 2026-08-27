@@ -33,12 +33,28 @@ namespace impl {
 
 struct PendingSpawn {
     bool valid = false;
-    const char* name = nullptr;
+    // The name is COPIED, not pointed at. A request outlives the call by
+    // at least a frame - SpawnFlushHook consumes it later - so a caller
+    // passing a local buffer (an actor name read off a network request,
+    // say) had it go out of scope before the spawn ran. That failed
+    // SILENTLY: the request was accepted, the flush read freed stack, and
+    // no actor appeared. String literals happened to survive, which made
+    // the bug look like "only certain actors can spawn".
+    char name[64] = {};
     void* anchor = nullptr;
     float pos[3] = {};
     bool hasScale = false;
     float scale[3] = {1.0f, 1.0f, 1.0f};
 };
+
+// Copies at most cap-1 bytes and always terminates.
+inline void CopyActorName(char* dest, uint32_t cap, const char* src) {
+    uint32_t i = 0;
+    if (src) {
+        for (; i + 1 < cap && src[i]; ++i) dest[i] = src[i];
+    }
+    dest[i] = '\0';
+}
 
 inline PendingSpawn& PendingSpawnRef() {
     static PendingSpawn s;
@@ -121,6 +137,23 @@ constexpr uint32_t kPosZOffset = kActorMatrixOffset + 0x2c;  // 0x224
 // Contiguous sead::Vector3f velocity - see Actor::GetLinearVelocity for how
 // this was identified and why it is a different kind of field to the position.
 constexpr uint32_t kVelocityOffset = 0x25c;
+
+// The byte Actor::setVelocity sets after writing a velocity, and the whole
+// reason writing +0x25c alone does nothing.
+//
+// +0x25c is BOTH the per-frame cache the physics writes (0x037966bc) and the
+// requested velocity the actor's update consumes. Writing the floats without
+// this flag leaves a value that reads back correctly, is seen by whatever
+// samples the cache that frame - the camera visibly shifted - and is then
+// overwritten. Measured: 121 writes of 25.0 moved the player zero units.
+//
+// Wii U Actor::setVelocity is 0x03798b60, matched to Switch's symbolised
+// Actor::setVelocity through uking::action::StopASIgnite (the class that
+// loads "IgniteVelocityDir"), whose m32 calls it in both builds.
+constexpr uint32_t kVelocityRequestFlagOffset = 0x432;
+
+// Actor::setVelocity refuses unless this byte is 0 or 2.
+constexpr uint32_t kVelocityStateOffset = 0x54;
 
 // setActorMtxOnly(actor, const sead::Matrix34f&, const sead::Vector3f* vel) at
 // 0x03798ae8 - the reason writing +0x204/+0x214/+0x224 by hand never moved
@@ -607,8 +640,14 @@ public:
         return false;
 #else
         impl::PendingSpawn& pending = impl::PendingSpawnRef();
+        // The slot holds exactly ONE request, and SpawnFlushHook drains at most
+        // one per invocation. Overwriting an unconsumed request destroys it,
+        // silently: the caller was told true, so it marks the actor spawned and
+        // never retries, and the actor never appears. Refusing while the slot is
+        // busy is what lets a caller queue N actors by retrying across N ticks.
+        if (pending.valid) return false;
         pending.valid = true;
-        pending.name = actorName;
+        impl::CopyActorName(pending.name, sizeof(pending.name), actorName);
         pending.anchor = anchor.GetRaw();
         pending.pos[0] = x;
         pending.pos[1] = y;
@@ -648,8 +687,14 @@ public:
         return false;
 #else
         impl::PendingSpawn& pending = impl::PendingSpawnRef();
+        // The slot holds exactly ONE request, and SpawnFlushHook drains at most
+        // one per invocation. Overwriting an unconsumed request destroys it,
+        // silently: the caller was told true, so it marks the actor spawned and
+        // never retries, and the actor never appears. Refusing while the slot is
+        // busy is what lets a caller queue N actors by retrying across N ticks.
+        if (pending.valid) return false;
         pending.valid = true;
-        pending.name = actorName;
+        impl::CopyActorName(pending.name, sizeof(pending.name), actorName);
         pending.anchor = anchor.GetRaw();
         pending.pos[0] = x;
         pending.pos[1] = y;
@@ -934,13 +979,45 @@ public:
         return v;
     }
 
+    // Writes Havok's storage, NOT the actor cache at +0x25c.
+    //
+    // This wrote the cache until it was measured: the value reads back
+    // correctly and moves nothing, because physics recomputes it every frame.
+    // See GetHavokMotion for the chain and how it was found.
+    // Requests a velocity the way the game does, in Actor::setVelocity
+    // (0x03798b60): write the floats, then set the request flag.
+    //
+    // The flag is not optional. Without it this wrote a field that reads back
+    // correctly and moves nothing. Every other candidate found by probing -
+    // the Havok motion at motion+0x1b0, RigidBody::setLinearVelocity - is an
+    // output or needs a three-part transaction (value, motion flag, and a push
+    // onto RigidBodyRequestMgr) that a memory write cannot fake. This one is
+    // an input, so a write is all it takes.
     bool SetLinearVelocity(float x, float y, float z) const {
 #if !WIIXL_SWITCH
         if (!IsPlausibleProc(m_Ptr) || m_Kind == Kind::Placement) return false;
         if (!IsFiniteFloat(x) || !IsFiniteFloat(y) || !IsFiniteFloat(z)) return false;
-        auto* v = reinterpret_cast<float*>(
-            static_cast<uint8_t*>(m_Ptr) + impl::kVelocityOffset);
+
+        auto* actor = static_cast<uint8_t*>(m_Ptr);
+        // The game's own guard, and it is enforced here.
+        //
+        // Actor::setVelocity refuses unless +0x54 is 0 or 2. Link sits at 1,
+        // so the game never sets the PLAYER's velocity this way. Bypassing it
+        // was tried: the floats and the request flag were both written, the
+        // flag stayed set (nothing consumed it), and the player moved 0.0
+        // units on all four axes with verified 0.00 idle drift. So the player
+        // has no velocity INPUT to write - his motion comes from the player
+        // state machine, and changing it means hooking that, not poking memory.
+        //
+        // Enforced rather than ignored so this reports honestly: for actors
+        // that DO accept a requested velocity (state 0 or 2) it works, and for
+        // the player it returns false instead of claiming success.
+        const char state = *reinterpret_cast<const char*>(actor + impl::kVelocityStateOffset);
+        if (state != 0 && state != 2) return false;
+
+        auto* v = reinterpret_cast<float*>(actor + impl::kVelocityOffset);
         v[0] = x; v[1] = y; v[2] = z;
+        *(actor + impl::kVelocityRequestFlagOffset) = 1;
         return true;
 #else
         (void)x; (void)y; (void)z;
@@ -1104,6 +1181,94 @@ public:
     }
 
     bool WarpTo(const Vec3& pos) const { return WarpTo(pos.x, pos.y, pos.z); }
+
+    // WarpTo without the physics-instance reset.
+    //
+    // setMtx's fourth argument resets the physics instance set - cloth,
+    // ragdoll, and whatever else the body owns. That is right for a warp
+    // across the map, which is why both of the game's warp actions pass it,
+    // and wrong for a correction applied every frame: resetting the set
+    // continuously destroys transient state. Live symptom - a region pushback
+    // built on WarpTo dragged a SWIMMING player to the river bed, because the
+    // swim state was being torn down and rebuilt on every single frame.
+    //
+    // Use this for small, repeated corrections; use WarpTo to teleport.
+    bool NudgeTo(float x, float y, float z) const {
+#if !WIIXL_SWITCH
+        float mtx[12];
+        if (!GetMatrix(mtx)) return false;
+        mtx[3] = x;
+        mtx[7] = y;
+        mtx[11] = z;
+        return SetMtx(mtx, true, false);
+#else
+        (void)x; (void)y; (void)z;
+        return false;
+#endif
+    }
+
+    bool NudgeTo(const Vec3& pos) const { return NudgeTo(pos.x, pos.y, pos.z); }
+
+    // Havok's own motion object, where linear velocity actually lives.
+    //
+    // The actor caches velocity at +0x25c (kVelocityOffset), refreshed every
+    // frame from physics by 0x037966bc - so that field READS correctly but
+    // cannot be written: a write changes what reads it that frame (the camera
+    // visibly shifted) and is overwritten before anything that moves the actor
+    // sees it. Measured live - 121 sustained writes of 25.0 moved the player
+    // zero units.
+    //
+    // The storage behind it is reached by the chain 0x037966bc itself walks:
+    //
+    //   actor +0x3a0  physics component
+    //         +0x50   character controller   (0x037966a8 returns this)
+    //         +0x04   rigid body             (0x0344a890 -> 0x03488aec)
+    //         +0x70   hkpMotion POINTER
+    //         +0x1b0  linear velocity, three floats
+    //
+    // The final dereference is why +0x70 is a pointer and not the motion:
+    // 0x034aaad0 loads *param_1 first, then reads +0x1b0/+0x1b4/+0x1b8 off it.
+    void* GetHavokMotion() const {
+#if !WIIXL_SWITCH
+        if (!IsPlausibleProc(m_Ptr) || m_Kind == Kind::Placement) return nullptr;
+        uint8_t* actor = static_cast<uint8_t*>(m_Ptr);
+
+        void* physics = *reinterpret_cast<void**>(actor + 0x3a0);
+        if (!IsReadablePtr(physics)) return nullptr;
+
+        void* controller = *reinterpret_cast<void**>(static_cast<uint8_t*>(physics) + 0x50);
+        if (!IsReadablePtr(controller)) return nullptr;
+
+        void* body = *reinterpret_cast<void**>(static_cast<uint8_t*>(controller) + 0x04);
+        if (!IsReadablePtr(body)) return nullptr;
+
+        void* motion = *reinterpret_cast<void**>(static_cast<uint8_t*>(body) + 0x70);
+        if (!IsReadablePtr(motion)) return nullptr;
+
+        return motion;
+#else
+        return nullptr;
+#endif
+    }
+
+    // Reads velocity straight from Havok instead of the actor cache. The two
+    // agree while the cache is fresh; this one is also correct mid-frame, and
+    // is what a velocity correction must read so it does not act on a value
+    // one frame stale.
+    bool GetHavokVelocity(float& x, float& y, float& z) const {
+#if !WIIXL_SWITCH
+        void* motion = GetHavokMotion();
+        if (!motion) return false;
+        const float* v = reinterpret_cast<const float*>(
+            static_cast<uint8_t*>(motion) + 0x1b0);
+        if (!IsFiniteFloat(v[0]) || !IsFiniteFloat(v[1]) || !IsFiniteFloat(v[2])) return false;
+        x = v[0]; y = v[1]; z = v[2];
+        return true;
+#else
+        (void)x; (void)y; (void)z;
+        return false;
+#endif
+    }
 
     Vec3 GetPosition() const {
         Vec3 pos;
