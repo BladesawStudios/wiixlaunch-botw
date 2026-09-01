@@ -10,6 +10,8 @@
 // See docs/overview.md for the framework this sits on top of.
 
 #include "game/actor.hpp"
+#include "game/memory.hpp"
+#include "game/vfx.hpp"
 #include "game/player.hpp"
 #include "game/gamedata.hpp"
 #include "game/pouch.hpp"
