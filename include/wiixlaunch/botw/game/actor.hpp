@@ -138,6 +138,12 @@ constexpr uint32_t kPosZOffset = kActorMatrixOffset + 0x2c;  // 0x224
 // this was identified and why it is a different kind of field to the position.
 constexpr uint32_t kVelocityOffset = 0x25c;
 
+// The character controller's desired-velocity input, relative to the
+// controller (actor +0x3a0 -> +0x50). Found by in-process injection sweep on
+// a live game; see Actor::GetControllerVelocityPtr for the evidence and for
+// the two rules that make writes to it work.
+constexpr uint32_t kControllerVelocityOffset = 0xb0;
+
 // The byte Actor::setVelocity sets after writing a velocity, and the whole
 // reason writing +0x25c alone does nothing.
 //
@@ -1208,6 +1214,96 @@ public:
     }
 
     bool NudgeTo(const Vec3& pos) const { return NudgeTo(pos.x, pos.y, pos.z); }
+
+    // The character controller's DESIRED-VELOCITY input.
+    //
+    // THE one field that actually moves an actor from a mod. Everything else
+    // this header can reach is an output: the actor cache at +0x25c is
+    // refreshed from physics, and the Havok linear velocity at motion+0x1b0
+    // is recomputed by the controller every frame, so writes to either are
+    // overwritten before they move anything. This is the value the controller
+    // CONSUMES, and a write here survives.
+    //
+    //   actor +0x3a0  physics component
+    //         +0x50   character controller
+    //         +0xb0   desired velocity, three floats, world units per second
+    //                 (X +0xb0, Y +0xb4, Z +0xb8)
+    //
+    // MEASURED, in-process, on a live game: writing (25, 0, 0) here every
+    // frame launched a standing player east at a realized 24 u/s. A sweep of
+    // every float triple on the controller found this to be the only one with
+    // that response.
+    //
+    // Two things it took a while to learn, both of which make this look broken
+    // if you get them wrong:
+    //
+    //   * It must be written EVERY FRAME. A single-frame write does nothing at
+    //     all - the controller overwrites it before the physics step.
+    //   * It reads ~0 during ordinary locomotion. Normal movement does not
+    //     flow through this field, so a mod that waits for it to be non-zero
+    //     before acting waits forever. Read motion+0x1b0 (GetHavokVelocity) to
+    //     see how fast the actor is ACTUALLY going; write here to change it.
+    //
+    // Writes must also come from a hook that runs between the owning actor's
+    // update and the physics phase - Player::OnTick is such a place. An
+    // external write (a debugger, another process) can never land in that
+    // window and will appear to do nothing.
+    //
+    // NOT a player-only field: any actor with a character controller has one,
+    // which is how a mod stops a horse rather than merely its rider.
+    //
+    // KNOWN LIMIT: shield surfing overrides this every frame, and overrides a
+    // direct motion+0x1b0 write too. A surfing player cannot be steered by
+    // velocity through any path found so far.
+    float* GetControllerVelocityPtr() const {
+#if !WIIXL_SWITCH
+        if (!IsPlausibleProc(m_Ptr) || m_Kind == Kind::Placement) return nullptr;
+        uint8_t* actor = static_cast<uint8_t*>(m_Ptr);
+
+        void* physics = *reinterpret_cast<void**>(actor + 0x3a0);
+        if (!IsReadablePtr(physics)) return nullptr;
+
+        void* controller = *reinterpret_cast<void**>(
+            static_cast<uint8_t*>(physics) + 0x50);
+        if (!IsReadablePtr(controller)) return nullptr;
+
+        return reinterpret_cast<float*>(
+            static_cast<uint8_t*>(controller) + impl::kControllerVelocityOffset);
+#else
+        return nullptr;
+#endif
+    }
+
+    // Reads the desired velocity. Remember this is the controller's INPUT and
+    // reads ~0 during ordinary movement - GetHavokVelocity is what reports how
+    // fast the actor is really going.
+    bool GetControllerVelocity(float& x, float& y, float& z) const {
+#if !WIIXL_SWITCH
+        const float* v = GetControllerVelocityPtr();
+        if (!v) return false;
+        if (!IsFiniteFloat(v[0]) || !IsFiniteFloat(v[1]) || !IsFiniteFloat(v[2]))
+            return false;
+        x = v[0]; y = v[1]; z = v[2];
+        return true;
+#else
+        (void)x; (void)y; (void)z;
+        return false;
+#endif
+    }
+
+    // Writes the desired velocity. Call EVERY FRAME for as long as the effect
+    // is wanted; one call does nothing.
+    bool SetControllerVelocity(float x, float y, float z) const {
+#if !WIIXL_SWITCH
+        float* v = GetControllerVelocityPtr();
+        if (!v) return false;
+        v[0] = x; v[1] = y; v[2] = z;
+        return true;
+#else
+        (void)x; (void)y; (void)z;
+        return false;
+#endif
+    }
 
     // Havok's own motion object, where linear velocity actually lives.
     //
