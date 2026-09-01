@@ -462,4 +462,97 @@ inline bool IsThundering() {
 #endif
 }
 
+// --- holding a forced weather --------------------------------------------
+//
+// SetWeather alone does not keep the weather set, and the reason is not the
+// lock. +0x60c is a countdown IN FRAMES, seeded with 4 by the game's setter:
+// the world manager's update (0x03677ef0) ticks it down and, at zero, puts the
+// override back to 0xff and clears the lock and request bytes. Four frames is
+// long enough for the forecast UI to notice and nowhere near long enough for
+// the sky to finish its transition, which is exactly what an unheld force looks
+// like - the weather visibly tries to change and gives up.
+//
+// The lock makes that update skip the countdown, which is why SetWeather can
+// pass it. But the skip is itself gated on 0x031cad5c, so it is not the
+// guarantee it appears to be: measured in game, locking alone was not enough.
+//
+// So hold the override instead. While a hold is standing, TickWeatherHold
+// re-stamps the override and tops the countdown back up, which does not care
+// which path was clearing it. The weather driver (0x03667d20) reads the
+// resolver every frame and eases +0x14 down before adopting the new type at
+// +0x18, so a held override transitions exactly like natural weather - it only
+// has to still be there when the driver next looks.
+//
+// Nothing here is automatic: a caller must run TickWeatherHold every frame for
+// the hold to mean anything.
+
+namespace impl {
+inline int& WeatherHold() { static int held = -1; return held; }
+}  // namespace impl
+
+// Forces the weather and keeps it forced. Equivalent to SetWeather plus a
+// standing hold, so the value survives the countdown above.
+inline bool HoldWeather(Type type, bool lockOut = false) {
+#if !WIIXL_SWITCH
+    const int index = static_cast<int>(type);
+    if (index < 0 || index >= kTypeCount) return false;
+    if (!SetWeather(type, lockOut)) return false;
+    impl::WeatherHold() = index;
+    return true;
+#else
+    (void)type; (void)lockOut;
+    return false;
+#endif
+}
+
+// Drops the hold WITHOUT touching the override, so the weather stays as it is
+// and then lapses the way the game intends. ClearWeather is the one that hands
+// control straight back to the climate.
+inline void ReleaseWeather() {
+#if !WIIXL_SWITCH
+    impl::WeatherHold() = -1;
+#endif
+}
+
+// The type being held, or kNoOverride when nothing is.
+inline int GetWeatherHold() {
+#if !WIIXL_SWITCH
+    return impl::WeatherHold();
+#else
+    return kNoOverride;
+#endif
+}
+
+// The override's remaining lifetime in frames, straight off the manager.
+// Diagnostic: if a forced weather is not sticking, this is the field that says
+// why. Returns -1 when there is no world manager.
+inline int GetWeatherHoldFrames() {
+#if !WIIXL_SWITCH
+    void* world = impl::WorldMgr();
+    if (!world) return -1;
+    return *reinterpret_cast<int32_t*>(
+        reinterpret_cast<uintptr_t>(world) + impl::kRequestState);
+#else
+    return -1;
+#endif
+}
+
+// Call every frame. Does nothing until HoldWeather has been used.
+inline void TickWeatherHold() {
+#if !WIIXL_SWITCH
+    const int held = impl::WeatherHold();
+    if (held < 0) return;
+
+    void* world = impl::WorldMgr();
+    if (!world) return;
+
+    const uintptr_t base = reinterpret_cast<uintptr_t>(world);
+    *reinterpret_cast<uint8_t*>(base + impl::kOverride) = static_cast<uint8_t>(held);
+
+    // Topping this up is what actually defeats the expiry: the update only
+    // clears the override on the frame it finds the countdown at zero.
+    *reinterpret_cast<int32_t*>(base + impl::kRequestState) = 4;
+#endif
+}
+
 } // namespace WiiXLaunch::BotW::Weather

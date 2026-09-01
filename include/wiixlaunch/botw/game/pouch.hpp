@@ -975,6 +975,37 @@ struct CookData {
     bool setEffectLevel = false; float effectLevel = 0.0f;
 };
 
+// Reads a food item's cook data. Returns false when the entry is not food -
+// on a weapon these same words are the modifier, so reading them as an effect
+// would report nonsense rather than nothing.
+//
+// The pair to SetCookData: before this, writes went through the setter while
+// reads came off the Entry struct, so the two halves had different shapes.
+inline bool GetCookData(uintptr_t item, CookData& out) {
+    out = CookData{};
+#if !WIIXL_SWITCH
+    if (!item) return false;
+    if (*reinterpret_cast<int32_t*>(item + impl::kItemType) != static_cast<int32_t>(Slot::Food)) {
+        return false;
+    }
+
+    out.setHealth = true;
+    out.health = *reinterpret_cast<int32_t*>(item + impl::kItemCookHealth);
+    out.setDuration = true;
+    out.duration = *reinterpret_cast<int32_t*>(item + impl::kItemCookDuration);
+    out.setSellPrice = true;
+    out.sellPrice = *reinterpret_cast<int32_t*>(item + impl::kItemCookSellPrice);
+    out.setEffectId = true;
+    out.effectId = *reinterpret_cast<float*>(item + impl::kItemCookEffectId);
+    out.setEffectLevel = true;
+    out.effectLevel = *reinterpret_cast<float*>(item + impl::kItemCookEffectLevel);
+    return true;
+#else
+    (void)item;
+    return false;
+#endif
+}
+
 inline bool SetCookData(uintptr_t item, const CookData& data) {
 #if !WIIXL_SWITCH
     void* manager = impl::PauseMenuDataMgr();
@@ -1271,6 +1302,96 @@ inline int ForEachOfType(Slot slot, Fn visit) {
 // How many entries of a type the pouch holds.
 inline int CountOfType(Slot slot) {
     return ForEachOfType(slot, [](const Entry&) { return true; });
+}
+
+// --- names ---------------------------------------------------------------
+//
+// The CookEffectId values themselves live in impl, so this is the one callers
+// need by name: everything else round-trips through the two functions below.
+constexpr int kCookEffectNone = impl::CookEffectNone;
+
+//
+// These are THIS header's names, not the game's. armour.hpp and weather.hpp can
+// read their tables out of the executable because the game builds one; the cook
+// effect ids and the modifier bits have no such table, so the strings below are
+// chosen to match how the game presents each one to the player. Kept here
+// rather than in a caller so that every client agrees on them - before this the
+// only copy in the project was in the web tester's JavaScript.
+
+// A cooked effect's name, or "" for impl::CookEffectNone and anything unrecognised.
+//
+// Ids 3, 7, 8 and 9 are deliberately absent: they exist and produce a timed
+// effect in game, but with no icon and no name, so there is nothing to return.
+inline const char* CookEffectName(int id) {
+    switch (id) {
+        case impl::CookLifeRecover:      return "LifeRecover";
+        case impl::CookLifeMaxUp:        return "LifeMaxUp";
+        case impl::CookResistHot:        return "ResistHot";
+        case impl::CookResistCold:       return "ResistCold";
+        case impl::CookResistElectric:   return "ResistElectric";
+        case impl::CookAttackUp:         return "AttackUp";
+        case impl::CookDefenseUp:        return "DefenseUp";
+        case impl::CookQuietness:        return "Quietness";
+        case impl::CookAllSpeed:         return "AllSpeed";
+        case impl::CookStaminaRecover:   return "StaminaRecover";
+        case impl::CookGutsPerformance:  return "GutsPerformance";
+        case impl::CookFireproof:        return "Fireproof";
+        default:                   return "";
+    }
+}
+
+// The id a name means, or impl::CookEffectNone when it matches nothing.
+// Case-sensitive, matching the game's own spelling of each effect.
+inline int CookEffectFromName(const char* name) {
+    if (!name || !name[0]) return impl::CookEffectNone;
+
+    for (int id = 0; id <= impl::CookFireproof; ++id) {
+        const char* entry = CookEffectName(id);
+        if (!entry[0]) continue;
+
+        const char* a = entry;
+        const char* b = name;
+        while (*a && *a == *b) { ++a; ++b; }
+        if (*a == *b) return id;
+    }
+
+    return impl::CookEffectNone;
+}
+
+// One modifier bit's name, or "" if more than one bit is set. Takes a single
+// bit rather than a mask precisely so a caller has to decide how to present a
+// combination - a bow with SpreadFire and ZoomRapid is two bonuses, not one.
+// The yellow bit is not a bonus and is ignored here.
+inline const char* ModifierName(uint32_t bit) {
+    switch (bit & ~ModifierYellow) {
+        case ModifierAttackUp:   return "AttackUp";
+        case ModifierDurability: return "Durability";
+        case ModifierCritical:   return "Critical";
+        case ModifierLongThrow:  return "LongThrow";
+        case ModifierMultiShot:  return "MultiShot";
+        case ModifierZoomRapid:  return "ZoomRapid";
+        case ModifierRapidFire:  return "RapidFire";
+        case ModifierSurfMaster: return "SurfMaster";
+        case ModifierGuardUp:    return "GuardUp";
+        default:                 return "";
+    }
+}
+
+// The bit a name means, or 0. Does not accept "Yellow" - that is a tier on a
+// bonus rather than a bonus, and SetModifier takes it as ModifierYellow.
+inline uint32_t ModifierFromName(const char* name) {
+    if (!name || !name[0]) return 0;
+
+    for (uint32_t bit = ModifierAttackUp; bit <= ModifierGuardUp; bit <<= 1) {
+        const char* entry = ModifierName(bit);
+        if (!entry[0]) continue;
+
+        const char* a = entry;
+        const char* b = name;
+        while (*a && *a == *b) { ++a; ++b; }
+        if (*a == *b) return bit;
+    }
+    return 0;
 }
 
 } // namespace WiiXLaunch::BotW::Pouch
