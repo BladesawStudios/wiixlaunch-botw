@@ -2,6 +2,7 @@
 
 #include <wiixlaunch/platform.hpp>
 #include <wiixlaunch/call.hpp>
+#include <wiixlaunch/hook.hpp>
 #include "player.hpp"
 
 // WiiXLaunch::BotW::Armour - the special-status effects Link's worn armour
@@ -738,5 +739,186 @@ inline bool SetArmourEffects(Effect effect, int level) {
     return false;
 #endif
 }
+
+// --- extra effects, past the one-per-piece limit --------------------------
+//
+// A piece of armour stores exactly ONE effect: armorEffectEffectType is a
+// single name at obj+0x2c with a single level at +0x40. The game's only way
+// past that is the combo table at 0x1054cbb8, six entries of
+// { declaredIndex, componentA, componentB } letting one declared value count
+// for two effects - and it is hard-capped at two, because
+// getArmorEffectLevelIfType (0x0328c7f4) finds the one entry matching the
+// declared value and then compares the target against exactly entry[1] and
+// entry[2]. The table cannot be lengthened either: its terminator 0x1054cc00
+// is compiled in, and other data begins there.
+//
+// So more than two effects on one piece cannot come from the game's data. It
+// can come from that function, which is the single choke point every aggregate
+// query calls: hooking it means the game's own updateArmorEffects does the
+// summing, the player cache rebuilds itself, and set bonuses still apply. That
+// is why this is a hook rather than a per-frame write into the cache at
+// player+0x1a50 - the cache route fights the game every frame and has no slot
+// at all for ResistAncient or BeamPowerUp.
+//
+// The table is ADDITIVE: the hook returns the piece's real level plus whatever
+// is stored here, so a piece keeps its declared effect and extras stack on top.
+// Nothing is saved, and it is keyed by slot rather than by actor, so it follows
+// whatever is worn in that slot.
+//
+// Not covered, because they do not route through 0x0328c7f4: defence
+// (armorDefenceAddLevel, its own accessor on obj[0x18]) and the three booleans.
+// Both already have their own writes.
+
+constexpr int kEffectSlots = static_cast<int>(Effect::ClimbSpeedAndBeamPowerUp) + 1;
+
+namespace impl {
+
+constexpr uintptr_t kEffectLevelIfTypeWiiU = 0x0328c7f4;
+
+inline int32_t (&ExtraTable())[kPieceCount][kEffectSlots] {
+    static int32_t table[kPieceCount][kEffectSlots] = {};
+    return table;
+}
+
+// True when anything is set, so the hook can bail before doing any work in the
+// overwhelmingly common case of no extras at all. updateArmorEffects runs every
+// frame and calls through here seventeen times per worn piece.
+inline bool& ExtraAny() { static bool any = false; return any; }
+inline bool& ExtraHookInstalled() { static bool installed = false; return installed; }
+
+inline void RecomputeExtraAny() {
+    auto& table = ExtraTable();
+    for (int piece = 0; piece < kPieceCount; ++piece) {
+        for (int effect = 0; effect < kEffectSlots; ++effect) {
+            if (table[piece][effect] != 0) { ExtraAny() = true; return; }
+        }
+    }
+    ExtraAny() = false;
+}
+
+// Which slot this actor is worn in, or -1. Resolved by asking the holder rather
+// than by caching pointers, so a piece swapped in the meantime cannot leave a
+// stale match behind.
+inline int PieceOfActor(const void* actor) {
+#if !WIIXL_SWITCH
+    if (!actor) return -1;
+    for (int i = 0; i < kPieceCount; ++i) {
+        if (PieceActor(i) == actor) return i;
+    }
+#else
+    (void)actor;
+#endif
+    return -1;
+}
+
+// The effect a sead::SafeString target names. The queries pass pointers out of
+// the game's own name table, so EffectFromName's walk hits on the first
+// comparison; the string compare is only there for a caller that built its own.
+inline int EffectOfTarget(const void* target);
+
+WIIXL_HOOK_DEFINE_TRAMPOLINE(EffectLevelHook) {
+    static int Callback(void* actor, void* target) {
+        const int real = Orig(actor, target);
+        if (!ExtraAny()) return real;
+
+        const int piece = PieceOfActor(actor);
+        if (piece < 0) return real;
+
+        const int effect = EffectOfTarget(target);
+        if (effect < 0) return real;
+
+        return real + ExtraTable()[piece][effect];
+    }
+};
+
+}  // namespace impl
+
+// Arms the extra-effect support. Call once from WiiXLaunch_Init().
+//
+// Installing costs nothing until something is stored: the hook runs the
+// original and tests one bool.
+inline bool InitExtraEffects() {
+#if !WIIXL_SWITCH
+    if (impl::ExtraHookInstalled()) return true;
+    impl::EffectLevelHook::Install(0x0, impl::kEffectLevelIfTypeWiiU);
+    impl::ExtraHookInstalled() = true;
+    return true;
+#else
+    return false;
+#endif
+}
+
+// Stacks an extra effect on a piece, on top of whatever it declares. level 0
+// removes it. Returns false for a bad slot or effect, or before Init.
+inline bool SetExtraEffect(Piece piece, Effect effect, int level) {
+#if !WIIXL_SWITCH
+    const int slot = static_cast<int>(piece);
+    const int which = static_cast<int>(effect);
+    if (slot < 0 || slot >= impl::kPieceCount) return false;
+    if (which <= 0 || which >= kEffectSlots) return false;
+    if (!impl::ExtraHookInstalled()) return false;
+
+    impl::ExtraTable()[slot][which] = level;
+    impl::RecomputeExtraAny();
+    Refresh();
+    return true;
+#else
+    (void)piece; (void)effect; (void)level;
+    return false;
+#endif
+}
+
+inline int GetExtraEffect(Piece piece, Effect effect) {
+#if !WIIXL_SWITCH
+    const int slot = static_cast<int>(piece);
+    const int which = static_cast<int>(effect);
+    if (slot < 0 || slot >= impl::kPieceCount) return 0;
+    if (which <= 0 || which >= kEffectSlots) return 0;
+    return impl::ExtraTable()[slot][which];
+#else
+    (void)piece; (void)effect;
+    return 0;
+#endif
+}
+
+// Drops every extra on all three slots.
+inline void ClearExtraEffects() {
+#if !WIIXL_SWITCH
+    auto& table = impl::ExtraTable();
+    for (int piece = 0; piece < impl::kPieceCount; ++piece) {
+        for (int effect = 0; effect < kEffectSlots; ++effect) table[piece][effect] = 0;
+    }
+    impl::ExtraAny() = false;
+    Refresh();
+#endif
+}
+
+inline bool ExtraEffectsActive() {
+#if !WIIXL_SWITCH
+    return impl::ExtraAny();
+#else
+    return false;
+#endif
+}
+
+namespace impl {
+// Defined after EffectFromName is available.
+inline int EffectOfTarget(const void* target) {
+#if !WIIXL_SWITCH
+    if (!target) return -1;
+    // sead::SafeString is { const char* text; const void* vtable } - the
+    // inverted layout the rest of this framework already deals with.
+    const char* text = *reinterpret_cast<const char* const*>(target);
+    if (!text) return -1;
+
+    const Effect effect = EffectFromName(text);
+    if (effect == Effect::None) return -1;
+    return static_cast<int>(effect);
+#else
+    (void)target;
+    return -1;
+#endif
+}
+}  // namespace impl
 
 } // namespace WiiXLaunch::BotW::Armour
