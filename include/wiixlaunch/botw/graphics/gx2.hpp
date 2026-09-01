@@ -6,7 +6,7 @@
 
 #if WIIXL_CEMU || WIIXL_WIIU
 
-#include "fs.hpp"
+#include "../platform/fs.hpp"
 #include "gfd.hpp"
 #include "gx2_shader_types.hpp"
 #include "shaders/spriteui_gsh_bytes.hpp"

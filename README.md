@@ -28,26 +28,28 @@ projects that want it.
 
 | Header | Provides |
 | --- | --- |
-| `botw/player.hpp` | `Player` - equipped sword/shield/bow, position, per-swing attack detection, a per-frame `OnTick` callback |
-| `botw/actor.hpp` | `Actor` - a thin wrapper around a raw actor pointer (`GetName()`, `Delete()`), plus `Actor::Spawn(name, anchor, x, y, z)` |
-| `botw/pouch.hpp` | `Pouch` - equipped-item values through `PauseMenuDataMgr`, so durability changes reach the menu and the save rather than only the actor |
-| `botw/armour.hpp` | `Armour` - the special-status effects worn armour grants (`GetArmourEffects`/`SetArmourEffects`, per-piece get/set), read from and written to the pieces' `ArmorEffect` GParamList |
-| `botw/gametime.hpp` | `Time` - the in-game clock (`GetGameTime`/`SetGameTime`), day counter, time division and clock speed, through the world manager's own pending-jump path |
-| `botw/weather.hpp` | `Weather` - the weather system (`GetWeather`/`SetWeather`), the override the game resolves above the climate roll, plus the current climate |
-| `botw/climate.hpp` | `Climate` - the ambient temperature (`GetTemperature`/`SetTemperature`, aliased `Get`/`SetClimate`), recomputed from the climate curves, altitude and the clock |
-| `botw/completion.hpp` | `Completion` - the map's completion percentage (`GetCompletionPercent`), recomputed from the same four counters the UI uses, plus `SetKorokCount` for the one term worth writing and an optional hook (`Init` + `SetDisplayedPercent`) that forces the number on screen |
-| `botw/map.hpp` | `Map` - map reveal: the fifteen tower regions (`Get`/`SetMapRegionUnlock`) and shrine travel destinations (`Get`/`SetMapUnlock`) |
-| `botw/region.hpp` | `Region` - the fifteen regions as PLACES: which one a world position is in (`GetRegionAt`, off the game's own `Ecosystem/MapTower.beco` raster), whether the player may enter it (`Get`/`SetRegionUnlock`, `SyncFromTowers`), and invisible walls built along the borders of the locked ones from spawned `AirWallCurseGanon` panels - see `docs/region-walls.md` |
-| `botw/events.hpp` | `Events` - edge-triggered callbacks: `OnKorokGet`, `OnShrineComplete`, `OnTowerOpen`, polled by index so a per-frame check costs nothing to speak of |
-| `botw/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core) |
-| `botw/camera.hpp` | `Camera` - typed get/set accessors for a live camera object's position/look-at/up |
-| `botw/nvn.hpp` | `NVN` - Switch NVN graphics injection, custom textures, packaged data, samplers, and 2D/3D drawing |
-| `botw/gx2.hpp` | `GX2` - Wii U/Cemu GX2 graphics injection, mirrors `NVN`'s API (`Init`, `RegisterDrawCallback`, `CreateTexture`, `LoadTexture`, `LoadMesh`, `DrawSprite`, `DrawMesh`) |
-| `botw/fs.hpp` | `FS` - cross-platform file read/write, used internally by `GX2::LoadTexture`/`LoadMesh` and available directly |
-| `botw/log.hpp` | `OSLog` - Cemu-only logger (`OSReport`), used internally by `GX2`/`FS` for their own diagnostics |
+| `botw/game/player.hpp` | `Player` - equipped sword/shield/bow, position, per-swing attack detection, a per-frame `OnTick` callback |
+| `botw/game/actor.hpp` | `Actor` - a thin wrapper around a raw actor pointer (`GetName()`, `Delete()`), plus `Actor::Spawn(name, anchor, x, y, z)` |
+| `botw/game/pouch.hpp` | `Pouch` - equipped-item values through `PauseMenuDataMgr`, so durability changes reach the menu and the save rather than only the actor |
+| `botw/game/armour.hpp` | `Armour` - the special-status effects worn armour grants (`GetArmourEffects`/`SetArmourEffects`, per-piece get/set), read from and written to the pieces' `ArmorEffect` GParamList |
+| `botw/game/gametime.hpp` | `Time` - the in-game clock (`GetGameTime`/`SetGameTime`), day counter, time division and clock speed, through the world manager's own pending-jump path |
+| `botw/game/weather.hpp` | `Weather` - the weather system (`GetWeather`/`SetWeather`), the override the game resolves above the climate roll, plus the current climate |
+| `botw/game/climate.hpp` | `Climate` - the ambient temperature (`GetTemperature`/`SetTemperature`, aliased `Get`/`SetClimate`), recomputed from the climate curves, altitude and the clock |
+| `botw/game/completion.hpp` | `Completion` - the map's completion percentage (`GetCompletionPercent`), recomputed from the same four counters the UI uses, plus `SetKorokCount` for the one term worth writing and an optional hook (`Init` + `SetDisplayedPercent`) that forces the number on screen |
+| `botw/game/map.hpp` | `Map` - map reveal: the fifteen tower regions (`Get`/`SetMapRegionUnlock`) and shrine travel destinations (`Get`/`SetMapUnlock`) |
+| `botw/game/region.hpp` | `Region` - the fifteen regions as PLACES: which one a world position is in (`GetRegionAt`, off the game's own `Ecosystem/MapTower.beco` raster), whether the player may enter it (`Get`/`SetRegionUnlock`, `SyncFromTowers`), and invisible walls built along the borders of the locked ones from spawned `AirWallCurseGanon` panels - see `docs/region-walls.md` |
+| `botw/game/events.hpp` | `Events` - edge-triggered callbacks: `OnKorokGet`, `OnShrineComplete`, `OnTowerOpen`, polled by index so a per-frame check costs nothing to speak of |
+| `botw/game/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core) |
+| `botw/game/camera.hpp` | `Camera` - typed get/set accessors for a live camera object's position/look-at/up |
+| `botw/graphics/nvn.hpp` | `NVN` - Switch NVN graphics injection, custom textures, packaged data, samplers, and 2D/3D drawing |
+| `botw/graphics/gx2.hpp` | `GX2` - Wii U/Cemu GX2 graphics injection, mirrors `NVN`'s API (`Init`, `RegisterDrawCallback`, `CreateTexture`, `LoadTexture`, `LoadMesh`, `DrawSprite`, `DrawMesh`) |
+| `botw/platform/fs.hpp` | `FS` - cross-platform file read/write, used internally by `GX2::LoadTexture`/`LoadMesh` and available directly |
+| `botw/platform/log.hpp` | `OSLog` - Cemu-only logger (`OSReport`), used internally by `GX2`/`FS` for their own diagnostics |
 | `botw/botw.hpp` | Umbrella include for all of the above |
 
-`botw/gfd.hpp`, `botw/gx2_shader_types.hpp`, `botw/gx2_imports.hpp`, `botw/cemu_fs.hpp`, and `botw/cemu_logging.hpp` are internal support headers `gx2.hpp`/`fs.hpp`/`log.hpp` build on (GX2 shader-blob parsing, GX2 type/constant mirrors, and the Cemu "resolve real OS/GX2 calls from a bare code cave" shim tables). Not part of the public API, but worth knowing about if you're digging into how the Cemu side actually works.
+`botw/graphics/gfd.hpp`, `botw/graphics/gx2_shader_types.hpp`, `botw/graphics/gx2_imports.hpp`, `botw/platform/cemu_fs.hpp`, and `botw/platform/cemu_logging.hpp` are internal support headers `gx2.hpp`/`fs.hpp`/`log.hpp` build on (GX2 shader-blob parsing, GX2 type/constant mirrors, and the Cemu "resolve real OS/GX2 calls from a bare code cave" shim tables). Not part of the public API, but worth knowing about if you're digging into how the Cemu side actually works.
+
+Public API headers live under `botw/game/` and `botw/graphics/`; `botw/platform/` is internal-only (Cemu/Wii U shim plumbing for `fs.hpp`/`log.hpp`/`gx2.hpp`), grouped this way so the split doubles as documentation of what a mod is actually meant to reach for. `src/cemu/*.asm` (the shim tables `platform/cemu_fs.hpp`, `platform/cemu_logging.hpp`, and `graphics/gx2_imports.hpp` resolve against) stays at that exact path - the base WiiXLaunch template's `scripts/deploy.py` scans `vendor/wiixlaunch-*/src/cemu/` by hardcoded path to splice these into the Cemu payload, so it can't move without also patching that scanner in the base repo.
 
 Every offset and vtable slot here was reverse-engineered against the game
 binaries (see the original mods' `handwritten-symbols-botw.csv` for
