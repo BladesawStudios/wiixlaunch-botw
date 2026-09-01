@@ -2,6 +2,7 @@
 
 ## Input:
 - ~~Get/SetInputs~~ (controller.hpp)
+- GetKeyboardInput() // mouse is not possible without external software.
 
 ## GameData:
 - ~~Get/SetGameData~~ - controls an insane amount of the game (gamedata.hpp)
@@ -97,6 +98,12 @@
 ## Layouts (flyt & flan):
 - ~~flyt: Pane/PicturePane/Layout - translate/rotate/scale/size/alpha/visible, FindPane, corner colors, load hook+redirect~~ (flyt.hpp)
 - flan: not implemented
+
+## Models (fres, fska, fmdl, etc)
+- bone accessors and manipulators for any actor: GetBoneByNameInModel(), BoneGet/SetPos/Rot/Scale().
+- show/hide sub-objects, change material params: GetMaterialParamIndexByKey(), Get/SetMaterialParamByIndex(), Show/HideSubObjectByName()
+### Notes: 
+I'd really love to get custom shaders replacing in game ones (basically reconstructing UBO's until we can get 3D geometry to render properly, would enable SO much. It's already been done for particles, so it's certainly possible.)
 
 # Coverage:
 | Function | Switch | Wii U |
