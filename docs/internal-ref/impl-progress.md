@@ -14,7 +14,7 @@
 - ~~Get/SetMaxStamina~~ (gamedata.hpp)
 - ~~Get/SetPosition~~ (actor.hpp, player.hpp)
 - ~~Get/SetRotation~~ (actor.hpp)
-- ~~Get/SetLinearVelocity (add or subtract)~~ (actor.hpp)
+- ~~Get/SetLinearVelocity (add or subtract)~~ (actor.hpp; player velocity specifically needs Get/SetControllerVelocity, since SetLinearVelocity refuses state-1 actors)
 - Get/SetRotationalVelocity
 - Get/SetRagdoll
 - Get/SetActorParams
@@ -25,15 +25,15 @@
 - ~~Get/SetEquippedShield~~ (player.hpp)
 - ~~Get/SetEquippedBow~~ (player.hpp)
 - ~~Get/SetEquippedArmor(Head/Chest/Legs)~~ (pouch.hpp EquipItem, armour.hpp piece query)
-- ~~Get/SetArmourEffects~~ (armour.hpp)
+- ~~Get/SetArmourEffects~~ (armour.hpp; SetExtraEffect stacks past the 1-effect-per-piece limit)
 - ~~Get/SetInventorySlot~~ (pouch.hpp)
-- ~~Get/SetFoodEffect~~ (pouch.hpp cook data)
-- ~~Get/SetEquipEffect~~ (pouch.hpp weapon modifiers)
+- ~~Get/SetFoodEffect~~ (pouch.hpp Get/SetCookData + CookEffectName/CookEffectFromName)
+- ~~Get/SetEquipEffect~~ (pouch.hpp Get/SetModifier + ModifierName/ModifierFromName)
 - ~~Give/TakeItem~~ (pouch.hpp)
 
 ## World / Environment:
 - ~~Get/SetGameTime (In-Game Time)~~ (gametime.hpp)
-- ~~Get/SetWeather~~ (weather.hpp)
+- ~~Get/SetWeather~~ (weather.hpp; HoldWeather/TickWeatherHold keeps it set past the 4-frame countdown SetWeather alone doesn't survive)
 - ~~Get/SetClimate~~ (climate.hpp, weather.hpp)
 - ~~SetMapRegionUnlock~~ (map.hpp)
 - ~~GetCurrentRegion~~ (region.hpp)
@@ -106,20 +106,22 @@
 | `actor.hpp::Actor::Get/SetMatrix, SetMtx, WarpTo, NudgeTo` | X | ✓ |
 | `actor.hpp::Actor::Get/SetRotation` | X | ✓ |
 | `actor.hpp::Actor::Get/Set/AddLinearVelocity` | X | ✓ |
+| `actor.hpp::Actor::Get/SetControllerVelocity` (real player-movable field) | X | ✓ |
 | `actor.hpp::Actor::Spawn/SpawnScaled/Delete` | X | ✓ |
 | `actor.hpp::Actor::ForEach/ForEachDynamic/ForEachStatic/Query*Actors` | X | ✓ |
 | `player.hpp::Player::GetEquippedSword/Shield/Bow` | ✓ | ✓ |
 | `player.hpp::Player::Get/SetPosition, NudgePosition` | X | ✓ |
 | `player.hpp::Player::ConsumeAttackEvent` | X | ✓ |
 | `armour.hpp::Armour::Get/SetPieceEffect, Get/SetArmourEffects` | X | ✓ |
+| `armour.hpp::Armour::Get/SetExtraEffect` (stacked, past 1-per-piece) | X | ✓ |
 | `pouch.hpp::Pouch::AddItem/RemoveItem/EquipItem` | X | ✓ |
-| `pouch.hpp::Pouch::Get/SetModifier` | X | ✓ |
-| `pouch.hpp::Pouch::CookIngredient/SetCookData` | X | ✓ |
+| `pouch.hpp::Pouch::Get/SetModifier, ModifierName/FromName` | X | ✓ |
+| `pouch.hpp::Pouch::CookIngredient/Get/SetCookData, CookEffectName/FromName` | X | ✓ |
 | `gamedata.hpp::GameData::Get/SetFlag{S32,Bool,F32,Vec3}` | X | ✓ |
 | `gamedata.hpp::GameData::Get/SetMaxLife, Get/SetStamina, Get/SetMaxStamina` | X | ✓ |
 | `gamedata.hpp::GameData::Get/SetRupees/AddRupees` | X | ✓ |
 | `gametime.hpp::Time::Get/SetGameTime, Get/SetDay, Get/SetTimeScale` | X | ✓ |
-| `weather.hpp::Weather::Get/SetWeather/ClearWeather` | X | ✓ |
+| `weather.hpp::Weather::Get/SetWeather/ClearWeather, HoldWeather/TickWeatherHold` | X | ✓ |
 | `climate.hpp::Climate::Get/SetTemperature` | X | ✓ |
 | `completion.hpp::Completion::GetCompletion*, Get/SetKorokCount, SetDisplayed*` | X | ✓ |
 | `map.hpp::Map::Get/SetMapRegionUnlock, shrine/beast markers` | X | ✓ |
