@@ -144,6 +144,30 @@ constexpr uint32_t kVelocityOffset = 0x25c;
 // the two rules that make writes to it work.
 constexpr uint32_t kControllerVelocityOffset = 0xb0;
 
+// The character controller's desired-DIRECTION input - a unit vector, not an
+// angular rate. Found statically, not by sweep: tracing the "RotSpeed"
+// AIProgram parameter (game::ai action classes parse it alongside
+// "RotAccRatio"/"RotRatio") from its parser into a move-toward-target action's
+// per-frame update led to a function that computes the direction to the
+// target, clamps how far it may turn this frame using that cached RotSpeed,
+// and writes the resulting turn-limited unit vector here via a plain 3-float
+// store - see Actor::GetControllerDirectionPtr for the call chain.
+//
+// UNCONFIRMED LIVE as of this writing - the static evidence is solid (the
+// turn-rate clamp math sits directly upstream of the store), but nothing has
+// yet measured whether writing this field actually turns a live actor, or
+// whether the controller's own per-frame step (not yet located) still has to
+// run for it to take effect the way +0xb0 does for velocity.
+constexpr uint32_t kControllerDirectionOffset = 0x34;
+
+// Sibling of kControllerDirectionOffset: the desired-speed SCALAR the same
+// move-toward-target function writes alongside the direction, via a
+// different setter. Likely combines with the direction above into the
+// velocity vector at kControllerVelocityOffset once per physics tick, though
+// the internal step that would do that combining has not been located.
+// Recorded here rather than acted on - not yet exposed as an accessor.
+constexpr uint32_t kControllerSpeedOffset = 0x30;
+
 // The byte Actor::setVelocity sets after writing a velocity, and the whole
 // reason writing +0x25c alone does nothing.
 //
@@ -431,6 +455,17 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(RequestCreateBaseProcFixHook) {
 // many times per frame for different actors, and its argument is whichever
 // actor is currently ticking - never assume it is the player. Anything that
 // wants Link must fetch him through Player::GetRaw().
+//
+// Coverage is confirmed for weapons and physics props (they tick through here
+// reliably, every session tested) but NOT confirmed for AI-driven actors: a
+// live Enemy_Bokoblin_Junior, targeted via Actor::OnUpdate (which is this
+// hook's callback), never once matched in over three seconds/180 frames in
+// the same session where weapons ticked through it normally. Whether enemies
+// route through a different per-frame update entirely, only reach this one
+// under specific conditions (combat, movement, a particular job type), or
+// that one actor just happened not to tick during the window measured, is
+// still open. Do not assume Actor::OnUpdate sees every actor kind until an
+// enemy is confirmed here directly.
 WIIXL_HOOK_DEFINE_TRAMPOLINE(SpawnFlushHook) {
     using RawCallbackFn = void (*)(void* playerPtr);
     static RawCallbackFn& CallbackRef() { static RawCallbackFn fn = nullptr; return fn; }
@@ -1015,9 +1050,19 @@ public:
         // has no velocity INPUT to write - his motion comes from the player
         // state machine, and changing it means hooking that, not poking memory.
         //
+        // NOT player-specific, despite how that reads. Measured in-process
+        // against a live Bokoblin_Junior and two dropped Weapon_* actors, all
+        // sitting at state 1: every call was refused, identically to the
+        // player, for the identical reason. State 1 (Calc/Active) is the
+        // ordinary "alive and doing something" state for essentially every
+        // actor while it is up and ticking - so in practice this only ever
+        // accepts an actor sitting in Init or Sleep, which is a narrow window,
+        // not "any actor except the player" as the guard's framing might
+        // suggest. Prefer SetControllerVelocity for anything actually moving.
+        //
         // Enforced rather than ignored so this reports honestly: for actors
         // that DO accept a requested velocity (state 0 or 2) it works, and for
-        // the player it returns false instead of claiming success.
+        // everything else it returns false instead of claiming success.
         const char state = *reinterpret_cast<const char*>(actor + impl::kVelocityStateOffset);
         if (state != 0 && state != 2) return false;
 
@@ -1249,8 +1294,23 @@ public:
     // external write (a debugger, another process) can never land in that
     // window and will appear to do nothing.
     //
-    // NOT a player-only field: any actor with a character controller has one,
-    // which is how a mod stops a horse rather than merely its rider.
+    // NOT a player-only field, in principle: any actor with a character
+    // controller has one. UNCONFIRMED against a non-player actor, though, and
+    // one attempt came back ambiguous rather than negative. Writing from
+    // Actor::OnUpdate (gated on the ticking actor matching the target, so the
+    // write lands right after that actor's own AI update, mirroring
+    // Player::OnTick's position for the player) against a live
+    // Enemy_Bokoblin_Junior: the pointer chain resolved and the write
+    // reported success, but zero displacement was measured over one second -
+    // and a second attempt found Actor::OnUpdate's underlying hook
+    // (SpawnFlushHook, see impl:: below) never fired for that same actor at
+    // all in over three seconds, despite firing normally that same session
+    // for weapons and props. So it is not established whether the write was
+    // clobbered, the target actor simply wasn't moving regardless (a Junior
+    // variant can be idle/stationary), or the update hook does not reliably
+    // reach AI-driven actors the way it reaches weapons/physics props. Held
+    // open rather than guessed at - see the SpawnFlushHook comment for what
+    // it has and has not actually been shown to cover.
     //
     // KNOWN LIMIT: shield surfing overrides this every frame, and overrides a
     // direct motion+0x1b0 write too. A surfing player cannot be steered by
@@ -1297,6 +1357,65 @@ public:
 #if !WIIXL_SWITCH
         float* v = GetControllerVelocityPtr();
         if (!v) return false;
+        v[0] = x; v[1] = y; v[2] = z;
+        return true;
+#else
+        (void)x; (void)y; (void)z;
+        return false;
+#endif
+    }
+
+    // The character controller's desired-DIRECTION input - see
+    // impl::kControllerDirectionOffset for the RE evidence and the caveat
+    // that this is UNCONFIRMED against a live game. Same physics/controller
+    // chain as GetControllerVelocityPtr, just a different field on the same
+    // object, so the null-checks and their reasons are identical.
+    float* GetControllerDirectionPtr() const {
+#if !WIIXL_SWITCH
+        if (!IsPlausibleProc(m_Ptr) || m_Kind == Kind::Placement) return nullptr;
+        uint8_t* actor = static_cast<uint8_t*>(m_Ptr);
+
+        void* physics = *reinterpret_cast<void**>(actor + 0x3a0);
+        if (!IsReadablePtr(physics)) return nullptr;
+
+        void* controller = *reinterpret_cast<void**>(
+            static_cast<uint8_t*>(physics) + 0x50);
+        if (!IsReadablePtr(controller)) return nullptr;
+
+        return reinterpret_cast<float*>(
+            static_cast<uint8_t*>(controller) + impl::kControllerDirectionOffset);
+#else
+        return nullptr;
+#endif
+    }
+
+    // Reads the desired direction. UNCONFIRMED whether this reads back
+    // anything meaningful outside of an actor that is actively steering
+    // toward a target via the AI action this was traced from - see
+    // impl::kControllerDirectionOffset.
+    bool GetControllerDirection(float& x, float& y, float& z) const {
+#if !WIIXL_SWITCH
+        const float* v = GetControllerDirectionPtr();
+        if (!v) return false;
+        if (!IsFiniteFloat(v[0]) || !IsFiniteFloat(v[1]) || !IsFiniteFloat(v[2]))
+            return false;
+        x = v[0]; y = v[1]; z = v[2];
+        return true;
+#else
+        (void)x; (void)y; (void)z;
+        return false;
+#endif
+    }
+
+    // Writes the desired direction. Pass a unit vector - the game's own
+    // writer always does, and nothing here normalises it for you.
+    // UNCONFIRMED whether a write here alone turns a live actor; see
+    // impl::kControllerDirectionOffset before relying on this.
+    bool SetControllerDirection(float x, float y, float z) const {
+#if !WIIXL_SWITCH
+        float* v = GetControllerDirectionPtr();
+        if (!v) return false;
+        if (!IsFiniteFloat(x) || !IsFiniteFloat(y) || !IsFiniteFloat(z)) return false;
         v[0] = x; v[1] = y; v[2] = z;
         return true;
 #else
@@ -1420,8 +1539,20 @@ public:
     }
 
     // Rebuilds the 3x3 basis from Euler XYZ (radians), keeps the actor's
-    // current translation, and publishes through setMtx. Any scale baked into
-    // the old basis is dropped - the result is a pure rotation.
+    // current translation, and publishes through setMtx (authoritative,
+    // physics-aware - see kSetActorMtxAddr's own comment on why that
+    // distinction matters and WarpTo/NudgeTo for the equivalent story on
+    // position). Any scale baked into the old basis is dropped - the result
+    // is a pure rotation.
+    //
+    // FIXED: this used to call SetMatrix (the weak, actor-side-only path)
+    // despite this comment already claiming setMtx - the doc was aspirational
+    // and the code never matched it. On any actor physics drives (the player,
+    // certainly), updateMtxFromPhysics silently reverted the write on the
+    // very next frame, before it was ever rendered: SetRotation reported
+    // success every call and produced no visible rotation at all. Caught by
+    // Actor::SpinBy logging "success" every tick with nothing turning on
+    // screen.
     //
     // Returns false for a map placement, for the same reason SetPosition does.
     bool SetRotation(float x, float y, float z) const {
@@ -1446,7 +1577,7 @@ public:
         m[10] = cx * cy;                // m[2][2]
         // m[3], m[7], m[11] (translation) left as read.
 
-        return SetMatrix(m);
+        return SetMtx(m, true, true);
 #else
         (void)x; (void)y; (void)z;
         return false;
@@ -1461,6 +1592,91 @@ public:
 
     bool SetRotation(const Vec3& rot) const {
         return SetRotation(rot.x, rot.y, rot.z);
+    }
+
+    // A software spin, not an engine-level angular velocity - built on the
+    // already-confirmed SetRotation/setMtx path rather than a raw memory
+    // field, because no genuine "angular velocity" input was ever found that
+    // an active actor actually accepts:
+    //
+    //   * Actor::setVelocity's angular parameter (actor+0x268, see the
+    //     comment on kControllerVelocityOffset's SetControllerVelocity)
+    //     shares SetLinearVelocity's state==0||2 guard - the same branch,
+    //     in the same function - so it is refused for the player exactly
+    //     the way linear velocity is, with the same certainty.
+    //   * The one controller-level field found by tracing the engine's own
+    //     "RotSpeed" movement code, controller+0x34 (see
+    //     Actor::SetControllerDirection), is a STEERING direction for an
+    //     actor already moving under speed, not an independent spin. Writing
+    //     it alone to the player every frame via Player::OnTick - the
+    //     confirmed-correct write timing - measured zero yaw change over
+    //     three separate one-second runs while standing still.
+    //
+    // So: this reads the current rotation, adds a fixed per-call delta, and
+    // republishes. Call it once per tick with a fixed increment (radians);
+    // there is no authoritative per-tick delta-time available here to
+    // convert a rate into one automatically, so the caller supplies
+    // degreesPerSecond * (pi/180) * theirOwnTickDelta (or just a constant,
+    // for a fixed-rate spin under a fixed frame rate).
+    //
+    // Deliberately NOT built on SetRotation, for the same reason NudgeTo is
+    // not built on WarpTo. SetRotation calls SetMtx with refreshPhysics=true
+    // - right for a one-shot snap, wrong for a value called every frame: that
+    // flag resets the physics instance set (cloth, ragdoll, the character
+    // controller's own transient state) on every call, and NudgeTo's own
+    // comment already documents what continuous resetting does - a
+    // WarpTo-based position correction applied every frame tore down and
+    // rebuilt a SWIMMING player's state each frame and dragged him to the
+    // river bed. SpinBy is the rotational analogue of that same continuous
+    // case. MEASURED: with refreshPhysics=true (i.e. going through
+    // SetRotation), the player span up to some angle and then jittered in
+    // place rather than turning smoothly - the per-frame physics-state reset
+    // fighting the per-frame rotation write. Building the matrix here and
+    // publishing with refreshPhysics=false, exactly as NudgeTo does for
+    // position, is what actually turns smoothly.
+    bool SpinBy(float yawDeltaRad, float pitchDeltaRad = 0.0f, float rollDeltaRad = 0.0f) const {
+#if !WIIXL_SWITCH
+        float m[12];
+        if (!GetMatrix(m)) return false;
+
+        // Current Euler angles, decomposed the same way GetRotation does.
+        float curX, curY, curZ;
+        float sy = -m[8];
+        if (sy > 1.0f) sy = 1.0f;
+        if (sy < -1.0f) sy = -1.0f;
+        curY = std::asin(sy);
+        if (std::fabs(sy) > 0.99999f) {
+            curX = std::atan2(-m[6], m[5]);
+            curZ = 0.0f;
+        } else {
+            curX = std::atan2(m[9], m[10]);
+            curZ = std::atan2(m[4], m[0]);
+        }
+
+        const float x = curX + pitchDeltaRad;
+        const float y = curY + yawDeltaRad;
+        const float z = curZ + rollDeltaRad;
+
+        const float sx = std::sin(x), cx = std::cos(x);
+        const float sy2 = std::sin(y), cy = std::cos(y);
+        const float sz = std::sin(z), cz = std::cos(z);
+
+        m[0] = cy * cz;
+        m[1] = sx * sy2 * cz - cx * sz;
+        m[2] = cx * sy2 * cz + sx * sz;
+        m[4] = cy * sz;
+        m[5] = sx * sy2 * sz + cx * cz;
+        m[6] = cx * sy2 * sz - sx * cz;
+        m[8] = -sy2;
+        m[9] = sx * cy;
+        m[10] = cx * cy;
+        // m[3], m[7], m[11] (translation) left as read.
+
+        return SetMtx(m, true, false);
+#else
+        (void)yawDeltaRad; (void)pitchDeltaRad; (void)rollDeltaRad;
+        return false;
+#endif
     }
 
     // --- World Query & Iteration ---
