@@ -551,7 +551,19 @@ inline void InitializeAllPipelines() {
 // DrawDone: the vertex ring is split into two halves that alternate per
 // frame, so a frame's vertices are not overwritten until the frame after
 // next, by which point the game's own swap has waited for that GPU work.
-constexpr size_t kBatchRingBytes = 512 * 1024;
+// One frame's vertices have to fit in HALF of this, since the two halves
+// alternate so the GPU is never reading the half being written. A quad is six
+// vertices of 40 bytes, so 512 KB per half is about 2180 quads - comfortably
+// more than the GUI's own 2048-quad frame limit, which is the point: whichever
+// of the two runs out first should be the one that reports it.
+//
+// It used to be half this, which was under the frame limit, so a text-heavy
+// frame quietly ran out of room. What that looks like is not a clean cut-off:
+// flushes are dropped whole, so a big run of text vanishes while a two-quad
+// pair of arrows right after it still fits and draws. A long dialogue box was
+// enough to lose a menu row's label, a button's caption and a key guide while
+// everything around them stayed.
+constexpr size_t kBatchRingBytes = 1024 * 1024;
 constexpr size_t kBatchHalfBytes = kBatchRingBytes / 2;
 constexpr uint32_t kBatchMaxQuadsPerFlush = 256;   // 256 quads * 6 verts * 40 B = 60 KB staging
 inline uint8_t* g_BatchRing = nullptr;
@@ -591,8 +603,15 @@ inline void BatchFlush() {
     const size_t bytes = g_BatchVertCount * sizeof(TextureVertex);
     if (g_BatchHalfUsed + bytes > kBatchHalfBytes) {
         // Frame budget exhausted: drop rather than scribble over vertices
-        // the GPU may still be reading from the previous frame.
+        // the GPU may still be reading from the previous frame. Said once, so
+        // this is diagnosable instead of just looking like missing text.
         g_BatchDroppedQuads += g_BatchVertCount / 6;
+        static bool s_warned = false;
+        if (!s_warned) {
+            s_warned = true;
+            BotW::OSLog("WiiXLaunch: GX2 batch ring full (%u bytes a frame) - dropping quads\n",
+                        static_cast<unsigned int>(kBatchHalfBytes));
+        }
         g_BatchVertCount = 0;
         return;
     }
@@ -606,7 +625,9 @@ inline void BatchFlush() {
     SetAttribBuffer()(0, static_cast<uint32_t>(bytes), sizeof(TextureVertex), dst);
     DrawEx()(GX2Types::kPrimitiveModeTriangles, g_BatchVertCount, 0, 1);
 
-    g_BatchHalfUsed += (bytes + 255) & ~static_cast<size_t>(255);
+    // 64 is enough for an attribute buffer, and rounding to 256 wasted most
+    // of a kilobyte across a frame's worth of small flushes.
+    g_BatchHalfUsed += (bytes + 63) & ~static_cast<size_t>(63);
     g_BatchVertCount = 0;
     g_BatchDrawCalls++;
 }

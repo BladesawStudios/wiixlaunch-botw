@@ -648,8 +648,11 @@ public:
     // is what MessageBox uses. Each pass scales by sqrt(maxLines/lines),
     // since shrinking both shortens the lines and fits more on each, and it
     // never goes below `minScale` (past which the text is unreadable anyway).
+    // minScale 0.4: a paragraph of a few hundred characters needs about that
+    // much shrinking to reach the dialogue box's three lines, and stopping at
+    // 0.5 left it at four - which fits the box, but is not what this promises.
     TextStyle FitToBox(const char* text, const TextStyle& style, float wrapWidth,
-                       int maxLines = 3, float minScale = 0.5f) const {
+                       int maxLines = 3, float minScale = 0.4f) const {
         TextStyle s = style;
         if (!text || wrapWidth <= 0.0f || maxLines <= 0) return s;
         for (int pass = 0; pass < 6; ++pass) {
@@ -1110,7 +1113,7 @@ public:
     void Text(float, float, const char*, const TextStyle& = Styles::Message()) {}
     void TextBox(const GUI::Rect&, const char*, const TextStyle&, bool = true) {}
     void MeasureText(const char*, const TextStyle&, float& w, float& h, float = 0.0f) const { w = 0; h = 0; }
-    TextStyle FitToBox(const char*, const TextStyle& style, float, int = 3, float = 0.5f) const { return style; }
+    TextStyle FitToBox(const char*, const TextStyle& style, float, int = 3, float = 0.4f) const { return style; }
     void MessageWindow(const GUI::Rect&, Color = Colors::MessageWindow, bool = true) {}
     void MessageBox(const char*, const char* = nullptr, float = 1.0f, bool = false) {}
     void RoundedBox(const GUI::Rect&, Color, float = Metrics::kRoundedCorner) {}

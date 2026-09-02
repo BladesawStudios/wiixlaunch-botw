@@ -388,6 +388,14 @@ byte arrives. Everything else streams past. This matters because the Cemu
 payload's entire heap is **6 MB** (`deploy.py` reserves it after the code
 cave) and this module never frees anything.
 
+A frame is capped at 2048 quads (the record) and the vertex ring holds about
+2180 per frame, so the record is what runs out first and it says so in the
+log. Both matter: when the ring was the smaller of the two it ran out
+silently, and because flushes are dropped whole rather than trimmed, a long
+run of text would vanish while the two-quad arrows drawn right after it still
+fitted and drew. Missing labels with their surrounding art intact is the shape
+of that failure.
+
 Kept afterwards: ~1.5 MB of glyph sheets (`Normal_00` is two 1024x1024 BC4
 sheets, `NormalS_00` one 512x1024 A8), ~250 KB of UI art, ~20 KB of font
 tables, 160 KB of loader scratch, plus the 512 KB vertex ring in `gx2.hpp`.
