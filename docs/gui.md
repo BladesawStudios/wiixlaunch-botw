@@ -676,6 +676,38 @@ wnd1 W_SelectFrame_00 size=530x186 frameSize=71 tex=SelectFrameGlow_00^s mat bac
 wnd1 W_SelectFrame_01 size=530x186 frameSize=68 tex=SelectFrame_04^t
 ```
 
+## Layout
+
+Widget rectangles come out of a `Stack` rather than a running `y` the caller
+has to remember to advance:
+
+```cpp
+GUI::Stack rows{panel.Inset(40, 0), 2.0f};   // 2px between rows
+rows.Skip(54);                                // clear of the title
+c.Selector(rows.Row(40), "Dialogue", dialogue, kDialogues, 3);
+c.Toggle  (rows.Row(40), "Fade panel", fade);
+
+rows.Skip(12);
+GUI::Stack footer{rows.Row(44)};
+c.PlateButton(footer.Column(170), "OK");     // fixed width, left of the row
+```
+
+`Row`/`RowBottom` take off the top and bottom, `Column`/`ColumnRight` off the
+left and right, and each consumes what it returns plus the gap. `Rest()` is
+whatever is left, `Fits(h)` asks before committing, and `Skip` inserts space
+with no gap of its own. Running out returns a zero-height rect at the current
+position rather than one overlapping what came before, so overflow shows as
+nothing drawn instead of a pile-up.
+
+`Grid` covers indexed cells - icon tables, swatches. `Grid::Fit(rect, cols,
+rows, gapX, gapY)` sizes cells to divide the space; `Cell(i)` is pure, so
+cells can be visited in any order; `CellsThatFit()` says how many the area
+holds. `Rect` also gained `Offset`, `WithWidth`/`WithHeight`, `CenteredIn`,
+`Contains` and `Empty`.
+
+All of it is in `gui_types.hpp`, which is not platform-guarded, so layout code
+compiles on Switch too even though the GUI there is a stub.
+
 ## A mod's own art
 
 The `Sprite` overloads index a fixed table of the GAME's textures, measured at

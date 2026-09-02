@@ -280,6 +280,125 @@ struct Rect {
     constexpr float CenterX() const { return x + w * 0.5f; }
     constexpr float CenterY() const { return y + h * 0.5f; }
     constexpr Rect Inset(float dx, float dy) const { return Rect{x + dx, y + dy, w - 2 * dx, h - 2 * dy}; }
+    constexpr Rect Offset(float dx, float dy) const { return Rect{x + dx, y + dy, w, h}; }
+    constexpr Rect WithWidth(float nw) const { return Rect{x, y, nw, h}; }
+    constexpr Rect WithHeight(float nh) const { return Rect{x, y, w, nh}; }
+    // A box of this size centred inside `outer` - for a fixed-size thing in a
+    // space that is not its size, like a button in a footer.
+    constexpr Rect CenteredIn(const Rect& outer) const {
+        return Rect{outer.CenterX() - w * 0.5f, outer.CenterY() - h * 0.5f, w, h};
+    }
+    constexpr bool Contains(float px, float py) const {
+        return px >= x && py >= y && px < Right() && py < Bottom();
+    }
+    constexpr bool Empty() const { return w <= 0.0f || h <= 0.0f; }
+};
+
+// ---------------------------------------------------------------------------
+// Layout
+// ---------------------------------------------------------------------------
+// Immediate-mode layout: hand a Stack a rectangle and pull rectangles out of
+// it. Each call consumes the space it returns, plus the gap, so a column of
+// widgets is a sequence of Row() calls rather than a running `y` the caller
+// has to remember to advance - which is what every menu here was doing by
+// hand, and the kind of bookkeeping that goes wrong when a row is inserted.
+//
+// It owns nothing and survives nothing: build one per frame from a rect, the
+// same way the rest of this module works. `Rest()` is whatever is left, so a
+// footer can take the remainder after the rows above it are placed.
+struct Stack {
+    Rect area;
+    float gap = 0.0f;
+
+    constexpr explicit Stack(const Rect& r, float rowGap = 0.0f) : area(r), gap(rowGap) {}
+
+    // Take `height` off the top. Returns a zero-height rect at the current
+    // position once the space runs out, rather than one that overlaps what
+    // came before, so overflow shows as nothing drawn instead of a pile-up.
+    constexpr Rect Row(float height) {
+        if (height > area.h) height = area.h > 0.0f ? area.h : 0.0f;
+        const Rect out{area.x, area.y, area.w, height};
+        const float used = height + gap;
+        area.y += used;
+        area.h -= used;
+        if (area.h < 0.0f) area.h = 0.0f;
+        return out;
+    }
+    // Take `height` off the bottom - footers, key hints.
+    constexpr Rect RowBottom(float height) {
+        if (height > area.h) height = area.h > 0.0f ? area.h : 0.0f;
+        const Rect out{area.x, area.Bottom() - height, area.w, height};
+        area.h -= height + gap;
+        if (area.h < 0.0f) area.h = 0.0f;
+        return out;
+    }
+    // Take `width` off the left / right - columns, an icon beside a label.
+    constexpr Rect Column(float width) {
+        if (width > area.w) width = area.w > 0.0f ? area.w : 0.0f;
+        const Rect out{area.x, area.y, width, area.h};
+        const float used = width + gap;
+        area.x += used;
+        area.w -= used;
+        if (area.w < 0.0f) area.w = 0.0f;
+        return out;
+    }
+    constexpr Rect ColumnRight(float width) {
+        if (width > area.w) width = area.w > 0.0f ? area.w : 0.0f;
+        const Rect out{area.Right() - width, area.y, width, area.h};
+        area.w -= width + gap;
+        if (area.w < 0.0f) area.w = 0.0f;
+        return out;
+    }
+    // Space with nothing in it. No gap is added - `amount` is the whole skip.
+    constexpr void Skip(float amount) {
+        area.y += amount;
+        area.h -= amount;
+        if (area.h < 0.0f) area.h = 0.0f;
+    }
+    constexpr void Inset(float dx, float dy) { area = area.Inset(dx, dy); }
+    constexpr Rect Rest() const { return area; }
+    constexpr bool Fits(float height) const { return height <= area.h; }
+    constexpr bool Empty() const { return area.Empty(); }
+};
+
+// A row-major grid of equal cells - icon tables, colour swatches, anything
+// indexed. Cell() is pure, so cells can be visited in any order or skipped.
+struct Grid {
+    Rect area;
+    int columns = 1;
+    float cellW = 0.0f, cellH = 0.0f;
+    float gapX = 0.0f, gapY = 0.0f;
+
+    constexpr Grid(const Rect& r, int cols, float cw, float ch, float gx = 0.0f, float gy = 0.0f)
+        : area(r), columns(cols > 0 ? cols : 1), cellW(cw), cellH(ch), gapX(gx), gapY(gy) {}
+
+    // Cells sized to divide `r` evenly, gaps included.
+    static constexpr Grid Fit(const Rect& r, int cols, int rows, float gx = 0.0f, float gy = 0.0f) {
+        const int c = cols > 0 ? cols : 1;
+        const int rw = rows > 0 ? rows : 1;
+        return Grid{r, c,
+                    (r.w - gx * static_cast<float>(c - 1)) / static_cast<float>(c),
+                    (r.h - gy * static_cast<float>(rw - 1)) / static_cast<float>(rw),
+                    gx, gy};
+    }
+
+    constexpr Rect Cell(int index) const {
+        if (index < 0) index = 0;
+        const int col = index % columns;
+        const int row = index / columns;
+        return Rect{area.x + static_cast<float>(col) * (cellW + gapX),
+                    area.y + static_cast<float>(row) * (cellH + gapY),
+                    cellW, cellH};
+    }
+    // How many whole rows of cells fit in the area - what a caller needs to
+    // know before deciding how many entries to draw.
+    constexpr int RowsThatFit() const {
+        const float pitch = cellH + gapY;
+        if (pitch <= 0.0f) return 0;
+        const int n = static_cast<int>((area.h + gapY) / pitch);
+        return n > 0 ? n : 0;
+    }
+    constexpr int CellsThatFit() const { return RowsThatFit() * columns; }
 };
 
 // Measurements straight out of Message_00.bflyt (see docs/gui.md).
