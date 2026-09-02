@@ -611,6 +611,172 @@ inline void BatchFlush() {
     g_BatchDrawCalls++;
 }
 
+
+// ---------------------------------------------------------------------------
+// Backdrop blur
+// ---------------------------------------------------------------------------
+// The frosted glass BotW puts behind its windows. In the game a pane samples
+// FBLayout_00^r, a capture of the framebuffer, which the material blurs; the
+// window's own colour then sits over the top of it. Reproducing it here means
+// doing the capture and the blur ourselves:
+//
+//   1. the game's colour buffer is aliased as a TEXTURE (same memory, a
+//      texture view over it) so it can be sampled,
+//   2. a quarter-size copy is drawn from it into one of two small render
+//      targets, four taps at a time, which is both the downsample and the
+//      first blur,
+//   3. a few more four-tap passes ping-pong between the two targets, each one
+//      reaching further, and
+//   4. the result is left in target 0, where the UI samples it like any other
+//      sprite.
+//
+// It is off unless a mod asks for it (GUI::SetBackdropBlur), because it costs
+// two render targets and a handful of full-target draws every frame it is
+// used, and most overlays do not want it.
+//
+// Two caveats worth stating plainly. Aliasing a colour buffer as a texture is
+// not something GX2 promises will work when the surface was not created with
+// texture usage - Cemu is happy with it, real hardware may not be. And there
+// is no per-pixel mask: the blur is drawn as a rectangle, so a window with
+// rounded corners gets blur in the corners too, hidden by whatever is drawn
+// over it. Masking properly needs a two-texture shader, which needs the Wii U
+// shader compiler this repo does not have.
+
+struct BlurTarget {
+    GX2Types::ColorBuffer color{};
+    TextureWrapper tex{};      // a texture view over the same image
+    bool ready = false;
+};
+
+inline BlurTarget g_BlurTargets[2];
+inline TextureWrapper g_SceneAlias{};
+inline uint32_t g_BlurWidth = 0;
+inline uint32_t g_BlurHeight = 0;
+inline bool g_BlurAvailable = false;
+inline bool g_BlurTried = false;
+
+inline bool EnsureBlurTarget(BlurTarget& t, uint32_t w, uint32_t h) {
+    if (t.ready) return true;
+
+    t.color.surface.dim = GX2Types::kSurfaceDimTexture2D;
+    t.color.surface.width = w;
+    t.color.surface.height = h;
+    t.color.surface.depth = 1;
+    t.color.surface.mipLevels = 1;
+    t.color.surface.format = GX2Types::kSurfaceFormatUnormR8G8B8A8;
+    t.color.surface.aa = GX2Types::kAaMode1x;
+    t.color.surface.use = GX2Types::kSurfaceUseTextureColorBuffer;
+    t.color.surface.tileMode = GX2Types::kTileModeTiled2DThin1;
+    CalcSurfaceSizeAndAlignment()(&t.color.surface);
+    if (t.color.surface.imageSize == 0) return false;
+
+    t.color.surface.image = AllocMEM1(t.color.surface.imageSize, t.color.surface.alignment);
+    if (!t.color.surface.image) {
+        BotW::OSLog("WiiXLaunch GUI: backdrop blur target (%ux%u, %u bytes) would not allocate\n",
+                    w, h, t.color.surface.imageSize);
+        return false;
+    }
+    t.color.viewMip = 0;
+    t.color.viewFirstSlice = 0;
+    t.color.viewNumSlices = 1;
+    InitColorBufferRegs()(&t.color);
+
+    // The same image, described again as something to sample. Alpha is
+    // forced to one: what is in the surface's own alpha is not wanted, and
+    // the blur weights every tap through the vertex alpha.
+    t.tex.texture.surface = t.color.surface;
+    t.tex.texture.viewFirstMip = 0;
+    t.tex.texture.viewNumMips = 1;
+    t.tex.texture.viewFirstSlice = 0;
+    t.tex.texture.viewNumSlices = 1;
+    t.tex.texture.compMap = GX2Types::kCompMapRGBOpaque;
+    InitTextureRegs()(&t.tex.texture);
+    InitSampler()(&t.tex.sampler, GX2Types::kTexClampModeClamp, GX2Types::kTexXYFilterModeLinear);
+    InitSamplerClamping()(&t.tex.sampler, GX2Types::kTexClampModeClamp, GX2Types::kTexClampModeClamp,
+                          GX2Types::kTexClampModeClamp);
+
+    t.ready = true;
+    return true;
+}
+
+// Describes the game's colour buffer as a texture so it can be sampled. Redone
+// every frame: the buffer the hook is handed is not promised to be the same
+// one twice.
+inline void AliasScene(GX2Types::ColorBuffer* scene) {
+    g_SceneAlias.texture.surface = scene->surface;
+    g_SceneAlias.texture.surface.use |= GX2Types::kSurfaceUseTexture;
+    g_SceneAlias.texture.viewFirstMip = 0;
+    g_SceneAlias.texture.viewNumMips = 1;
+    g_SceneAlias.texture.viewFirstSlice = 0;
+    g_SceneAlias.texture.viewNumSlices = 1;
+    g_SceneAlias.texture.compMap = GX2Types::kCompMapRGBOpaque;
+    InitTextureRegs()(&g_SceneAlias.texture);
+    InitSampler()(&g_SceneAlias.sampler, GX2Types::kTexClampModeClamp, GX2Types::kTexXYFilterModeLinear);
+    InitSamplerClamping()(&g_SceneAlias.sampler, GX2Types::kTexClampModeClamp, GX2Types::kTexClampModeClamp,
+                          GX2Types::kTexClampModeClamp);
+}
+
+// One full-target quad sampling `src` shifted by (du, dv) in texture
+// coordinates, weighted by `weight`. `first` writes the target, the rest add
+// to it, so four taps at a quarter each average out to a box blur.
+inline void BlurTap(GX2Types::ColorBuffer* target, TextureWrapper* src,
+                    float du, float dv, float weight, bool first) {
+    void* contextState = GetContextState();
+    if (!contextState || !target->surface.image) return;
+
+    const float u0 = du, u1 = 1.0f + du;
+    const float v0 = dv, v1 = 1.0f + dv;
+    const TextureVertex verts[4] = {
+        {-1.0f,  1.0f, 0.0f, 1.0f, u0, v0, 1.0f, 1.0f, 1.0f, weight},
+        { 1.0f,  1.0f, 0.0f, 1.0f, u1, v0, 1.0f, 1.0f, 1.0f, weight},
+        {-1.0f, -1.0f, 0.0f, 1.0f, u0, v1, 1.0f, 1.0f, 1.0f, weight},
+        { 1.0f, -1.0f, 0.0f, 1.0f, u1, v1, 1.0f, 1.0f, 1.0f, weight},
+    };
+
+    constexpr size_t kSlotSize = 256;
+    constexpr size_t kSlotCount = sizeof(g_SpriteRingBuffer) / kSlotSize;
+    const size_t slot = (g_SpriteRingSlot++) % kSlotCount;
+    uint8_t* dst = g_SpriteRingBuffer + slot * kSlotSize;
+    memcpy(dst, verts, sizeof(verts));
+    Invalidate()(GX2Types::kInvalidateModeCpuAttributeBuffer, dst, sizeof(verts));
+
+    SetContextState()(contextState);
+    SetShaderModeEx()(GX2Types::kShaderModeUniformRegister, 0x30, 0x40, 0x0, 0x0, 0xc8, 0xc0);
+    SetColorBuffer()(target, 0);
+    SetTargetChannelMasks()(0x0F, 0, 0, 0, 0, 0, 0, 0);
+    SetViewport()(0.0f, 0.0f, static_cast<float>(target->surface.width),
+                  static_cast<float>(target->surface.height), 0.0f, 1.0f);
+    SetScissor()(0, 0, target->surface.width, target->surface.height);
+    SetDepthOnlyControl()(0, 0, GX2Types::kCompareFuncAlways);
+    SetCullOnlyControl()(GX2Types::kFrontFaceCcw, 0, 0);
+    SetColorControl()(GX2Types::kLogicOpCopy, 1, 0, 1);
+    // First tap replaces the target scaled by its weight, the rest add.
+    SetBlendControl()(0, GX2Types::kBlendSrcAlpha,
+                      first ? GX2Types::kBlendZero : GX2Types::kBlendOne,
+                      GX2Types::kBlendCombineAdd, 1,
+                      GX2Types::kBlendOne, GX2Types::kBlendZero, GX2Types::kBlendCombineAdd);
+
+    SetPixelTexture()(&src->texture, 0);
+    SetPixelSampler()(&src->sampler, 0);
+    SetFetchShader()(&g_SpriteFetchShader);
+    SetVertexShader()(g_SpriteVertexShader);
+    SetPixelShader()(g_SpritePixelShader);
+    SetAttribBuffer()(0, sizeof(verts), sizeof(TextureVertex), dst);
+    DrawEx()(GX2Types::kPrimitiveModeTriangleStrip, 4, 0, 1);
+}
+
+// A four-tap box from `src` into `target`, `radius` texels of the SOURCE wide.
+inline void BlurPass(GX2Types::ColorBuffer* target, TextureWrapper* src, float radius) {
+    const float du = radius / static_cast<float>(src->texture.surface.width);
+    const float dv = radius / static_cast<float>(src->texture.surface.height);
+    BlurTap(target, src, -du, -dv, 0.25f, true);
+    BlurTap(target, src,  du, -dv, 0.25f, false);
+    BlurTap(target, src, -du,  dv, 0.25f, false);
+    BlurTap(target, src,  du,  dv, 0.25f, false);
+    Invalidate()(GX2Types::kInvalidateModeColorBuffer | GX2Types::kInvalidateModeTexture,
+                 target->surface.image, target->surface.imageSize);
+}
+
 WIIXL_HOOK_DEFINE_TRAMPOLINE(AglCopyToScanBufferHook) {
     static void Callback(uintptr_t renderBuffer, uintptr_t param2, int32_t param3) {
             if (renderBuffer) {
@@ -917,6 +1083,71 @@ inline void EndBatch() {
     impl::g_BatchActive = false;
 }
 
+
+// ---------------------------------------------------------------------------
+// Backdrop blur
+// ---------------------------------------------------------------------------
+// Captures the frame as it stands and blurs it, leaving the result in a
+// texture that can be drawn like any other sprite - the frosted glass BotW
+// puts behind its windows. See impl's comment above for how it works and what
+// it does not promise.
+//
+// Call it from a draw callback BEFORE drawing anything of your own, since it
+// samples the colour buffer and retargets rendering while it runs. Returns 0
+// if the targets could not be made.
+//
+// `downscale` is how much smaller the working copy is than the screen (4 is a
+// good default: cheap, and the downsample is itself most of the blur), and
+// `passes` is how many extra four-tap passes to run over it.
+inline TextureHandle BlurBackdrop(void* dstColorBuffer, uint32_t downscale = 4, uint32_t passes = 2) {
+    auto* scene = reinterpret_cast<GX2Types::ColorBuffer*>(dstColorBuffer);
+    if (!impl::g_SpritePipelineReady || !scene || !scene->surface.image) return 0;
+    if (downscale == 0) downscale = 1;
+
+    const uint32_t w = scene->surface.width / downscale;
+    const uint32_t h = scene->surface.height / downscale;
+    if (w < 16 || h < 16) return 0;
+
+    // Allocated once, at the first size seen. Nothing in this module is ever
+    // freed, so a later size change (the GamePad view is 854x480 where the TV
+    // is larger) reuses the targets rather than making a second pair - the
+    // result is scaled to whatever it is drawn over either way.
+    if (!impl::g_BlurTried) {
+        impl::g_BlurTried = true;
+        impl::g_BlurWidth = w;
+        impl::g_BlurHeight = h;
+        impl::g_BlurAvailable = impl::EnsureBlurTarget(impl::g_BlurTargets[0], w, h) &&
+                                impl::EnsureBlurTarget(impl::g_BlurTargets[1], w, h);
+        BotW::OSLog("WiiXLaunch GUI: backdrop blur %s (%ux%u)\n",
+                    impl::g_BlurAvailable ? "ready" : "unavailable", w, h);
+    }
+    if (!impl::g_BlurAvailable) return 0;
+
+    impl::AliasScene(scene);
+
+    // Downsample into [1], then ping-pong so the result always lands in [0] -
+    // callers hold that handle from the frame before they ever see a result.
+    impl::BlurPass(&impl::g_BlurTargets[1].color, &impl::g_SceneAlias, static_cast<float>(downscale) * 0.5f);
+    uint32_t from = 1;
+    for (uint32_t i = 0; i < passes; ++i) {
+        const uint32_t to = from ^ 1;
+        impl::BlurPass(&impl::g_BlurTargets[to].color, &impl::g_BlurTargets[from].tex, 1.0f + static_cast<float>(i));
+        from = to;
+    }
+    if (from != 0) {
+        impl::BlurPass(&impl::g_BlurTargets[0].color, &impl::g_BlurTargets[1].tex, 0.5f);
+    }
+    return reinterpret_cast<TextureHandle>(&impl::g_BlurTargets[0].tex);
+}
+
+// The blurred backdrop's texture, valid whether or not a blur has run yet -
+// so it can be referenced when building a frame and filled in when drawing it.
+inline TextureHandle BackdropTexture() {
+    return reinterpret_cast<TextureHandle>(&impl::g_BlurTargets[0].tex);
+}
+
+inline bool BackdropReady() { return impl::g_BlurAvailable; }
+
 // Reads a texture packaged by scripts/pack_resources.py/pack_texture_gx2.py
 // (16-byte big-endian header: width, height, format, dataSize, followed by
 // raw RGBA8 pixels) straight off disk and hands it to CreateTexture - the
@@ -1171,6 +1402,9 @@ namespace Blend {
     constexpr BlendState Overlay{}, Multiply{}, Opaque{}, Subtract{};
     inline BlendState FromLyt(uint8_t, uint8_t, uint8_t) { return BlendState{}; }
 }
+inline TextureHandle BlurBackdrop(void*, uint32_t = 4, uint32_t = 2) { return 0; }
+inline TextureHandle BackdropTexture() { return 0; }
+inline bool BackdropReady() { return false; }
 inline void BeginBatch(void*) {}
 inline void BatchQuad(TextureHandle, const TextureVertex*, const BlendState& = Blend::Alpha) {}
 inline void EndBatch() {}

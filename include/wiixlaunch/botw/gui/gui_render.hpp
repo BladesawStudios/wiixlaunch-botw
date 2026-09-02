@@ -114,6 +114,16 @@ enum class ScalingMode : uint8_t { Fit, Stretch };
 inline ScalingMode g_ScalingMode = ScalingMode::Fit;
 inline uint32_t g_DeviceWidth = 1280;
 inline uint32_t g_DeviceHeight = 720;
+// The draw hook runs once per colour buffer, and BotW has two: the TV at its
+// full size and the GamePad at 854x480. Both get drawn into - the mapping
+// above is recomputed for each - but "what resolution is this?" has to mean
+// one of them, and the answer a mod wants is the big one. So the reported
+// pair is the largest buffer seen during a frame rather than whichever
+// happened to be drawn last, which is what made the readout flip to 854x480
+// once frames started being built ahead of the draw passes.
+inline uint32_t g_ReportWidth = 1280;
+inline uint32_t g_ReportHeight = 720;
+inline uint32_t g_ReportBestArea = 0;
 inline float g_ScaleX = 1.0f;      // device pixels per layout pixel
 inline float g_ScaleY = 1.0f;
 inline float g_OffsetX = 0.0f;     // device-pixel origin of the layout rectangle
@@ -132,6 +142,12 @@ inline bool g_SnapToPixels = false;
 inline void UpdateViewport(uint32_t deviceWidth, uint32_t deviceHeight) {
     g_DeviceWidth = deviceWidth ? deviceWidth : 1280;
     g_DeviceHeight = deviceHeight ? deviceHeight : 720;
+    const uint32_t area = g_DeviceWidth * g_DeviceHeight;
+    if (area > g_ReportBestArea) {
+        g_ReportBestArea = area;
+        g_ReportWidth = g_DeviceWidth;
+        g_ReportHeight = g_DeviceHeight;
+    }
     const float sx = static_cast<float>(g_DeviceWidth) / kVirtualWidth;
     const float sy = static_cast<float>(g_DeviceHeight) / kVirtualHeight;
     if (g_ScalingMode == ScalingMode::Stretch) {
@@ -246,6 +262,64 @@ inline void SinCosDeg(float degrees, float& outSin, float& outCos) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// The frame record
+// ---------------------------------------------------------------------------
+// A frame is BUILT in the input hook and DRAWN in the present hook, so what
+// the builder produces has to be held somewhere in between.
+//
+// It is built there because that is the only place a mod's callback can still
+// decide to hide the input the game is about to read. Running it at present
+// time - after the game has already acted on the pad - is what let the press
+// that opens a menu reach the game as well.
+//
+// Positions are kept in LAYOUT space, not NDC: the viewport is only known at
+// present time, so converting on replay keeps a recorded frame correct even
+// if the colour buffer changes size between the two. Colours are stored with
+// the alpha stack already folded in, since that stack is a build-time notion.
+struct RecordedQuad {
+    GX2::TextureHandle tex;
+    uint8_t blendIndex;
+    uint8_t snap;
+    float x[4], y[4];
+    float u[4], v[4];
+    Color color[4];
+};
+
+constexpr uint32_t kMaxRecordedQuads = 2048;   // ~180 KB, allocated once
+constexpr uint32_t kMaxRecordedBlends = 8;
+
+// Backdrop blur. Off unless a mod turns it on: it costs two render targets
+// and a handful of full-screen draws per frame it is used. g_BlurRequested is
+// set while building a frame and read when drawing it, so the blur passes only
+// run on frames that actually asked for one.
+inline bool g_BlurEnabled = false;
+inline uint32_t g_BlurDownscale = 4;
+inline uint32_t g_BlurPasses = 2;
+inline bool g_BlurRequested = false;
+
+inline RecordedQuad* g_Record = nullptr;
+inline uint32_t g_RecordCount = 0;
+inline bool g_RecordOverflowed = false;
+inline GX2::BlendState g_RecordBlends[kMaxRecordedBlends]{};
+inline uint32_t g_RecordBlendCount = 0;
+inline bool g_Recording = false;
+
+inline bool EnsureRecord() {
+    if (g_Record) return true;
+    g_Record = reinterpret_cast<RecordedQuad*>(GX2::AllocMEM1(sizeof(RecordedQuad) * kMaxRecordedQuads, 64));
+    return g_Record != nullptr;
+}
+
+inline uint8_t RecordBlend(const GX2::BlendState& blend) {
+    for (uint32_t i = 0; i < g_RecordBlendCount; ++i) {
+        if (g_RecordBlends[i] == blend) return static_cast<uint8_t>(i);
+    }
+    if (g_RecordBlendCount >= kMaxRecordedBlends) return 0;
+    g_RecordBlends[g_RecordBlendCount] = blend;
+    return static_cast<uint8_t>(g_RecordBlendCount++);
+}
+
 // The primitive: a textured quad covering [x0,x1) x [y0,y1) layout pixels,
 // sampling the texture rectangle (u0,v0)-(u1,v1) (v0 = top), per-corner
 // colours (TL, TR, BL, BR), optionally flipped/quarter-turned (orient) and
@@ -284,13 +358,64 @@ inline void EmitQuad(GX2::TextureHandle tex, float x0, float y0, float x1, float
         snap = false;   // a rotated quad has no axis-aligned edges to snap
     }
 
-    GX2::TextureVertex verts[4];
-    FillVertex(verts[0], px[0], py[0], u[0], v[0], cTL, snap);
-    FillVertex(verts[1], px[1], py[1], u[1], v[1], cTR, snap);
-    FillVertex(verts[2], px[2], py[2], u[2], v[2], cBL, snap);
-    FillVertex(verts[3], px[3], py[3], u[3], v[3], cBR, snap);
-    GX2::BatchQuad(tex, verts, blend);
+    if (g_RecordCount >= kMaxRecordedQuads || !g_Record) {
+        g_RecordOverflowed = true;
+        return;
+    }
+
+    const float alpha = CurrentAlpha();
+    const Color corners[4] = { cTL.Scaled(alpha), cTR.Scaled(alpha), cBL.Scaled(alpha), cBR.Scaled(alpha) };
+
+    // Filled before it is counted, so a reader can never see a half-written
+    // entry - the build and the replay are not guaranteed to be the same
+    // thread.
+    RecordedQuad& q = g_Record[g_RecordCount];
+    q.tex = tex;
+    q.blendIndex = RecordBlend(blend);
+    q.snap = snap ? 1 : 0;
+    for (int i = 0; i < 4; ++i) {
+        q.x[i] = px[i];
+        q.y[i] = py[i];
+        q.u[i] = u[i];
+        q.v[i] = v[i];
+        q.color[i] = corners[i];
+    }
+    g_RecordCount++;
     g_QuadsThisFrame++;
+}
+
+// Hands the frame the input hook built to the GPU. Runs in the present hook,
+// where a context state and a colour buffer exist.
+inline void ReplayRecord(void* dst) {
+    if (!g_Record || g_RecordCount == 0) return;
+    // Before anything is drawn: the blur samples the colour buffer as it
+    // stands and retargets rendering while it runs, so it has to happen
+    // before the batch sets itself up. The recorded quads that use it already
+    // hold its texture handle.
+    // Also run it once when it has not been set up yet: the targets can only
+    // be sized from a real colour buffer, and Canvas::BlurBehind() will not
+    // ask for a blur until they exist. Without this the two wait on each
+    // other forever.
+    if (g_BlurEnabled && (g_BlurRequested || !GX2::BackdropReady())) {
+        GX2::BlurBackdrop(dst, g_BlurDownscale, g_BlurPasses);
+    }
+    GX2::BeginBatch(dst);
+    // Colours were recorded with the alpha stack folded in already.
+    const float saved = g_AlphaStack[0];
+    g_AlphaStack[0] = 1.0f;
+    const size_t savedDepth = g_AlphaDepth;
+    g_AlphaDepth = 0;
+    for (uint32_t i = 0; i < g_RecordCount; ++i) {
+        const RecordedQuad& q = g_Record[i];
+        GX2::TextureVertex verts[4];
+        for (int k = 0; k < 4; ++k) {
+            FillVertex(verts[k], q.x[k], q.y[k], q.u[k], q.v[k], q.color[k], q.snap != 0);
+        }
+        GX2::BatchQuad(q.tex, verts, g_RecordBlends[q.blendIndex]);
+    }
+    GX2::EndBatch();
+    g_AlphaStack[0] = saved;
+    g_AlphaDepth = savedDepth;
 }
 
 inline void EmitQuad(GX2::TextureHandle tex, const Rect& r, float u0, float v0, float u1, float v1,

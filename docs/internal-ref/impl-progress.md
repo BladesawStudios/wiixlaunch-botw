@@ -117,8 +117,8 @@
 - ~~plate surface radius is the rim's real curve (42/96 of the tile, measured), not 16/96 - square-cornered fill inside a rounded rim~~ (gui.hpp)
 - ~~select frame corner keeps the layout's 68/186 proportion~~ (gui.hpp)
 - ~~dropped the black blob behind the dialogue speaker name (DialogShadow_00 is a radial QUADRANT, not a blob)~~ (gui.hpp)
-- ~~input capture (stop the game seeing menu input): Controller::SetInputCapture/HoldInputCapture blanks buttons, sticks and GamePad touch in the VPAD/KPAD/npad read hooks AFTER our own state is stored, rebuilding the release edge so game code doesn't see a stuck button; injected input still passes. Canvas::CaptureInput() is the per-frame form and lapses if it stops being called~~ (controller.hpp, gui.hpp)
-- framebuffer blur behind windows (the game's FBLayout capture) - not reproduced, the biggest remaining visual gap
+- ~~input capture (stop the game seeing menu input): Controller::SetInputCapture/HoldInputCapture blanks buttons, sticks and GamePad touch in the VPAD/KPAD/npad read hooks AFTER our own state is stored, rebuilding the release edge so game code doesn't see a stuck button; injected input still passes. Canvas::CaptureInput() is the per-frame form and lapses if it stops being called. The GUI builds each frame from Controller::OnInputRead (before the game sees the pad) and replays the recorded quads at present time, so even the press that opens a menu is captured~~ (controller.hpp, gui.hpp, gui_render.hpp)
+- ~~framebuffer blur behind windows (the game's FBLayout capture): GX2::BlurBackdrop aliases the colour buffer as a texture, downsamples 4x into one of two small render targets and runs four-tap box passes; GUI::SetBackdropBlur opts in (off by default), Canvas::BlurBehind draws it~~ (gx2.hpp, gui.hpp) - rectangular only, no per-pixel mask (needs a two-texture shader)
 - exact plate shading (BtnBasic inner texture via TEV) - approximated
 - alpha compare (a few materials enable it) - everything is blended instead
 - Caption_00 / Special_00 / External_00 fonts - not loaded (loader handles them, just not in the table)

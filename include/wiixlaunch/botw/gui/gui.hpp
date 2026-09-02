@@ -80,6 +80,9 @@ inline FrameCallback g_FrameCallback = nullptr;
 inline bool g_Initialized = false;
 inline bool g_PipelineReady = false;
 inline uint32_t g_FrameCounter = 0;
+// Set by the input-hook build pass, cleared by the present hook - so the
+// present hook can tell whether a frame was built for it this time round.
+inline bool g_FrameBuilt = false;
 
 // Input: edge detection and D-pad/stick navigation with key repeat, in
 // terms of Controller's canonical hold bits.
@@ -174,10 +177,14 @@ inline void EnsureWhiteSprite() {
 }
 
 inline void OnPipelineReady() {
-    g_PipelineReady = true;
     EnsureWhiteSprite();
+    EnsureRecord();
+    // Last: it is what lets the input hook start building frames, and both
+    // allocations above have to exist before one does.
+    g_PipelineReady = true;
 }
 
+inline void BuildFrame();
 inline void OnDraw(GX2::CommandBuffer* cmdBuf, void* dst, int width, int height);
 
 } // namespace impl
@@ -197,12 +204,22 @@ public:
     // report what that buffer actually is, for anything that wants to align
     // to real pixels. BotW renders the GamePad view at 854x480, and a Cemu
     // resolution pack can make the TV buffer any size.
-    uint32_t DeviceWidth() const { return impl::g_DeviceWidth; }
-    uint32_t DeviceHeight() const { return impl::g_DeviceHeight; }
-    // Device pixels per layout pixel (equal on both axes unless the scaling
-    // mode is Stretch).
-    float PixelScaleX() const { return impl::g_ScaleX; }
-    float PixelScaleY() const { return impl::g_ScaleY; }
+    // The largest colour buffer of the last frame. BotW draws two - the TV
+    // and the 854x480 GamePad view - and the GUI goes into both; this reports
+    // the bigger one rather than whichever was drawn last.
+    uint32_t DeviceWidth() const { return impl::g_ReportWidth; }
+    uint32_t DeviceHeight() const { return impl::g_ReportHeight; }
+    // Device pixels per layout pixel, for that same buffer.
+    float PixelScaleX() const {
+        const float sx = static_cast<float>(impl::g_ReportWidth) / kVirtualWidth;
+        const float sy = static_cast<float>(impl::g_ReportHeight) / kVirtualHeight;
+        return impl::g_ScalingMode == impl::ScalingMode::Stretch ? sx : (sx < sy ? sx : sy);
+    }
+    float PixelScaleY() const {
+        const float sx = static_cast<float>(impl::g_ReportWidth) / kVirtualWidth;
+        const float sy = static_cast<float>(impl::g_ReportHeight) / kVirtualHeight;
+        return impl::g_ScalingMode == impl::ScalingMode::Stretch ? sy : (sx < sy ? sx : sy);
+    }
     // Where the 1280x720 rectangle sits inside the buffer (non-zero only
     // when Fit is letterboxing a non-16:9 buffer).
     float ViewportOffsetX() const { return impl::g_OffsetX; }
@@ -238,6 +255,26 @@ public:
     bool NavRight() const { return (impl::g_Input.navFired & impl::NavRightBit) != 0; }
     void GetLeftStick(float& x, float& y) const { x = impl::g_Input.leftX; y = impl::g_Input.leftY; }
     void GetRightStick(float& x, float& y) const { x = impl::g_Input.rightX; y = impl::g_Input.rightY; }
+
+    // Draws the frame behind `r`, blurred, as a backdrop - BotW's frosted
+    // glass. Off unless GUI::SetBackdropBlur(true) has been called, and a
+    // no-op until the blur targets exist (the frame after it is enabled), so
+    // it is always safe to call.
+    //
+    // This is the raw form and it is easy to misuse: it draws a full-strength
+    // opaque rectangle, so it has to be issued BEFORE the window that covers
+    // it, and something translucent has to be drawn over it or all you get is
+    // a blurry picture of the scene. FrostedBox() below does both in the right
+    // order and is what most callers want.
+    void BlurBehind(const GUI::Rect& r, Color tint = Colors::White) {
+        if (!impl::g_BlurEnabled || !GX2::BackdropReady()) return;
+        impl::g_BlurRequested = true;
+        // The backdrop holds the whole screen, so the piece of it behind this
+        // rectangle is just the rectangle in screen fractions.
+        impl::EmitQuad(GX2::BackdropTexture(), r,
+                       r.x / kVirtualWidth, r.y / kVirtualHeight,
+                       r.Right() / kVirtualWidth, r.Bottom() / kVirtualHeight, tint);
+    }
 
     // Take the pad away from the game for as long as this keeps being called:
     // call it every frame a menu is up, and the player's buttons, sticks and
@@ -315,6 +352,14 @@ public:
     // tall texture, black content, pane alpha 230).
     void MessageWindow(const GUI::Rect& r, Color color = Colors::MessageWindow, bool decorations = true) {
         const float capW = Metrics::kMessageCapWidth * (r.h / Metrics::kMessageCapHeight);
+        // No backdrop blur here on purpose. The window is a pill, and a blur
+        // can only be drawn as a rectangle, so the only part of it that could
+        // be frosted without the rectangle showing through the rounded ends is
+        // the straight middle - which then reads as a bright band across the
+        // centre of the box, exactly the thing the blur is supposed to avoid.
+        // Frost a rounded box with Canvas::FrostedBox instead, and leave the
+        // dialogue box as the game's own black over the scene, which at its
+        // pane alpha of 230 is most of the way there anyway.
         if (SpriteReady(Sprite::MsgWindowCap) && r.w >= capW * 2.0f) {
             const float capU = impl::EdgeU(Sprite::MsgWindowCap);
             const float capV = impl::EdgeV(Sprite::MsgWindowCap);
@@ -375,6 +420,73 @@ public:
             const float bob = ((impl::g_FrameCounter / 8) % 4) * 1.0f;
             ImageAt(Sprite::ArrowMsg, win.Right() - 70.0f, win.Bottom() - 36.0f + bob, Colors::Cream.Scaled(alpha), OrientNone, 0.75f);
         }
+    }
+
+    // A rounded box over a blurred backdrop - the game's frosted glass, in
+    // the order it has to happen: blur first, then the translucent box over
+    // it. With the blur off this is just RoundedBox, so it is always safe to
+    // use, and a colour with some alpha left in it (the game's windows sit at
+    // 230 of 255) is what lets the blur show through at all.
+    //
+    // The blur is inset by half the corner radius so its square corners stay
+    // inside the rounded shape: a point half a radius in from the corner is
+    // still within the corner's arc, so nothing pokes out.
+    void FrostedBox(const GUI::Rect& r, Color color, float radius = Metrics::kRoundedCorner) {
+        // A blur can only be drawn as a rectangle, and the shape it has to
+        // fill is a rounded box, so the shape is covered with rectangles that
+        // all stay inside it:
+        //
+        //   - a full-width middle band between the two arcs,
+        //   - top and bottom bands between the arcs horizontally, and
+        //   - a staircase of five slices inside each corner's quarter disc.
+        //
+        // The bands alone leave the four corners sharp while everything
+        // around them is frosted, which is plainly visible; the staircase
+        // takes those to about 87% covered, the rest being the very tip of
+        // each corner where the panel is nearly transparent anyway.
+        //
+        // The geometry comes from the art: CornerR3's quarter disc runs from
+        // texel 2 to 7 of its eight, so within a corner drawn at `radius` the
+        // arc has radius 0.75*radius centred at (radius, radius) - which also
+        // means the box RoundedBox actually draws is inset from `r` by a
+        // quarter of the radius, and the blur has to be inset the same or it
+        // shows as a bright fringe around the whole panel.
+        if (radius > 0.0f && r.w > radius * 2.0f && r.h > radius * 2.0f) {
+            const float pad = radius * 0.25f;              // transparent margin in the art
+            const float arc = radius * 0.75f;              // the arc's own radius
+            const GUI::Rect vis = r.Inset(pad, pad);
+
+            BlurBehind(GUI::Rect{vis.x, vis.y + arc, vis.w, vis.h - 2.0f * arc});
+            BlurBehind(GUI::Rect{vis.x + arc, vis.y, vis.w - 2.0f * arc, arc});
+            BlurBehind(GUI::Rect{vis.x + arc, vis.Bottom() - arc, vis.w - 2.0f * arc, arc});
+
+            // Half-widths of a six-step staircase inscribed in a unit quarter
+            // disc, each measured at the slice's OUTER edge so every slice is
+            // wholly inside the arc. The sixth step has no width and is left out.
+            // Measured at each slice's OUTER edge, so its far corner lands
+            // exactly ON the arc; trimmed by 4% so it lands just inside it
+            // instead, clear of the one texel over which the art's edge fades.
+            static const float kSlice[5] = {0.94657f, 0.90510f, 0.83139f, 0.71555f, 0.53066f};
+            const float cx[2] = {vis.x + arc, vis.Right() - arc};
+            const float cy[2] = {vis.y + arc, vis.Bottom() - arc};
+            for (int corner = 0; corner < 4; ++corner) {
+                const float ox = (corner & 1) ? 1.0f : -1.0f;   // outward, horizontally
+                const float oy = (corner & 2) ? 1.0f : -1.0f;   // outward, vertically
+                const float px = cx[corner & 1];
+                const float py = cy[(corner >> 1) & 1];
+                for (int i = 0; i < 5; ++i) {
+                    const float inner = py + oy * arc * (static_cast<float>(i) / 6.0f);
+                    const float outer = py + oy * arc * (static_cast<float>(i + 1) / 6.0f);
+                    const float w = arc * kSlice[i];
+                    const float x0 = ox < 0.0f ? px - w : px;
+                    const float y0 = oy < 0.0f ? outer : inner;
+                    BlurBehind(GUI::Rect{x0, y0, w, arc / 6.0f});
+                }
+            }
+        } else {
+            BlurBehind(r);
+        }
+        RoundedBox(r, color, radius);
     }
 
     // A rounded box built the way PaOptionBtn_00's W_Base panes are: a lyt
@@ -794,34 +906,70 @@ namespace impl {
 
 inline Canvas g_Canvas;
 
-inline void OnDraw(GX2::CommandBuffer*, void* dst, int width, int height) {
-    if (!g_Initialized || !g_PipelineReady) return;
-    g_FrameCounter++;
-    if (!LoaderFinished()) LoaderStep();
+// Builds a frame: samples input, runs the mod's callback and records what it
+// draws. This runs from Controller's input hook, before the game is allowed
+// to see the pad - which is what lets Canvas::CaptureInput() hide the very
+// press that opened a menu. It touches no GPU state.
+inline void BuildFrame() {
+    if (!g_Initialized || !g_PipelineReady || !EnsureRecord()) return;
 
+    g_FrameCounter++;
     UpdateInput();
     ApplyNavigationToFocus();
-
-    // The colour buffer size is whatever the game handed the hook this frame
-    // (854x480 for the GamePad view, more with a Cemu resolution pack), so
-    // the layout-to-device mapping is recomputed rather than assumed.
-    UpdateViewport(static_cast<uint32_t>(width > 0 ? width : 1280),
-                   static_cast<uint32_t>(height > 0 ? height : 720));
     ResetAlpha();
 
-    g_FrameDst = dst;
+    g_RecordCount = 0;
+    g_RecordBlendCount = 0;
+    g_RecordOverflowed = false;
+    g_BlurRequested = false;
     g_FocusCount = 0;
     g_QuadsThisFrame = 0;
-    GX2::BeginBatch(dst);
+
+    g_Recording = true;
     g_FrameOpen = true;
     if (g_FrameCallback) g_FrameCallback(g_Canvas);
     g_FrameOpen = false;
-    GX2::EndBatch();
+    g_Recording = false;
     ResetAlpha();   // a callback that pushed without popping must not leak into the next frame
 
     g_FocusCountLast = g_FocusCount;
     if (g_FocusIndex >= g_FocusCount) g_FocusIndex = g_FocusCount > 0 ? g_FocusCount - 1 : 0;
     if (g_FocusIndex < 0) g_FocusIndex = 0;
+
+    g_FrameBuilt = true;
+    // The frame just built has read last frame's tally; start a fresh one for
+    // the draw passes that follow.
+    g_ReportBestArea = 0;
+
+    if (g_RecordOverflowed) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            OSLog("WiiXLaunch GUI: frame needs more than %u quads - the rest were dropped\n", kMaxRecordedQuads);
+        }
+    }
+}
+
+inline void OnDraw(GX2::CommandBuffer*, void* dst, int width, int height) {
+    if (!g_Initialized || !g_PipelineReady) return;
+    if (!LoaderFinished()) LoaderStep();
+
+    // The colour buffer size is whatever the game handed the hook this frame
+    // (854x480 for the GamePad view, more with a Cemu resolution pack), so
+    // the layout-to-device mapping is recomputed rather than assumed. The
+    // record holds layout coordinates, so it is correct whatever this is.
+    UpdateViewport(static_cast<uint32_t>(width > 0 ? width : 1280),
+                   static_cast<uint32_t>(height > 0 ? height : 720));
+    g_FrameDst = dst;
+
+    // Fallback: with no input hook installed (Controller::Init() not called),
+    // nothing built a frame, so build it here. That is the old behaviour, and
+    // it costs the one-frame capture delay - the game will have read the pad
+    // before this runs.
+    if (!g_FrameBuilt) BuildFrame();
+    g_FrameBuilt = false;
+
+    ReplayRecord(dst);
 }
 
 } // namespace impl
@@ -835,6 +983,12 @@ inline void Init() {
     GX2::Init();
     GX2::RegisterDrawCallback(&impl::OnDraw);
     GX2::OnInitialized(&impl::OnPipelineReady);
+    // Build each frame from the input hook rather than at present time. That
+    // is what makes Canvas::CaptureInput() able to hide the press that opened
+    // a menu: at present time the game has already read the pad. Needs
+    // Controller::Init() to have installed the hooks - without it the frame is
+    // built at present time instead and capture lags by one frame.
+    Controller::OnInputRead(&impl::BuildFrame);
     OSLog("WiiXLaunch GUI: initialised\n");
 }
 
@@ -880,6 +1034,23 @@ inline ScalingMode GetScalingMode() { return impl::g_ScalingMode; }
 // glyphs). Turn it off for smoothly animating positions.
 inline void SetPixelSnapping(bool on) { impl::g_SnapToPixels = on; }
 
+// Backdrop blur - BotW's frosted glass behind its windows. OFF by default:
+// it costs two render targets (a quarter-size pair, ~460 KB) and a handful of
+// full-screen draws on any frame that uses it, and an overlay that is not
+// drawing windows has no use for it. Turning it on makes Canvas::BlurBehind()
+// work, and MessageWindow/MessageBox pick it up automatically.
+//
+// `downscale` is how much smaller the working copy is than the screen and
+// `passes` how many extra four-tap passes run over it: 4 and 2 is a soft,
+// cheap frost; 2 and 4 is heavier in both senses.
+inline void SetBackdropBlur(bool enabled, uint32_t downscale = 4, uint32_t passes = 2) {
+    impl::g_BlurEnabled = enabled;
+    impl::g_BlurDownscale = downscale ? downscale : 1;
+    impl::g_BlurPasses = passes;
+}
+
+inline bool IsBackdropBlurEnabled() { return impl::g_BlurEnabled; }
+
 } // namespace WiiXLaunch::BotW::GUI
 
 #else
@@ -921,6 +1092,8 @@ public:
     void GetRightStick(float& x, float& y) const { x = 0; y = 0; }
     void CaptureInput() {}
     bool IsInputCaptured() const { return false; }
+    void BlurBehind(const GUI::Rect&, Color = Colors::White) {}
+    void FrostedBox(const GUI::Rect&, Color, float = Metrics::kRoundedCorner) {}
     int Focus() const { return 0; }
     void SetFocus(int) {}
     int FocusableCount() const { return 0; }
@@ -973,6 +1146,8 @@ enum class ScalingMode : uint8_t { Fit, Stretch };
 inline void SetScalingMode(ScalingMode) {}
 inline ScalingMode GetScalingMode() { return ScalingMode::Fit; }
 inline void SetPixelSnapping(bool) {}
+inline void SetBackdropBlur(bool, uint32_t = 4, uint32_t = 2) {}
+inline bool IsBackdropBlurEnabled() { return false; }
 
 } // namespace WiiXLaunch::BotW::GUI
 

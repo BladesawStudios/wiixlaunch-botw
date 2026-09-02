@@ -277,9 +277,17 @@ constexpr uint32_t kTessellationModeDiscrete = 0;
 constexpr uint32_t kShaderModeUniformRegister = 0;
 constexpr uint32_t kPrimitiveModeTriangles = 4;
 constexpr uint32_t kPrimitiveModeTriangleStrip = 6;
+// GX2InvalidateMode: ATTRIBUTE_BUFFER 1<<0, TEXTURE 1<<1, UNIFORM_BLOCK
+// 1<<2, SHADER 1<<3, COLOR_BUFFER 1<<4, DEPTH_BUFFER 1<<5, CPU 1<<6.
+// kInvalidateModeCpuTexture used to be (1<<6)|(1<<2), which is the CPU flag
+// plus UNIFORM_BLOCK - the texture bit is 1<<1. Every CPU texture upload was
+// therefore flushing the wrong cache; Cemu is coherent enough not to care,
+// real hardware would eventually show a stale texture.
 constexpr uint32_t kInvalidateModeCpuAttributeBuffer = (1 << 6) | (1 << 0);
-constexpr uint32_t kInvalidateModeCpuTexture = (1 << 6) | (1 << 2);
+constexpr uint32_t kInvalidateModeCpuTexture = (1 << 6) | (1 << 1);
 constexpr uint32_t kInvalidateModeCpuShader = (1 << 6) | (1 << 3);
+constexpr uint32_t kInvalidateModeTexture = (1 << 1);
+constexpr uint32_t kInvalidateModeColorBuffer = (1 << 4);
 constexpr uint32_t kCompareFuncLessEqual = 3;
 constexpr uint32_t kCompareFuncAlways = 7;
 constexpr uint32_t kFrontFaceCcw = 0;
@@ -348,7 +356,11 @@ constexpr uint32_t kBlendCombineRevSub   = 4;  // dst - src
 constexpr uint32_t kSurfaceFormatUnormR10G10B10A2 = 0x019;
 constexpr uint32_t kAaMode1x = 0;
 constexpr uint32_t kSurfaceUseTexture = 1;
+constexpr uint32_t kSurfaceUseColorBuffer = 2;
 constexpr uint32_t kSurfaceUseDepthBuffer = 4;
+// A surface that is both rendered into and sampled from, which is what a
+// backdrop-blur target is.
+constexpr uint32_t kSurfaceUseTextureColorBuffer = 3;
 constexpr uint32_t kTileModeLinearAligned = 1;
 constexpr uint32_t kTileModeTiled1DThin1 = 2;
 constexpr uint32_t kTileModeTiled2DThin1 = 4;

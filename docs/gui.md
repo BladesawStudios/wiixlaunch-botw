@@ -62,17 +62,27 @@ extern "C" void WiiXLaunch_Init() {
 * Coordinates are the game's own layout space: **1280 x 720, origin top-left,
   y down**, whatever the real colour buffer size is (a Cemu resolution pack
   just scales).
-* `Frame` runs once per rendered frame, on the render thread, inside the same
-  `aglCopyToScanBuffer` hook `GX2::RegisterDrawCallback` uses - after the game
-  has finished its frame, before it is presented. Keep it cheap and do not
-  call game code from it.
+* `Frame` runs once per frame from **Controller's input hook**, right after
+  the pad is sampled and before the game is allowed to see it - not at present
+  time. That is what lets `CaptureInput()` hide the very press that opened a
+  menu (see below). What it draws is recorded and replayed by the
+  `aglCopyToScanBuffer` hook a moment later, so drawing still happens where a
+  GPU context exists. Two consequences worth knowing: it runs on the game's
+  own thread, which makes calling game code from it safer than before, and it
+  needs `Controller::Init()` - without it the frame is built at present time
+  instead and capture goes back to lagging by one frame.
 * Widgets are navigated with the D-pad / left stick (with key repeat), `A`
   activates, `B` is only *reported* (`Canvas::Cancel()`) - what it closes is
   the mod's call. Focus order is issue order; each frame's widget list may
   differ (the focus index is clamped).
 * `Canvas::CaptureInput()` takes the pad away from the game: call it every
   frame a menu is up and the player's buttons, sticks and GamePad touches stop
-  reaching the game while the GUI carries on reading them. It is never
+  reaching the game while the GUI carries on reading them. It applies to the
+  input being read *at that moment*, so the press that opens a menu never
+  reaches the game either - the frame is built inside the input hook precisely
+  so that this decision can still be acted on. (A Wii Remote or Pro Controller
+  press can still slip through on the opening frame if the game happens to
+  read KPAD before VPAD that frame; the GamePad cannot.) It is never
   automatic, because an overlay that merely draws must not swallow input, and
   it lapses a few frames after the last call, so a menu that stops drawing
   cannot leave the pad dead. `Controller::SetInputCapture(true)` is the
@@ -152,11 +162,65 @@ Three things stack, the same way lyt stacks them:
    emitted inside it, text shadows included, is multiplied by `f`, so a whole
    window fades as one rather than each element fading independently.
 
-The one thing not reproduced is the backdrop: the game's windows sit over a
-blurred **capture of the framebuffer** (`FBLayout_00^r`, `P_Sh_00`), which is
-why the real dialogue box looks like frosted glass rather than flat black.
-`MessageWindow` draws the black at the pane's own alpha (230), which reads
-correctly over dark scenes and slightly flatter over bright ones.
+### Backdrop blur
+
+The frosted glass BotW puts behind its windows: a pane samples
+`FBLayout_00^r`, a capture of the framebuffer, which the material blurs, and
+the window's own colour sits over it. `GUI::SetBackdropBlur(true)` does the
+same here, and `Canvas::BlurBehind(rect)` draws it; `MessageWindow` and
+`MessageBox` pick it up on their own once it is on. **It is off by default** -
+it costs two render targets and a handful of full-screen draws on any frame
+that uses it, and an overlay that draws no windows has no use for it.
+
+How it works, in `GX2::BlurBackdrop`:
+
+1. the game's colour buffer is described a second time as a **texture** over
+   the same memory, so it can be sampled;
+2. a quarter-size copy is drawn from it into one of two small render targets,
+   four taps at a time - that downsample is itself most of the blur;
+3. a few more four-tap passes ping-pong between the two targets, each reaching
+   further, ending in target 0;
+4. the UI samples that like any other sprite.
+
+`downscale` (default 4) and `passes` (default 2) trade cost against how soft
+it is. The targets are a quarter-size pair, about 460 KB, allocated once at
+the first size seen and never freed, like everything else here.
+
+`Canvas::FrostedBox(rect, colour, radius)` is the composed form and what
+most callers want: it draws the blur and then the translucent box over it, in
+that order. A blur can only be drawn as a rectangle, so it covers the
+rounded shape with rectangles that all stay inside it: a full-width middle
+band, top and bottom bands between the arcs, and a five-step staircase
+inscribed in each corner's quarter disc. One inset rectangle cannot do it -
+inset far enough to hide its corners and it leaves an unfrosted border, inset
+less and square corners show through the round ones - and the bands alone
+leave the four corners sharp while everything around them is frosted, which
+is just as visible. Together they cover 99% or better.
+
+The geometry comes from the art rather than being guessed: `CornerR3`'s
+quarter disc runs from texel 2 to 7 of its eight, so a corner drawn at
+`radius` has an arc of 0.75*radius centred at (radius, radius), and the box
+actually drawn is inset from its rect by a quarter of the radius. Each
+staircase slice is measured at its outer edge, where its far corner would
+land exactly on the arc, then trimmed by 4% so it lands just inside.
+
+`MessageWindow` deliberately does NOT frost itself. The window is a pill, and
+since a blur can only be a rectangle, the only part that could be frosted
+without its corners showing past the rounded ends is the straight middle -
+which reads as a bright band across the centre of the box. The raw `BlurBehind()` is a full-strength opaque rectangle of the
+blurred scene, so on its own, or issued after the contents it sits behind, it
+simply paints over them - which looks like the UI itself got blurred, and is
+the easiest mistake to make with it.
+
+Three things it does not do. **There is no per-pixel mask**: the blur is drawn
+as a rectangle, so a window with rounded corners has blur in its corners too,
+covered by whatever is drawn over it. Masking properly needs a shader that
+samples two textures, and building one needs the Wii U shader compiler this
+repo does not have. **Aliasing a colour buffer as a texture** is not something
+GX2 promises when the surface was not created with texture usage - Cemu is
+happy with it, real hardware may not be. And at the alpha the game's own
+windows use (230, so 90% opaque) the blur is a subtle thing: it is most
+visible behind something more translucent.
 
 ### Resolution and pixel alignment
 
@@ -168,9 +232,12 @@ the buffer is recomputed every frame from the size the hook is given.
 * `ScalingMode::Fit` (default) scales uniformly and centres, so a buffer that
   is not 16:9 letterboxes instead of stretching the UI. `ScalingMode::Stretch`
   fills the buffer. On any 16:9 buffer the two are identical.
-* `Canvas::DeviceWidth/Height`, `PixelScaleX/Y`, `ViewportOffsetX/Y` report
-  the real numbers; `SnapX/SnapY` round a layout coordinate to a whole device
-  pixel.
+* The draw hook runs once per colour buffer, and BotW has two: the TV and the
+  854x480 GamePad view. Both are drawn into, with the mapping recomputed for
+  each. `Canvas::DeviceWidth/Height` and `PixelScaleX/Y` report the LARGEST
+  buffer of the last frame rather than whichever was drawn last, so the answer
+  does not flip between the two screens; `ViewportOffsetX/Y` and `SnapX/SnapY`
+  work against the pass currently being drawn.
 * Pixel snapping is available (`GUI::SetPixelSnapping`) but **off by
   default**, because the buffer the game declares is not always what is
   actually rendered: under a Cemu resolution pack the game still describes a
