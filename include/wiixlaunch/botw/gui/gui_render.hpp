@@ -78,17 +78,26 @@ inline SpriteInfo g_Sprites[static_cast<size_t>(Sprite::Count)] = {
 struct FontInfo {
     const char* archivePath;     // inside Font/Font_XX.sbfarc
     BFFNT::Font font;
-    bool load;                   // false: skipped by the loader (see below)
+    uint32_t sheetBytes;         // glyph sheet data: what loading it costs
+    bool load;                   // set by GUI::RequestFont before the 1st frame
 };
 
-// Order must match GUI::FontId. NormalS_00 is deliberately NOT loaded: it is
-// the same face with a black outline baked into every glyph, which reads as a
-// heavy stroke at any size a mod is likely to use, and it costs 512 KB of the
-// payload's 6 MB heap. FontId::NormalSmall therefore falls back to Normal_00
-// (see ResolveFont), so styles and mods that name it still render.
+// Order must match GUI::FontId. sheetBytes is sheetSize x sheetCount read out
+// of each font's TGLP in the v208 US archive; all six start their sheet data at
+// 0x2000 and are format 12 (BC4) except NormalS_00, which is 8 (A8), so all six
+// load through the same path.
+//
+// Only Normal is on by default. The six together are 2.9 MB of the payload's
+// 6 MB heap, which is too much to spend without being asked, and one face is
+// what almost any mod needs. GUI::RequestFont(id) turns another on; anything
+// not loaded falls back to Normal in ResolveFont rather than drawing nothing.
 inline FontInfo g_Fonts[static_cast<size_t>(FontId::Count)] = {
-    { "Normal_00.bffnt",  BFFNT::Font{}, true },
-    { "NormalS_00.bffnt", BFFNT::Font{}, false },
+    { "Normal_00.bffnt",   BFFNT::Font{}, 1024u * 1024u, true  },
+    { "NormalS_00.bffnt",  BFFNT::Font{},  512u * 1024u, false },
+    { "Caption_00.bffnt",  BFFNT::Font{},  256u * 1024u, false },
+    { "Ancient_00.bffnt",  BFFNT::Font{},   64u * 1024u, false },
+    { "Special_00.bffnt",  BFFNT::Font{}, 1024u * 1024u, false },
+    { "External_00.bffnt", BFFNT::Font{},   64u * 1024u, false },
 };
 
 inline SpriteInfo& SpriteAt(Sprite s) { return g_Sprites[static_cast<size_t>(s)]; }

@@ -384,15 +384,42 @@ fill the plate was a translucent grey.
 
 ### Text
 
-**Only `Normal_00` is loaded.** `NormalS_00` is the same face with a black
-outline baked into every glyph - the game uses it over busy scenery, but as a
-general UI font that permanent stroke reads as a smudge, so no style asks for
-it and the loader skips it (saving 512 KB of the payload's 6 MB heap).
-`FontId::NormalSmall` still resolves: `ResolveFont` falls back to `Normal_00`,
-so a style or mod naming it keeps working. The presets that the layouts set in
-NormalS (`Name`, `Option`, `Button`, `System`, `Small`) keep the layout's cap
-height and take their width from Normal's own 31:39 cell so the text is not
-condensed.
+**All six of the archive's faces can be loaded; only `Normal_00` is by
+default.** The six together are 2.9 MB of glyph sheets against a 6 MB payload
+heap, which is too much to spend uninvited, and one face is what almost any mod
+needs. `GUI::RequestFont(id)` turns another on and must be called before the
+first frame, like `SetAssetPaths` - by the time the loader runs, the archive
+has already streamed past. `GUI::FontSheetBytes(id)` is what one costs.
+
+Nothing about this can make text disappear: `ResolveFont` falls back to
+`Normal_00` when the named font was never requested or failed to parse, so a
+style naming a font you forgot to ask for changes how the text looks, never
+whether it appears. That is also why the presets the layouts set in NormalS
+(`Name`, `Option`, `Button`, `System`, `Small`) are defined in Normal at the
+layout's cap height, with the width taken from Normal's own 31:39 cell so the
+text is not condensed - they render correctly with nothing requested.
+
+Two of the five are worth knowing about beyond their size. **`Ancient_00`
+maps the Sheikah script over plain ASCII** (U+0020-U+007B), so ordinary text
+comes out in the glyphs the Shrines and the Slate are lettered in - same
+string, same layout, just a different `FontId`. **`External_00` contains no
+letters at all**: 49 button and control icons in the private-use range, for
+setting inline with text. Its mapping, read out of the file's CMAP:
+
+| Codepoint | Icon | | Codepoint | Icon |
+| --- | --- | --- | --- | --- |
+| U+E040 | A | | U+E047 | ZR |
+| U+E041 | B | | U+E048 | power |
+| U+E042 | X | | U+E049 | D-pad |
+| U+E043 | Y | | U+E04A | home |
+| U+E044 | L | | U+E04B | plus |
+| U+E045 | R | | U+E04C | minus |
+| U+E046 | ZL | | U+E050..U+E08F | stick, trigger and arrow variants |
+
+The range is not contiguous: of the 80 codepoints the CMAP covers, 49 have
+glyphs (the gaps are U+E04D-U+E04F, U+E05C and U+E068-U+E082) and the rest
+resolve to nothing and draw nothing. The mapping is CMAP method 1, a direct
+index table, which `bffnt.hpp` handles along with methods 0 and 2.
 
 `MessageBox` shrinks text that does not fit. The box holds exactly three lines
 at the layout's own size, so `Canvas::FitToBox` re-wraps at progressively
@@ -421,7 +448,8 @@ loader, which runs a few 64 KB chunks per frame from the draw callback
 opens, through the same content mount the game reads:
 
 1. `Font/Font_US.sbfarc` (then `_EU`, `_JP`; `GUI::SetAssetPaths` overrides) -
-   Yaz0 SARC - `Normal_00.bffnt`, `NormalS_00.bffnt`.
+   Yaz0 SARC - `Normal_00.bffnt` plus any other face `GUI::RequestFont` asked
+   for. All six are found in one pass over the archive.
 2. `Layout/Common.sblarc` loose if present, else `Pack/Bootup.pack` (plain
    SARC, ~30 MB, read at offsets) - `Layout/Common.sblarc` (Yaz0 SARC, 6 MB
    compressed / 31 MB decompressed) - the `timg/*.bflim` in
@@ -445,9 +473,10 @@ run of text would vanish while the two-quad arrows drawn right after it still
 fitted and drew. Missing labels with their surrounding art intact is the shape
 of that failure.
 
-Kept afterwards: ~1.5 MB of glyph sheets (`Normal_00` is two 1024x1024 BC4
-sheets, `NormalS_00` one 512x1024 A8), ~250 KB of UI art, ~20 KB of font
-tables, 160 KB of loader scratch, plus the 512 KB vertex ring in `gx2.hpp`.
+Kept afterwards: 1 MB of glyph sheets for `Normal_00` (two 1024x1024 BC4
+sheets) plus whatever else was requested - up to 2.9 MB if all six are, see the
+table below - ~250 KB of UI art, ~20 KB of font tables, 160 KB of loader
+scratch, plus the 512 KB vertex ring in `gx2.hpp`.
 `GX2::DrawMesh`'s private depth buffer (3.6 MB) is allocated only if a mod
 uses it - a mod using both is close to the heap limit.
 
@@ -461,13 +490,26 @@ the real files.
 
 ### Fonts (`Font/Font_US.sbfarc`)
 
-| File | FINF w x h, ascent, lineFeed | Sheets | Format | Notes |
-| --- | --- | --- | --- | --- |
-| `Normal_00.bffnt` | 31x39, 32, 39 | 2 x 1024x1024, 32 cols x 25 rows | 12 | The dialogue / menu font. |
-| `NormalS_00.bffnt` | 24x30, 23, 30 | 1 x 512x1024, 20 x 33 | 8 | Same face with a baked outline; HUD, names, option rows. |
-| `Caption_00.bffnt` | 18x22 | 1 x 512x1024 | 12 | Not loaded. |
-| `Special_00.bffnt` | 91x104 | 2 x 1024x1024 | 12 | Not loaded (titles). |
-| `External_00.bffnt` | 42x39 | 1 x 128x1024 | 12 | Not loaded (button glyphs as text). |
+All six, measured from the v208 US archive. Every one starts its sheet data at
+0x2000 and is sheet format 12 (BC4) except `NormalS_00`, which is 8 (A8), so
+they all load through the same path. `Heap` is sheet size x sheet count - what
+`GUI::RequestFont` spends.
+
+| File | `FontId` | Cell | Sheets | Fmt | Heap | Coverage |
+| --- | --- | --- | --- | --- | --- | --- |
+| `Normal_00.bffnt` | `Normal` | 31x39 | 2 x 1024x1024 | 12 | 1024 KB | ASCII, Latin-1, Cyrillic U+0401-U+0451, kana U+3000-U+30FC. The dialogue / menu font, and the only one loaded by default. |
+| `NormalS_00.bffnt` | `NormalSmall` | 24x30 | 1 x 512x1024 | 8 | 512 KB | Same coverage, black outline baked in. HUD, names, option rows. |
+| `Caption_00.bffnt` | `Caption` | 18x22 | 1 x 512x1024 | 12 | 256 KB | Latin plus CJK/kana U+3041-U+FF5E. The subtitle face. |
+| `Ancient_00.bffnt` | `Ancient` | 13x14 | 1 x 32x1024 | 12 | 64 KB | U+0020-U+007B only - the Sheikah script mapped over ASCII. |
+| `Special_00.bffnt` | `Special` | 91x104 | 2 x 1024x1024 | 12 | 1024 KB | ASCII and Latin-1 at over 3x Normal's size. A display face. |
+| `External_00.bffnt` | `External` | 42x39 | 1 x 128x1024 | 12 | 64 KB | No letters: 49 button/control icons in U+E040-U+E08F. |
+
+`Ancient_00` is the one case where a sheet's declared `sheetSize` is larger
+than width x height x bpp: 65536 for a 32x1024 BC4 surface whose pixels are
+16384 bytes. That is the tiled, padded size - a 32 px wide BC4 surface is
+8 blocks across and pads to the macro-tile granularity - and it matches because
+the loader sizes its surface with the game's own `CalcSurfaceSizeAndAlignment`,
+the same addrlib that produced the file.
 
 Findings the code depends on:
 

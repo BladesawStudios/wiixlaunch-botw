@@ -1017,6 +1017,25 @@ inline bool IsReady() { return impl::LoaderFinished(); }
 // longer hitch per frame, or call LoadNow() to block until done.
 inline void SetLoadBudget(uint32_t chunksPerFrame) { impl::g_Loader.chunksPerStep = chunksPerFrame ? chunksPerFrame : 1; }
 
+// Load one of the game's other faces as well as Normal. Must be called before
+// the first frame after Init(), like SetAssetPaths - by the time the loader has
+// started, the archive has already gone past.
+//
+// Only Normal_00 is loaded by default: all six are 2.9 MB of glyph sheets and
+// the payload heap is 6 MB. FontSheetBytes(id) is what one costs. A style
+// naming a font that was never requested falls back to Normal, so this changes
+// how text looks, never whether it appears.
+inline void RequestFont(FontId f, bool load = true) {
+    if (f < FontId::Count) impl::g_Fonts[static_cast<size_t>(f)].load = load;
+}
+inline bool FontRequested(FontId f) {
+    return f < FontId::Count && impl::g_Fonts[static_cast<size_t>(f)].load;
+}
+// Glyph sheet bytes this font takes on the heap once loaded.
+inline uint32_t FontSheetBytes(FontId f) {
+    return f < FontId::Count ? impl::g_Fonts[static_cast<size_t>(f)].sheetBytes : 0;
+}
+
 // Overrides for where the assets come from (defaults: Font/Font_US.sbfarc
 // then EU/JP; Layout/Common.sblarc loose, else inside Pack/Bootup.pack).
 // Must be called before the first frame after Init().
@@ -1112,6 +1131,7 @@ public:
     float CurrentAlpha() const { return 1.0f; }
     bool AssetsReady() const { return false; }
     bool FontReady(FontId = FontId::Normal) const { return false; }
+    // (Switch stub; the real ones are in the GX2 build.)
     bool SpriteReady(Sprite) const { return false; }
     bool Pressed(Button) const { return false; }
     bool Held(Button) const { return false; }
@@ -1184,6 +1204,9 @@ enum class ScalingMode : uint8_t { Fit, Stretch };
 inline void SetScalingMode(ScalingMode) {}
 inline ScalingMode GetScalingMode() { return ScalingMode::Fit; }
 inline void SetPixelSnapping(bool) {}
+inline void RequestFont(FontId, bool = true) {}
+inline bool FontRequested(FontId) { return false; }
+inline uint32_t FontSheetBytes(FontId) { return 0; }
 inline void SetOutputAspect(float) {}
 inline float GetOutputAspect() { return 0.0f; }
 inline float GetEffectiveOutputAspect() { return 16.0f / 9.0f; }

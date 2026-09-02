@@ -66,14 +66,35 @@ namespace Colors {
     constexpr Color Dim{255, 255, 255, 64};
 }
 
+// The six faces Font/Font_XX.sbfarc ships. Only Normal is loaded by default -
+// together they are 2.9 MB of glyph sheets against a 6 MB payload heap - so ask
+// for any other with GUI::RequestFont() before the first frame. An unloaded
+// font falls back to Normal rather than drawing nothing (see ResolveFont), so
+// naming one you forgot to request still renders text.
+//
+// Cell sizes and coverage below are measured from the v208 US archive.
 enum class FontId : uint8_t {
-    Normal = 0,      // Normal_00.bffnt  - 31x39 cells. Everything here is set in it.
-    // NormalS_00.bffnt, 24x30 cells. The same face with a black outline baked
-    // into every glyph - the game uses it over busy scenery, but as a general
-    // UI font that permanent stroke reads as a heavy smudge, so nothing here
-    // asks for it and the loader skips it (gui_render.hpp). Naming it still
-    // works: it falls back to Normal.
+    // Normal_00, 31x39. ASCII, Latin-1, Cyrillic (U+0401-U+0451) and kana
+    // (U+3000-U+30FC). Every style in here is set in it.
+    Normal = 0,
+    // NormalS_00, 24x30. The same coverage as Normal with a black outline
+    // baked into every glyph. The game uses it over busy scenery; as a general
+    // UI font that permanent stroke reads as a heavy smudge.
     NormalSmall,
+    // Caption_00, 18x22. Latin plus the CJK/kana blocks (U+3041-U+FF5E) - the
+    // subtitle face, and the one to use when text has to be small and dense.
+    Caption,
+    // Ancient_00, 13x14. The Sheikah script, mapped over plain ASCII
+    // (U+0020-U+007B): write ordinary text and it comes out in the glyphs the
+    // Shrines and the Slate are lettered in.
+    Ancient,
+    // Special_00, 91x104. A display face at more than three times Normal's
+    // size, ASCII and Latin-1 only. For a single word, not a paragraph.
+    Special,
+    // External_00, 42x39. No letters at all: 80 glyphs in the private-use
+    // range U+E040-U+E08F, which is where the game keeps its button and
+    // control icons for setting inline with text.
+    External,
     Count
 };
 
@@ -106,6 +127,7 @@ struct TextStyle {
     // alpha; the exceptions are glows, which are additive.
     GX2::BlendState blend = GX2::Blend::Alpha;
 
+    constexpr TextStyle WithFont(FontId f) const { TextStyle s = *this; s.font = f; return s; }
     constexpr TextStyle WithColor(Color c) const { TextStyle s = *this; s.colorTop = c; s.colorBottom = c; return s; }
     constexpr TextStyle WithSize(float x, float y) const { TextStyle s = *this; s.sizeX = x; s.sizeY = y; return s; }
     constexpr TextStyle WithAlign(Align a, VAlign v = VAlign::Top) const { TextStyle s = *this; s.align = a; s.valign = v; return s; }
