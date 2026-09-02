@@ -10,7 +10,7 @@
 
 #include "gui_types.hpp"
 #include "gui_render.hpp"
-#include "../graphics/gx2.hpp"
+#include "gui_backend.hpp"
 #include "../graphics/bflim.hpp"
 #include "../graphics/bffnt.hpp"
 #include "../platform/fs.hpp"
@@ -193,7 +193,7 @@ inline bool TryResolveRanges() {
     // exactly big enough. Deliberately after the loop: before it, nothing knows
     // how large the biggest sprite is.
     if (L.phase != LoadPhase::FontStream && L.stagingBytes > 0 && !L.staging) {
-        L.staging = reinterpret_cast<uint8_t*>(GX2::AllocMEM1(L.stagingBytes, 64));
+        L.staging = reinterpret_cast<uint8_t*>(Backend::AllocMEM1(L.stagingBytes, 64));
         if (!L.staging) {
             OSLog("WiiXLaunch GUI: sprite staging buffer of %u bytes would not allocate\n", L.stagingBytes);
         }
@@ -214,7 +214,7 @@ inline void FinishSprite(size_t index) {
         OSLog("WiiXLaunch GUI: '%s': bad BFLIM footer (format %u)\n", sprite.archivePath, info.formatRaw);
         return;
     }
-    GX2::SurfaceDesc desc;
+    Backend::SurfaceDesc desc;
     desc.width = info.width;
     desc.height = info.height;
     desc.format = info.gx2Format;
@@ -222,7 +222,7 @@ inline void FinishSprite(size_t index) {
     desc.swizzle = info.swizzle;
     desc.compMap = sprite.compMap ? sprite.compMap : info.compMap;
     desc.linearFilter = true;
-    sprite.texture = GX2::CreateTextureFromSurface(desc, L.staging, info.dataSize);
+    sprite.texture = Backend::CreateTextureFromSurface(desc, L.staging, info.dataSize);
     if (sprite.texture) {
         sprite.width = info.width;
         sprite.height = info.height;
@@ -276,17 +276,17 @@ inline void ParseFontHeader(size_t index) {
         return;
     }
     for (uint32_t s = 0; s < font.tglp.sheetCount; ++s) {
-        GX2::SurfaceDesc desc;
+        Backend::SurfaceDesc desc;
         desc.width = font.tglp.sheetWidth;
         desc.height = font.tglp.sheetHeight;
         desc.format = gx2Format;
-        desc.tileMode = GX2Types::kTileModeTiled2DThin1;
+        desc.tileMode = Backend::kTileModeTiled2DThin1;
         desc.swizzle = 0;
         desc.compMap = compMap;
         desc.linearFilter = true;
         void* image = nullptr;
         uint32_t imageSize = 0;
-        font.sheetTextures[s] = GX2::AllocTextureSurface(desc, &image, &imageSize);
+        font.sheetTextures[s] = Backend::AllocTextureSurface(desc, &image, &imageSize);
         if (!font.sheetTextures[s] || imageSize != font.tglp.sheetSize) {
             OSLog("WiiXLaunch GUI: font '%s': sheet %u surface %u bytes vs file %u - unsupported tiling?\n",
                   g_Fonts[index].archivePath, s, imageSize, font.tglp.sheetSize);
@@ -303,7 +303,7 @@ inline void ParseFontHeader(size_t index) {
         return;
     }
     f.tailLength = f.range.size - f.tailStart;
-    f.tail = reinterpret_cast<uint8_t*>(GX2::AllocMEM1(f.tailLength, 64));
+    f.tail = reinterpret_cast<uint8_t*>(Backend::AllocMEM1(f.tailLength, 64));
     if (!f.tail) {
         OSLog("WiiXLaunch GUI: font '%s': tail allocation of %u bytes failed\n",
               g_Fonts[index].archivePath, f.tailLength);
@@ -319,7 +319,7 @@ inline void FinishFont(size_t index) {
     f.range.done = true;
     if (f.failed || !f.parsed) return;
     for (uint32_t s = 0; s < font.tglp.sheetCount && s < BFFNT::kMaxSheets; ++s) {
-        if (font.sheetTextures[s]) GX2::FinalizeTexture(font.sheetTextures[s]);
+        if (font.sheetTextures[s]) Backend::FinalizeTexture(font.sheetTextures[s]);
     }
     if (!font.SetTables(f.tail, f.tailStart, f.tailLength)) {
         OSLog("WiiXLaunch GUI: font '%s': CWDH/CMAP tables rejected\n", g_Fonts[index].archivePath);
@@ -377,10 +377,10 @@ inline void LoaderSink(void*, uint32_t offset, const uint8_t* data, uint32_t len
 
 inline bool LoaderAllocScratch() {
     LoaderState& L = g_Loader;
-    if (!L.chunk) L.chunk = reinterpret_cast<uint8_t*>(GX2::AllocMEM1(kChunkBytes, 64));
-    if (!L.head) L.head = reinterpret_cast<uint8_t*>(GX2::AllocMEM1(kHeadBytes, 64));
+    if (!L.chunk) L.chunk = reinterpret_cast<uint8_t*>(Backend::AllocMEM1(kChunkBytes, 64));
+    if (!L.head) L.head = reinterpret_cast<uint8_t*>(Backend::AllocMEM1(kHeadBytes, 64));
     for (size_t i = 0; i < static_cast<size_t>(FontId::Count); ++i) {
-        if (!L.fonts[i].header) L.fonts[i].header = reinterpret_cast<uint8_t*>(GX2::AllocMEM1(kFontHeaderBytes, 64));
+        if (!L.fonts[i].header) L.fonts[i].header = reinterpret_cast<uint8_t*>(Backend::AllocMEM1(kFontHeaderBytes, 64));
         if (!L.fonts[i].header) return false;
     }
     return L.chunk && L.head;      // staging comes later, once its size is known

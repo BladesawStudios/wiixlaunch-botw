@@ -5,7 +5,7 @@
 #include <cstdint>
 #include <cstddef>
 
-#include "../graphics/gx2.hpp"   // GX2::BlendState / GX2::Blend presets
+#include "gui_backend.hpp"   // Backend::BlendState / Backend::Blend presets
 
 // WiiXLaunch::BotW::GUI - shared value types and the game's own UI numbers.
 //
@@ -125,7 +125,7 @@ struct TextStyle {
     bool kerning = true;
     // Almost every text material in the game's layouts blends straight
     // alpha; the exceptions are glows, which are additive.
-    GX2::BlendState blend = GX2::Blend::Alpha;
+    Backend::BlendState blend = Backend::Blend::Alpha;
 
     constexpr TextStyle WithFont(FontId f) const { TextStyle s = *this; s.font = f; return s; }
     constexpr TextStyle WithColor(Color c) const { TextStyle s = *this; s.colorTop = c; s.colorBottom = c; return s; }
@@ -134,7 +134,7 @@ struct TextStyle {
     constexpr TextStyle WithScale(float k) const { TextStyle s = *this; s.scale = k; return s; }
     constexpr TextStyle NoShadow() const { TextStyle s = *this; s.shadow = false; return s; }
     constexpr TextStyle WithKerning(bool on) const { TextStyle s = *this; s.kerning = on; return s; }
-    constexpr TextStyle WithBlend(const GX2::BlendState& b) const { TextStyle s = *this; s.blend = b; return s; }
+    constexpr TextStyle WithBlend(const Backend::BlendState& b) const { TextStyle s = *this; s.blend = b; return s; }
     constexpr TextStyle Alpha(float factor) const {
         TextStyle s = *this;
         s.colorTop = s.colorTop.Scaled(factor);

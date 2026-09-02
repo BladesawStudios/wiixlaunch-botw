@@ -11,12 +11,12 @@
 
 #include "gui_types.hpp"
 #include "../game/display.hpp"
-#include "../graphics/gx2.hpp"
+#include "gui_backend.hpp"
 #include "../graphics/bffnt.hpp"
 
 // GUI renderer core (GX2): the sprite/font tables the loader fills in, and
 // the one primitive everything else is built from - a textured quad in
-// layout pixels, pushed through GX2::BatchQuad in NDC.
+// layout pixels, pushed through Backend::BatchQuad in NDC.
 //
 // NVN is not implemented: on Switch the whole GUI compiles to no-ops (see
 // gui.hpp). The split is deliberate so an NVN backend only has to provide
@@ -26,7 +26,7 @@ namespace WiiXLaunch::BotW::GUI::impl {
 
 struct SpriteInfo {
     const char* archivePath;     // path inside Layout/Common.sblarc, or "" for generated
-    GX2::TextureHandle texture;
+    Backend::TextureHandle texture;
     uint32_t width;
     uint32_t height;
     // Where to sample when stretching this sprite's edges (see EdgeU/EdgeV).
@@ -39,7 +39,7 @@ struct SpriteInfo {
     float edgeU;
     float edgeV;
     // Overrides the component map BFLIM would pick for this sprite; 0 keeps
-    // the format's default. See GX2Types::kCompMapShapeFromG.
+    // the format's default. See Backend::kCompMapShapeFromG.
     uint32_t compMap;
 };
 
@@ -53,8 +53,8 @@ inline SpriteInfo g_Sprites[static_cast<size_t>(Sprite::Count)] = {
     { "timg/CornerR3_00^s.bflim",        0, 0, 0, 0.0f,    0.0f,    0 },
     { "timg/CornerLineR2_00^s.bflim",    0, 0, 0, 0.0f,    0.0f,    0 },
     { "timg/Nt_CursorS_00^s.bflim",      0, 0, 0, 0.0f,    0.0f,    0 },
-    { "timg/Nt_Cursor_00^t.bflim",       0, 0, 0, 0.0f,    0.0f,    GX2Types::kCompMapShapeFromG },
-    { "timg/SelectFrame_04^t.bflim",     0, 0, 0, 0.9779f, 0.9779f, GX2Types::kCompMapShapeFromG },
+    { "timg/Nt_Cursor_00^t.bflim",       0, 0, 0, 0.0f,    0.0f,    Backend::kCompMapShapeFromG },
+    { "timg/SelectFrame_04^t.bflim",     0, 0, 0, 0.9779f, 0.9779f, Backend::kCompMapShapeFromG },
     { "timg/SelectFrameGlow_00^s.bflim", 0, 0, 0, 0.8380f, 0.8380f, 0 },
     { "timg/Nt_ArrowS_02^s.bflim",       0, 0, 0, 0.0f,    0.0f,    0 },
     { "timg/Nt_ArrowSGlow_02^s.bflim",   0, 0, 0, 0.0f,    0.0f,    0 },
@@ -72,7 +72,7 @@ inline SpriteInfo g_Sprites[static_cast<size_t>(Sprite::Count)] = {
     { "timg/BtnBasic_08B^t.bflim",       0, 0, 0, 0.0f,    0.7448f, 0 },
     { "timg/BtnBasic_08TS^s.bflim",      0, 0, 0, 0.0f,    0.0f,    0 },
     { "timg/BtnBasic_08BS^s.bflim",      0, 0, 0, 0.0f,    0.0f,    0 },
-    { "timg/Nt_CursorCircle_00^t.bflim", 0, 0, 0, 0.0f,    0.0f,    GX2Types::kCompMapShapeFromG },
+    { "timg/Nt_CursorCircle_00^t.bflim", 0, 0, 0, 0.0f,    0.0f,    Backend::kCompMapShapeFromG },
 };
 
 struct FontInfo {
@@ -309,7 +309,7 @@ inline void ResetAlpha() {
     g_AlphaStack[0] = 1.0f;
 }
 
-inline void FillVertex(GX2::TextureVertex& v, float x, float y, float u, float t, Color c, bool snap) {
+inline void FillVertex(Backend::TextureVertex& v, float x, float y, float u, float t, Color c, bool snap) {
     ToNdc(x, y, v.x, v.y, snap);
     v.z = 0.0f;
     v.w = 1.0f;
@@ -376,7 +376,7 @@ inline void SinCosDeg(float degrees, float& outSin, float& outCos) {
 // if the colour buffer changes size between the two. Colours are stored with
 // the alpha stack already folded in, since that stack is a build-time notion.
 struct RecordedQuad {
-    GX2::TextureHandle tex;
+    Backend::TextureHandle tex;
     uint8_t blendIndex;
     uint8_t snap;
     float x[4], y[4];
@@ -399,17 +399,17 @@ inline bool g_BlurRequested = false;
 inline RecordedQuad* g_Record = nullptr;
 inline uint32_t g_RecordCount = 0;
 inline bool g_RecordOverflowed = false;
-inline GX2::BlendState g_RecordBlends[kMaxRecordedBlends]{};
+inline Backend::BlendState g_RecordBlends[kMaxRecordedBlends]{};
 inline uint32_t g_RecordBlendCount = 0;
 inline bool g_Recording = false;
 
 inline bool EnsureRecord() {
     if (g_Record) return true;
-    g_Record = reinterpret_cast<RecordedQuad*>(GX2::AllocMEM1(sizeof(RecordedQuad) * kMaxRecordedQuads, 64));
+    g_Record = reinterpret_cast<RecordedQuad*>(Backend::AllocMEM1(sizeof(RecordedQuad) * kMaxRecordedQuads, 64));
     return g_Record != nullptr;
 }
 
-inline uint8_t RecordBlend(const GX2::BlendState& blend) {
+inline uint8_t RecordBlend(const Backend::BlendState& blend) {
     for (uint32_t i = 0; i < g_RecordBlendCount; ++i) {
         if (g_RecordBlends[i] == blend) return static_cast<uint8_t>(i);
     }
@@ -469,10 +469,10 @@ inline Color ShimmerAt(Color base, float x, float y, float amount) {
 // pane's Z rotation appears on screen with the opposite sign. The boxed
 // cursor's arrows, for instance, are lyt -135/-225/-45/+45 and are drawn
 // here as +135/+225/+45/-45.
-inline void EmitQuad(GX2::TextureHandle tex, float x0, float y0, float x1, float y1,
+inline void EmitQuad(Backend::TextureHandle tex, float x0, float y0, float x1, float y1,
                      float u0, float v0, float u1, float v1,
                      Color cTL, Color cTR, Color cBL, Color cBR, uint8_t orient = OrientNone,
-                     const GX2::BlendState& blend = GX2::Blend::Alpha, bool snap = true,
+                     const Backend::BlendState& blend = Backend::Blend::Alpha, bool snap = true,
                      float rotation = 0.0f) {
     if (!g_FrameOpen || !tex) return;
     if (cTL.a == 0 && cTR.a == 0 && cBL.a == 0 && cBR.a == 0) return;
@@ -535,10 +535,10 @@ inline void ReplayRecord(void* dst) {
     // be sized from a real colour buffer, and Canvas::BlurBehind() will not
     // ask for a blur until they exist. Without this the two wait on each
     // other forever.
-    if (g_BlurEnabled && (g_BlurRequested || !GX2::BackdropReady())) {
-        GX2::BlurBackdrop(dst, g_BlurDownscale, g_BlurPasses);
+    if (g_BlurEnabled && (g_BlurRequested || !Backend::BackdropReady())) {
+        Backend::BlurBackdrop(dst, g_BlurDownscale, g_BlurPasses);
     }
-    GX2::BeginBatch(dst);
+    Backend::BeginBatch(dst);
     // Colours were recorded with the alpha stack folded in already.
     const float saved = g_AlphaStack[0];
     g_AlphaStack[0] = 1.0f;
@@ -546,30 +546,30 @@ inline void ReplayRecord(void* dst) {
     g_AlphaDepth = 0;
     for (uint32_t i = 0; i < g_RecordCount; ++i) {
         const RecordedQuad& q = g_Record[i];
-        GX2::TextureVertex verts[4];
+        Backend::TextureVertex verts[4];
         for (int k = 0; k < 4; ++k) {
             FillVertex(verts[k], q.x[k], q.y[k], q.u[k], q.v[k], q.color[k], q.snap != 0);
         }
-        GX2::BatchQuad(q.tex, verts, g_RecordBlends[q.blendIndex]);
+        Backend::BatchQuad(q.tex, verts, g_RecordBlends[q.blendIndex]);
     }
-    GX2::EndBatch();
+    Backend::EndBatch();
     g_AlphaStack[0] = saved;
     g_AlphaDepth = savedDepth;
 }
 
-inline void EmitQuad(GX2::TextureHandle tex, const Rect& r, float u0, float v0, float u1, float v1,
-                     Color c, uint8_t orient = OrientNone, const GX2::BlendState& blend = GX2::Blend::Alpha,
+inline void EmitQuad(Backend::TextureHandle tex, const Rect& r, float u0, float v0, float u1, float v1,
+                     Color c, uint8_t orient = OrientNone, const Backend::BlendState& blend = Backend::Blend::Alpha,
                      bool snap = true, float rotation = 0.0f) {
     EmitQuad(tex, r.x, r.y, r.Right(), r.Bottom(), u0, v0, u1, v1, c, c, c, c, orient, blend, snap, rotation);
 }
 
-inline GX2::TextureHandle SpriteTexture(Sprite s) {
+inline Backend::TextureHandle SpriteTexture(Sprite s) {
     if (s >= Sprite::Count) return 0;
     return SpriteAt(s).texture;
 }
 
 inline void EmitSprite(Sprite s, const Rect& r, Color c, uint8_t orient = OrientNone,
-                       const GX2::BlendState& blend = GX2::Blend::Alpha, float rotation = 0.0f) {
+                       const Backend::BlendState& blend = Backend::Blend::Alpha, float rotation = 0.0f) {
     EmitQuad(SpriteTexture(s), r, 0.0f, 0.0f, 1.0f, 1.0f, c, orient, blend, true, rotation);
 }
 
@@ -606,17 +606,17 @@ inline float EdgeV(Sprite s) {
 // out to 1.0 leaves a transparent sliver exactly where the stretched edge
 // begins, and that sliver is a visible line down every join.
 inline void EmitSpriteArt(Sprite s, const Rect& r, Color c, uint8_t orient = OrientNone,
-                          const GX2::BlendState& blend = GX2::Blend::Alpha) {
+                          const Backend::BlendState& blend = Backend::Blend::Alpha) {
     EmitQuad(SpriteTexture(s), r, 0.0f, 0.0f, EdgeU(s), EdgeV(s), c, orient, blend);
 }
 
 // A flat rectangle: the white sprite tinted.
-inline void EmitRect(const Rect& r, Color c, const GX2::BlendState& blend = GX2::Blend::Alpha) {
+inline void EmitRect(const Rect& r, Color c, const Backend::BlendState& blend = Backend::Blend::Alpha) {
     EmitQuad(SpriteTexture(Sprite::White), r, 0.25f, 0.25f, 0.75f, 0.75f, c, OrientNone, blend);
 }
 
 inline void EmitRectGradient(const Rect& r, Color top, Color bottom,
-                             const GX2::BlendState& blend = GX2::Blend::Alpha) {
+                             const Backend::BlendState& blend = Backend::Blend::Alpha) {
     EmitQuad(SpriteTexture(Sprite::White), r.x, r.y, r.Right(), r.Bottom(), 0.25f, 0.25f, 0.75f, 0.75f,
              top, top, bottom, bottom, OrientNone, blend);
 }

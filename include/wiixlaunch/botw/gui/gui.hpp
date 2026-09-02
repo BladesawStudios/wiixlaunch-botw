@@ -63,7 +63,7 @@
 #include "gui_render.hpp"
 #include "gui_assets.hpp"
 #include "gui_text.hpp"
-#include "../graphics/gx2.hpp"
+#include "gui_backend.hpp"
 #include "../game/controller.hpp"
 #include "../platform/log.hpp"
 
@@ -171,7 +171,7 @@ inline void EnsureWhiteSprite() {
     // whatever happened to be in that memory.
     static uint8_t pixels[8 * 8 * 4];
     for (uint32_t i = 0; i < sizeof(pixels); ++i) pixels[i] = 0xFF;
-    white.texture = GX2::CreateTexture(pixels, sizeof(pixels), 8, 8, GX2Types::kSurfaceFormatUnormR8G8B8A8);
+    white.texture = Backend::CreateTexture(pixels, sizeof(pixels), 8, 8, Backend::kSurfaceFormatUnormR8G8B8A8);
     white.width = 8;
     white.height = 8;
 }
@@ -185,7 +185,7 @@ inline void OnPipelineReady() {
 }
 
 inline void BuildFrame();
-inline void OnDraw(GX2::CommandBuffer* cmdBuf, void* dst, int width, int height);
+inline void OnDraw(Backend::CommandBuffer* cmdBuf, void* dst, int width, int height);
 
 } // namespace impl
 
@@ -274,11 +274,11 @@ public:
     // a blurry picture of the scene. FrostedBox() below does both in the right
     // order and is what most callers want.
     void BlurBehind(const GUI::Rect& r, Color tint = Colors::White) {
-        if (!impl::g_BlurEnabled || !GX2::BackdropReady()) return;
+        if (!impl::g_BlurEnabled || !Backend::BackdropReady()) return;
         impl::g_BlurRequested = true;
         // The backdrop holds the whole screen, so the piece of it behind this
         // rectangle is just the rectangle in screen fractions.
-        impl::EmitQuad(GX2::BackdropTexture(), r,
+        impl::EmitQuad(Backend::BackdropTexture(), r,
                        r.x / kVirtualWidth, r.y / kVirtualHeight,
                        r.Right() / kVirtualWidth, r.Bottom() / kVirtualHeight, tint);
     }
@@ -304,26 +304,26 @@ public:
     }
 
     // ---- primitives -------------------------------------------------------
-    void Rect(const GUI::Rect& r, Color c, const GX2::BlendState& blend = GX2::Blend::Alpha) {
+    void Rect(const GUI::Rect& r, Color c, const Backend::BlendState& blend = Backend::Blend::Alpha) {
         impl::EmitRect(r, c, blend);
     }
-    void RectGradient(const GUI::Rect& r, Color top, Color bottom, const GX2::BlendState& blend = GX2::Blend::Alpha) {
+    void RectGradient(const GUI::Rect& r, Color top, Color bottom, const Backend::BlendState& blend = Backend::Blend::Alpha) {
         impl::EmitRectGradient(r, top, bottom, blend);
     }
     // rotation is in degrees clockwise about the rect's centre. Angles taken
     // from a .bflyt need their sign flipped: lyt panes are y-up.
     void Image(Sprite s, const GUI::Rect& r, Color tint = Colors::White, uint8_t orient = OrientNone,
-               const GX2::BlendState& blend = GX2::Blend::Alpha, float rotation = 0.0f) {
+               const Backend::BlendState& blend = Backend::Blend::Alpha, float rotation = 0.0f) {
         impl::EmitSprite(s, r, tint, orient, blend, rotation);
     }
     void ImageUV(Sprite s, const GUI::Rect& r, float u0, float v0, float u1, float v1,
                  Color tint = Colors::White, uint8_t orient = OrientNone,
-                 const GX2::BlendState& blend = GX2::Blend::Alpha) {
+                 const Backend::BlendState& blend = Backend::Blend::Alpha) {
         impl::EmitQuad(impl::SpriteTexture(s), r, u0, v0, u1, v1, tint, orient, blend);
     }
     // Draws a sprite at its native pixel size with its top-left at (x, y).
     void ImageAt(Sprite s, float x, float y, Color tint = Colors::White, uint8_t orient = OrientNone,
-                 float scale = 1.0f, const GX2::BlendState& blend = GX2::Blend::Alpha) {
+                 float scale = 1.0f, const Backend::BlendState& blend = Backend::Blend::Alpha) {
         const impl::SpriteInfo& info = impl::SpriteAt(s);
         if (!info.texture) return;
         impl::EmitSprite(s, GUI::Rect{x, y, info.width * scale, info.height * scale}, tint, orient, blend);
@@ -392,7 +392,7 @@ public:
             // Nt_MsgDeco_02/03 and Nt_DecoLineL/R_01 are the visible copies of
             // the ornaments, and their materials carry lyt blend (1,2,4) -
             // src*dst + dst*srcAlpha - not plain alpha.
-            const GX2::BlendState& db = GX2::Blend::Overlay;
+            const Backend::BlendState& db = Backend::Blend::Overlay;
             Image(Sprite::MsgDeco, GUI::Rect{cx - Metrics::kMessageDecoOffset * k - dw * 0.5f, cy - dh * 0.5f, dw, dh}, deco, OrientNone, db);
             Image(Sprite::MsgDeco, GUI::Rect{cx + Metrics::kMessageDecoOffset * k - dw * 0.5f, cy - dh * 0.5f, dw, dh}, deco, OrientFlipH, db);
             Image(Sprite::MsgDecoLine, GUI::Rect{cx - 278.0f * k - lw * 0.5f, cy - lh * 0.5f, lw, lh}, deco, OrientNone, db);
@@ -567,7 +567,7 @@ public:
     // `shimmer` is the cloud drift the game runs through this frame; pass 0
     // for a static cursor. See Metrics::kCursorShimmer.
     void CursorCorners(const GUI::Rect& r, Color c = Colors::Cream.WithAlpha(128), float size = 48.0f,
-                       const GX2::BlendState& blend = GX2::Blend::Additive,
+                       const Backend::BlendState& blend = Backend::Blend::Additive,
                        float shimmer = Metrics::kCursorShimmer) {
         if (!SpriteReady(Sprite::CursorCorner)) { RoundedOutline(r, c); return; }
         FrameFromCorner(Sprite::CursorCorner, r, size, c, blend, shimmer);
@@ -597,10 +597,10 @@ public:
         const float s = Metrics::kBoxedCursorArrow * pulse;
         const float o = 3.0f;   // the layout's own diagonal nudge
         const float h = s * 0.5f;
-        Image(Sprite::ArrowDown, GUI::Rect{r.x - h - o, r.y - h - o, s, s}, c, OrientNone, GX2::Blend::Alpha, 135.0f);
-        Image(Sprite::ArrowDown, GUI::Rect{r.Right() - h + o, r.y - h - o, s, s}, c, OrientNone, GX2::Blend::Alpha, 225.0f);
-        Image(Sprite::ArrowDown, GUI::Rect{r.x - h - o, r.Bottom() - h + o, s, s}, c, OrientNone, GX2::Blend::Alpha, 45.0f);
-        Image(Sprite::ArrowDown, GUI::Rect{r.Right() - h + o, r.Bottom() - h + o, s, s}, c, OrientNone, GX2::Blend::Alpha, -45.0f);
+        Image(Sprite::ArrowDown, GUI::Rect{r.x - h - o, r.y - h - o, s, s}, c, OrientNone, Backend::Blend::Alpha, 135.0f);
+        Image(Sprite::ArrowDown, GUI::Rect{r.Right() - h + o, r.y - h - o, s, s}, c, OrientNone, Backend::Blend::Alpha, 225.0f);
+        Image(Sprite::ArrowDown, GUI::Rect{r.x - h - o, r.Bottom() - h + o, s, s}, c, OrientNone, Backend::Blend::Alpha, 45.0f);
+        Image(Sprite::ArrowDown, GUI::Rect{r.Right() - h + o, r.Bottom() - h + o, s, s}, c, OrientNone, Backend::Blend::Alpha, -45.0f);
     }
 
     // The light confirm-dialog plate (BtnDialog_00's W_Pict_00): a flat
@@ -859,7 +859,7 @@ private:
     // vertex because these go through EmitSpriteArt, which carries the art's
     // padding insets and takes a single colour.
     void Corners(Sprite s, const GUI::Rect& r, float size, Color c,
-                 const GX2::BlendState& blend = GX2::Blend::Alpha, float shimmer = 0.0f) {
+                 const Backend::BlendState& blend = Backend::Blend::Alpha, float shimmer = 0.0f) {
         const float h = size * 0.5f;
         const float lx = r.x + h, rx = r.Right() - h;
         const float ty = r.y + h, by = r.Bottom() - h;
@@ -875,9 +875,9 @@ private:
     // only value that neither bleeds into its neighbour nor runs off the edge
     // whatever the texture's size.
     void FrameFromCorner(Sprite s, const GUI::Rect& r, float corner, Color c,
-                         const GX2::BlendState& blend = GX2::Blend::Alpha, float shimmer = 0.0f) {
+                         const Backend::BlendState& blend = Backend::Blend::Alpha, float shimmer = 0.0f) {
         Corners(s, r, corner, c, blend, shimmer);
-        const GX2::TextureHandle tex = impl::SpriteTexture(s);
+        const Backend::TextureHandle tex = impl::SpriteTexture(s);
         const float eu = impl::EdgeU(s);
         const float ev = impl::EdgeV(s);
         const float midW = r.w - 2.0f * corner;
@@ -926,8 +926,8 @@ private:
     // is the surface colour, so stretching that over the middle gives the
     // whole plate from the same two textures instead of guessing a fill.
     void NineSlice(Sprite top, Sprite bottom, const GUI::Rect& r, float corner, Color c) {
-        const GX2::TextureHandle tt = impl::SpriteTexture(top);
-        const GX2::TextureHandle tb = impl::SpriteTexture(bottom);
+        const Backend::TextureHandle tt = impl::SpriteTexture(top);
+        const Backend::TextureHandle tb = impl::SpriteTexture(bottom);
         const float eu = impl::EdgeU(top);
         const float evT = impl::EdgeV(top);
         const float evB = impl::EdgeV(bottom);
@@ -1053,7 +1053,7 @@ inline void BuildFrame() {
     }
 }
 
-inline void OnDraw(GX2::CommandBuffer*, void* dst, int width, int height) {
+inline void OnDraw(Backend::CommandBuffer*, void* dst, int width, int height) {
     if (!g_Initialized || !g_PipelineReady) return;
     if (!LoaderFinished()) LoaderStep();
 
@@ -1077,15 +1077,15 @@ inline void OnDraw(GX2::CommandBuffer*, void* dst, int width, int height) {
 
 } // namespace impl
 
-// Installs the GX2 frame hook (GX2::Init) and starts loading the game's
+// Installs the GX2 frame hook (Backend::Init) and starts loading the game's
 // fonts and UI art as soon as the graphics pipeline is up. Call once from
 // WiiXLaunch_Init(), after Controller::Init() if widgets are to see input.
 inline void Init() {
     if (impl::g_Initialized) return;
     impl::g_Initialized = true;
-    GX2::Init();
-    GX2::RegisterDrawCallback(&impl::OnDraw);
-    GX2::OnInitialized(&impl::OnPipelineReady);
+    Backend::Init();
+    Backend::RegisterDrawCallback(&impl::OnDraw);
+    Backend::OnInitialized(&impl::OnPipelineReady);
     // Build each frame from the input hook rather than at present time. That
     // is what makes Canvas::CaptureInput() able to hide the press that opened
     // a menu: at present time the game has already read the pad. Needs
@@ -1135,7 +1135,7 @@ inline void SetAssetPaths(const char* fontArchive, const char* layoutArchive) {
 }
 
 // Runs the loader to completion right now (only meaningful once the GX2
-// pipeline is up, i.e. from inside a GX2::OnInitialized callback or later).
+// pipeline is up, i.e. from inside a Backend::OnInitialized callback or later).
 inline void LoadNow() {
     if (!impl::g_PipelineReady) return;
     impl::LoaderRunToCompletion();
@@ -1246,14 +1246,14 @@ public:
     void SetFocus(int) {}
     int FocusableCount() const { return 0; }
     bool ClaimFocus() { return false; }
-    void Rect(const GUI::Rect&, Color, const GX2::BlendState& = GX2::Blend::Alpha) {}
-    void RectGradient(const GUI::Rect&, Color, Color, const GX2::BlendState& = GX2::Blend::Alpha) {}
+    void Rect(const GUI::Rect&, Color, const Backend::BlendState& = Backend::Blend::Alpha) {}
+    void RectGradient(const GUI::Rect&, Color, Color, const Backend::BlendState& = Backend::Blend::Alpha) {}
     void Image(Sprite, const GUI::Rect&, Color = Colors::White, uint8_t = 0,
-               const GX2::BlendState& = GX2::Blend::Alpha, float = 0.0f) {}
+               const Backend::BlendState& = Backend::Blend::Alpha, float = 0.0f) {}
     void ImageUV(Sprite, const GUI::Rect&, float, float, float, float, Color = Colors::White, uint8_t = 0,
-                 const GX2::BlendState& = GX2::Blend::Alpha) {}
+                 const Backend::BlendState& = Backend::Blend::Alpha) {}
     void ImageAt(Sprite, float, float, Color = Colors::White, uint8_t = 0, float = 1.0f,
-                 const GX2::BlendState& = GX2::Blend::Alpha) {}
+                 const Backend::BlendState& = Backend::Blend::Alpha) {}
     void SpriteSize(Sprite, float& w, float& h) const { w = 0; h = 0; }
     void Text(float, float, const char*, const TextStyle& = Styles::Message()) {}
     void TextBox(const GUI::Rect&, const char*, const TextStyle&, bool = true) {}
@@ -1265,7 +1265,7 @@ public:
     void RoundedOutline(const GUI::Rect&, Color, float = Metrics::kRoundedCorner, float = 0.0f) {}
     void SelectFrame(const GUI::Rect&, Color = Colors::SelectFrame, Color = Colors::SelectGlow) {}
     void CursorCorners(const GUI::Rect&, Color = Colors::Cream, float = 48.0f,
-                       const GX2::BlendState& = GX2::Blend::Alpha, float = 0.0f) {}
+                       const Backend::BlendState& = Backend::Blend::Alpha, float = 0.0f) {}
     // (stub Canvas::Image carries the rotation parameter too, below)
     void CursorBrackets(const GUI::Rect&, Color = Colors::White, float = 64.0f) {}
     void BoxedCursor(const GUI::Rect&, Color = Colors::White) {}

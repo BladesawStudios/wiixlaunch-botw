@@ -16,7 +16,8 @@ is a no-op. The renderer is split so that an NVN backend only has to provide
 | --- | --- |
 | `gui/gui.hpp` | The public API: `GUI::Init()`, `GUI::OnFrame()`, `GUI::Canvas` (primitives, game-styled composites, focus-navigated widgets). Includes everything below. |
 | `gui/gui_types.hpp` | `Color`, `Rect`, `TextStyle`, `Styles::` presets, `Sprite` ids, `Metrics::` - the numbers read out of the layouts. Platform-agnostic. |
-| `gui/gui_render.hpp` | GX2 renderer core: the sprite/font tables and the one primitive (`EmitQuad`: layout pixels -> NDC -> `GX2::BatchQuad`). |
+| `gui/gui_backend.hpp` | **The porting seam.** Everything the GUI needs from a graphics API, in one namespace: 20 names, aliased to GX2 today. The only GUI file that mentions GX2 at all. |
+| `gui/gui_render.hpp` | Renderer core: the sprite/font tables and the one primitive (`EmitQuad`: layout pixels -> NDC -> `Backend::BatchQuad`). |
 | `gui/gui_text.hpp` | UTF-8 -> glyph quads with nw::font's layout rules (cell scaling, advances, wrapping, shadow pass). |
 | `gui/gui_assets.hpp` | The streaming loader that pulls fonts and textures out of the game's archives at runtime. |
 | `graphics/bffnt.hpp` | BFFNT font parser (FINF/TGLP/CWDH/CMAP, glyph lookup, cell UVs). |
@@ -651,6 +652,46 @@ txt1 T_BtnDialog      size=320x48 font=Normal_00 size=(31,39) top/bottom=(40,40,
 wnd1 W_SelectFrame_00 size=530x186 frameSize=71 tex=SelectFrameGlow_00^s mat back=(0,193,242,102)
 wnd1 W_SelectFrame_01 size=530x186 frameSize=68 tex=SelectFrame_04^t
 ```
+
+## Porting the renderer
+
+The GUI reaches a graphics API through `GUI::Backend` and nothing else.
+`gui_backend.hpp` is the only file in `gui/` that names GX2 - the other five
+have zero references, checked by grep and by the compiler - so a second backend
+means providing that namespace, not editing the GUI.
+
+The whole surface is **20 names**:
+
+| Group | Names |
+| --- | --- |
+| Types | `TextureHandle`, `BlendState`, `SurfaceDesc`, `TextureVertex`, `CommandBuffer` |
+| Frame | `Init`, `RegisterDrawCallback`, `OnInitialized` |
+| Drawing | `BeginBatch`, `BatchQuad`, `EndBatch` |
+| Textures | `AllocTextureSurface`, `CreateTextureFromSurface`, `CreateTexture`, `FinalizeTexture` |
+| Memory | `AllocMEM1` |
+| Backdrop | `BackdropReady`, `BackdropTexture`, `BlurBackdrop` |
+
+plus three constants describing the game's own art
+(`kCompMapShapeFromG`, `kTileModeTiled2DThin1`, `kSurfaceFormatUnormR8G8B8A8`).
+`gui_backend.hpp` carries the semantics of each in full.
+
+What makes the surface this small: the GUI submits exactly one kind of
+geometry - a textured quad, four vertices in strip order, alpha-blended, no
+depth, no culling, no scissor - and everything else is layout, table lookups
+and text shaping. `gui_text.hpp` never mentions a graphics API at all.
+
+Two things a backend may decline. The backdrop trio can return `false`/`0`
+forever; the GUI then draws without frosting and nothing else changes.
+`AllocMEM1` and the three constants are the only entries currently behind
+`#if WIIXL_CEMU || WIIXL_WIIU`, because gx2.hpp's Switch stub has no
+`AllocMEM1` and every GUI file needing them is behind that same guard.
+
+For NVN specifically: add the implementation to `gui_backend.hpp` behind
+`#if WIIXL_SWITCH`, then widen the guards at the top of `gui.hpp`,
+`gui_render.hpp`, `gui_assets.hpp` and `gui_text.hpp` to include it, and delete
+the stub `Canvas` at the bottom of `gui.hpp`. If anything beyond that needs
+changing, the seam is in the wrong place and is worth moving rather than
+working around.
 
 ## What is approximate
 
