@@ -63,6 +63,7 @@
 #include "gui_render.hpp"
 #include "gui_assets.hpp"
 #include "gui_text.hpp"
+#include "../game/sound.hpp"
 #include "gui_backend.hpp"
 #include "../game/controller.hpp"
 #include "../platform/log.hpp"
@@ -163,6 +164,39 @@ inline bool g_FocusMoved = false;
 inline int64_t g_FocusChangedTicks = 0;
 inline int g_FocusPrevIndex = -1;
 
+// The game's menu sounds, on by default. They can only fire when focusable
+// widgets exist, so a mod that draws a HUD and nothing else stays silent
+// without having to ask.
+inline bool g_UiSounds = true;
+
+// A menu event only resolves while the sound group holding it is loaded, and
+// the title screen carries a different set from the in-game menus - which is
+// why a single name was silent on the title. Each of these is tried in turn
+// and the first that actually starts playing wins, so the same menu is audible
+// in both places. Play() reports that, because it calls the inner routine
+// which returns whether the name resolved; the usual wrapper discards it.
+inline const char* const kCursorMoveEvents[] = {
+    Sound::Events::kCursorMove,   // mc_CursorMove - the in-game menus
+    "TitleCursorMove",            // the title screen's own
+    "mc_List_FocusMove",
+};
+inline const char* const kDecideEvents[] = {
+    Sound::Events::kDecide,       // mc_Decide
+    "TitleCursorDecide",
+    "mc_List_Decide",
+};
+
+// Plays one of a candidate list and says which won, once, so a silent menu can
+// be diagnosed without guessing.
+inline void PlayUiEvent(const char* const* names, uint32_t count, const char* what) {
+    const char* played = Sound::PlayFirstAvailable(names, count);
+    static uint32_t s_logged = 0;
+    if (s_logged < 4) {
+        ++s_logged;
+        OSLog("WiiXLaunch GUI: %s sound -> %s\n", what, played ? played : "(none resolved)");
+    }
+}
+
 inline void ApplyNavigationToFocus() {
     if (g_FocusCountLast <= 0) { g_FocusIndex = 0; return; }
     g_FocusMoved = false;
@@ -171,8 +205,17 @@ inline void ApplyNavigationToFocus() {
     // Catches SetFocus and the end-of-frame clamp as well as navigation, so
     // anything that moves the cursor animates.
     if (g_FocusIndex != g_FocusPrevIndex) {
+        const bool firstEver = g_FocusPrevIndex < 0;
         g_FocusPrevIndex = g_FocusIndex;
         g_FocusChangedTicks = g_NowTicks;
+        // The game's own cursor sound. Not on the first frame a menu appears -
+        // focus "moving" from nothing to the first row is not a move the player
+        // made, and clicking on open would be wrong.
+        if (!firstEver && g_UiSounds) {
+            PlayUiEvent(kCursorMoveEvents,
+                        static_cast<uint32_t>(sizeof(kCursorMoveEvents) / sizeof(kCursorMoveEvents[0])),
+                        "cursor");
+        }
     }
 }
 
@@ -1228,6 +1271,18 @@ inline void BuildFrame() {
     ApplyNavigationToFocus();
     ResetAlpha();
 
+    // The decide sound, once per press, and only while something is focusable -
+    // which is what keeps a HUD-only mod silent. Central rather than in each
+    // widget: every widget that acts on A does so on the same frame this sees,
+    // and putting it in one place means a new widget cannot forget it. The
+    // trade is that A pressed on a widget which ignores it still sounds, which
+    // is what the game does in its own menus anyway.
+    if (g_UiSounds && g_FocusCountLast > 0 && PressedNow(Button::A)) {
+        PlayUiEvent(kDecideEvents,
+                    static_cast<uint32_t>(sizeof(kDecideEvents) / sizeof(kDecideEvents[0])),
+                    "decide");
+    }
+
     g_RecordCount = 0;
     g_RecordBlendCount = 0;
     g_RecordOverflowed = false;
@@ -1373,6 +1428,12 @@ inline ScalingMode GetScalingMode() { return impl::g_ScalingMode; }
 // Snap flat fills and art to whole device pixels (on by default; ignored
 // when a layout pixel is smaller than a device pixel, and never applied to
 // glyphs). Turn it off for smoothly animating positions.
+// The game's own menu sounds on focus movement and on A. On by default, and
+// inert unless a mod draws focusable widgets. Sound::Play (game/sound.hpp)
+// is the general form if you want a different event.
+inline void SetUiSounds(bool on) { impl::g_UiSounds = on; }
+inline bool AreUiSoundsEnabled() { return impl::g_UiSounds; }
+
 inline void SetPixelSnapping(bool on) { impl::g_SnapToPixels = on; }
 
 // Override the aspect ratio the frame is presented at. 0 - the default - is
@@ -1524,6 +1585,8 @@ enum class ScalingMode : uint8_t { Fit, Stretch };
 inline void SetScalingMode(ScalingMode) {}
 inline ScalingMode GetScalingMode() { return ScalingMode::Fit; }
 inline void SetPixelSnapping(bool) {}
+inline void SetUiSounds(bool) {}
+inline bool AreUiSoundsEnabled() { return false; }
 inline void RequestFont(FontId, bool = true) {}
 inline bool FontRequested(FontId) { return false; }
 inline uint32_t FontSheetBytes(FontId) { return 0; }
