@@ -434,6 +434,18 @@ namespace Metrics {
     // is masked per-texel where ours is per-vertex, so a softer swing reads
     // closer than matching its amplitude would.
     constexpr float kCursorShimmer = 0.45f;
+    // How long a newly focused option row takes to come up. The game animates
+    // W_BaseLine_02 from its resting alpha on select; the curve is in the
+    // .bflan, which nothing here parses, so this is the duration of a
+    // smoothstep standing in for it.
+    // 0.15 rather than 0.12: at 30fps the shorter one is four frames with a
+    // 52/255 jump between them, which reads as a snap rather than a fade. This
+    // is five frames at 30 and eleven at 60 - the same lesson the cursors
+    // taught, that what looks smooth at 60 can be stepped at 30.
+    constexpr float kFocusFadeSeconds = 0.15f;
+    // W_BaseLine_02's resting and selected alpha, measured from the layout.
+    constexpr uint8_t kOptionLineRest = 8;
+    constexpr uint8_t kOptionLineSelected = 140;
     // Scrolling list: row pitch and the track down its right edge.
     constexpr float kListRowHeight = 40.0f;
     constexpr float kListRowGap = 2.0f;

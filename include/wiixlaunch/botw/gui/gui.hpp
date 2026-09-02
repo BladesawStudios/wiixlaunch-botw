@@ -156,11 +156,36 @@ inline int g_FocusCount = 0;        // this frame's running count
 inline int g_FocusCountLast = 0;    // last frame's total, for wrap-around
 inline bool g_FocusMoved = false;
 
+// When the focus last landed somewhere new, so a row can animate in rather
+// than snap. One stamp is enough: only one widget is focused at a time, so
+// there is nothing to track per widget - which is what makes this possible at
+// all in an immediate-mode GUI with no per-widget storage.
+inline int64_t g_FocusChangedTicks = 0;
+inline int g_FocusPrevIndex = -1;
+
 inline void ApplyNavigationToFocus() {
     if (g_FocusCountLast <= 0) { g_FocusIndex = 0; return; }
     g_FocusMoved = false;
     if (g_Input.navFired & NavDownBit) { g_FocusIndex = (g_FocusIndex + 1) % g_FocusCountLast; g_FocusMoved = true; }
     if (g_Input.navFired & NavUpBit) { g_FocusIndex = (g_FocusIndex + g_FocusCountLast - 1) % g_FocusCountLast; g_FocusMoved = true; }
+    // Catches SetFocus and the end-of-frame clamp as well as navigation, so
+    // anything that moves the cursor animates.
+    if (g_FocusIndex != g_FocusPrevIndex) {
+        g_FocusPrevIndex = g_FocusIndex;
+        g_FocusChangedTicks = g_NowTicks;
+    }
+}
+
+// 0 the instant the focus moves, 1 once the row has settled. Smoothstep, so it
+// eases in and out rather than ramping linearly into place.
+inline float FocusFade(float seconds) {
+    if (g_FocusChangedTicks == 0 || g_NowTicks == 0 || seconds <= 0.0f) return 1.0f;
+    const int64_t elapsed = g_NowTicks - g_FocusChangedTicks;
+    if (elapsed <= 0) return 0.0f;
+    const float span = seconds * static_cast<float>(WiiXLaunch::Time::kTicksPerSecond);
+    const float t = static_cast<float>(elapsed) / span;
+    if (t >= 1.0f) return 1.0f;
+    return t * t * (3.0f - 2.0f * t);
 }
 
 inline void EnsureWhiteSprite() {
@@ -1130,13 +1155,23 @@ private:
 
     void DrawOptionRow(const GUI::Rect& r, bool focused, Color box) {
         RoundedBox(r, box, Metrics::kRoundedCorner);
+        // W_BaseLine_02 rests at alpha 8 on EVERY row and is animated up on
+        // select - the row that was previously drawn with no line at all until
+        // it gained focus, and then snapped to full. The resting line is what
+        // the layout does; the ramp is a smoothstep standing in for the
+        // .bflan curve, which nothing here parses.
+        const float t = focused ? impl::FocusFade(Metrics::kFocusFadeSeconds) : 0.0f;
+        const float lineA = static_cast<float>(Metrics::kOptionLineRest) +
+                            (static_cast<float>(Metrics::kOptionLineSelected) -
+                             static_cast<float>(Metrics::kOptionLineRest)) * t;
+        RoundedOutline(r, Colors::OptionOutline.WithAlpha(static_cast<uint8_t>(lineA + 0.5f)),
+                       Metrics::kRoundedCorner);
         if (focused) {
-            // W_BaseLine_02 rests at alpha 8 and is animated up on select;
-            // the selected value lives in the .bflan, so this is a moderate
-            // stand-in. The cursor frame outside it carries the highlight.
-            RoundedOutline(r, Colors::OptionOutline.WithAlpha(140), Metrics::kRoundedCorner);
+            // The cursor frame comes up with it. At t = 0 the colour is fully
+            // transparent and EmitQuad drops the whole frame, so a row that
+            // has just lost focus costs nothing.
             const float m = Metrics::kOptionCursorMargin;
-            CursorCorners(r.Inset(-m, -m));
+            CursorCorners(r.Inset(-m, -m), Colors::Cream.WithAlpha(128).Scaled(t));
         }
     }
 
