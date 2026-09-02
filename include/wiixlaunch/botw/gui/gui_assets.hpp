@@ -288,6 +288,8 @@ inline void ParseFontHeader(size_t index) {
     f.tailLength = f.range.size - f.tailStart;
     f.tail = reinterpret_cast<uint8_t*>(GX2::AllocMEM1(f.tailLength, 64));
     if (!f.tail) {
+        OSLog("WiiXLaunch GUI: font '%s': tail allocation of %u bytes failed\n",
+              g_Fonts[index].archivePath, f.tailLength);
         f.failed = true;
         return;
     }
@@ -299,7 +301,9 @@ inline void FinishFont(size_t index) {
     BFFNT::Font& font = g_Fonts[index].font;
     f.range.done = true;
     if (f.failed || !f.parsed) return;
-    for (uint32_t s = 0; s < font.tglp.sheetCount; ++s) GX2::FinalizeTexture(font.sheetTextures[s]);
+    for (uint32_t s = 0; s < font.tglp.sheetCount && s < BFFNT::kMaxSheets; ++s) {
+        if (font.sheetTextures[s]) GX2::FinalizeTexture(font.sheetTextures[s]);
+    }
     if (!font.SetTables(f.tail, f.tailStart, f.tailLength)) {
         OSLog("WiiXLaunch GUI: font '%s': CWDH/CMAP tables rejected\n", g_Fonts[index].archivePath);
         f.failed = true;
@@ -326,7 +330,8 @@ inline void SinkFonts(uint32_t offset, const uint8_t* data, uint32_t length) {
 
         if (f.parsed && !f.failed) {
             const BFFNT::Font& font = g_Fonts[i].font;
-            for (uint32_t s = 0; s < font.tglp.sheetCount; ++s) {
+            for (uint32_t s = 0; s < font.tglp.sheetCount && s < BFFNT::kMaxSheets; ++s) {
+                if (!f.sheetImage[s]) continue;
                 f.range.written += Yaz0::CopyOverlap(base + font.tglp.sheetDataOffset + s * font.tglp.sheetSize,
                                                      font.tglp.sheetSize,
                                                      reinterpret_cast<uint8_t*>(f.sheetImage[s]),
@@ -433,6 +438,7 @@ inline void FinishStream() {
             }
         }
         L.file.Close();
+        OSLog("WiiXLaunch GUI: font phase done (%u loaded), opening the layout archive\n", L.fontsLoaded);
         L.phase = LoadPhase::LayoutOpen;
     } else {
         L.file.Close();

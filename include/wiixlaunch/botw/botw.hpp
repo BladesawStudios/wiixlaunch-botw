@@ -29,5 +29,6 @@
 #include "game/flyt.hpp"
 #include "graphics/nvn.hpp"
 #include "platform/log.hpp"
+#include "platform/heap.hpp"
 #include "graphics/gx2.hpp"
 #include "gui/gui.hpp"

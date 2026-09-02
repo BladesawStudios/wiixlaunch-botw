@@ -323,7 +323,25 @@ inline FnClearDepthStencilEx ClearDepthStencilEx() { return reinterpret_cast<FnC
 
 inline void* AllocMEM1(uint32_t size, uint32_t align = 256) {
 #if WIIXL_CEMU
-    return WiiXLaunch::Backend::AllocCemuHeap(size, align);
+    // Backend::AllocCemuHeap is bounded and can now refuse: the code-cave heap
+    // runs from the end of the payload to 0x02000000, where the game's own code
+    // begins, and it used to hand out pointers past that. Nothing here can
+    // recover from running out, but silence was the worst of the options - a
+    // mod that over-allocates should see it in the log rather than as
+    // corruption somewhere else entirely. Once is enough; DrawMesh retries its
+    // ring buffer every call.
+    void* p = WiiXLaunch::Backend::AllocCemuHeap(size, align);
+    if (!p) {
+        static bool s_loggedOom = false;
+        if (!s_loggedOom) {
+            s_loggedOom = true;
+            BotW::OSLog("WiiXLaunch: payload heap exhausted - %u bytes refused (%u of %u used). "
+                        "Load fewer fonts, or install a game allocator with Backend::SetHeapProvider.\n",
+                        size, static_cast<uint32_t>(WiiXLaunch::Backend::CemuHeapUsed()),
+                        static_cast<uint32_t>(WiiXLaunch::Backend::CemuHeapLimit()));
+        }
+    }
+    return p;
 #elif WIIXL_WIIU
     using FnAllocMEM1 = void* (*)(uint32_t size, uint32_t align);
     auto allocMEM1 = reinterpret_cast<FnAllocMEM1>(0x0309bb68);
@@ -402,6 +420,14 @@ inline void EnsureDepthBuffer(uint32_t width, uint32_t height) {
     CalcSurfaceSizeAndAlignment()(&g_DepthBuffer.surface);
 
     g_DepthBuffer.surface.image = AllocMEM1(g_DepthBuffer.surface.imageSize, g_DepthBuffer.surface.alignment);
+    if (!g_DepthBuffer.surface.image) {
+        // The only allocation here that was never checked. Now that the heap
+        // can refuse, going on would register a depth buffer with a null image.
+        BotW::OSLog("WiiXLaunch: GX2 depth buffer (%ux%u, %u bytes) would not allocate\n",
+                    g_DepthBuffer.surface.width, g_DepthBuffer.surface.height,
+                    g_DepthBuffer.surface.imageSize);
+        return;
+    }
     g_DepthBuffer.viewMip = 0;
     g_DepthBuffer.viewFirstSlice = 0;
     g_DepthBuffer.viewNumSlices = 1;
@@ -847,6 +873,17 @@ inline void Init() {
     BotW::OSLog("WiiXLaunch: GX2::Init() calling Install on 0x03a75d48\n");
     impl::AglCopyToScanBufferHook::Install(0, 0x03a75d48);
     BotW::OSLog("WiiXLaunch: GX2::Init() hook installed successfully\n");
+#if WIIXL_CEMU
+    // The heap this payload has to live in, stated once. It is the tail of our
+    // code cave up to the end of Cemu's code-cave area, and it is small - a
+    // couple of 1024x1024 font sheets and a render target will eat it.
+    // Cemu's OSReport does not understand width specifiers - "%08x" comes out
+    // literally and every argument after it is read against the wrong slot.
+    BotW::OSLog("WiiXLaunch: payload code-cave heap %p..%p, %u KB\n",
+                reinterpret_cast<void*>(WiiXLaunch::Backend::CemuHeapBase()),
+                reinterpret_cast<void*>(WiiXLaunch::Backend::kCemuCodeCaveEnd),
+                static_cast<uint32_t>(WiiXLaunch::Backend::CemuHeapLimit() / 1024));
+#endif
 }
 
 inline void RegisterDrawCallback(DrawCallback cb) {

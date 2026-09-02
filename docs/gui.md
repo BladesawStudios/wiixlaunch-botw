@@ -462,8 +462,49 @@ sink tagged with their offset. The sink captures the first 64 KB (SARC header
 byte ranges: font glyph sheets straight into their GX2 surfaces, each small
 `.bflim` into one 32 KB staging buffer that is uploaded the moment its last
 byte arrives. Everything else streams past. This matters because the Cemu
-payload's entire heap is **6 MB** (`deploy.py` reserves it after the code
-cave) and this module never frees anything.
+payload's heap is small and this module never frees anything.
+
+How small, precisely, because the number that used to be written here was
+wrong. `deploy.py` emits `.origin = codecave + 0x600000` under a comment
+claiming to reserve 6 MB; it reserves nothing. Cemu gives a patch group only
+the bytes it emits - the log line
+`Applying patch group 'BotW_GUITest_V208' (Codecave: 01804600-01846f60)` is
+272 KB, exactly the payload plus its relocation table. The heap then runs off
+the end of that allocation, through whatever is left of Cemu's 4 MB code-cave
+area (`MEMORY_CODECAVEAREA_ADDR` 0x01800000, `..._SIZE` 0x00400000), and into
+the gap after it, which no Cemu region claims. The wall is **0x02000000**,
+`MEMORY_CODEAREA_ADDR`, where the game's own code starts - about 7.9 MB from a
+typical cave base, shared with any other WiiXLaunch payload that is loaded.
+
+**Correction, measured.** The wall is not 0x02000000 but **0x01C00000**, the
+end of Cemu's code-cave AREA. The gap above it is unclaimed by any Cemu region
+and is not mapped: a payload allocating past it dies silently on the first
+write. With one font the heap peaked around 2.4 MB and never reached the
+boundary; loading four walked straight through it, which is what the
+"font-related" crash actually was. Unclaimed address space is not memory.
+`Backend::AllocCemuHeap` enforces 0x01C00000 and returns null past it, and
+`AllocMEM1` logs the first refusal.
+
+That leaves the payload about **3.7 MB**, which four faces plus a vertex ring,
+blur targets and loader scratch do not fit in - measured at 3807/3807 KB with
+External_00 refused.
+
+**The fix is to allocate from the game instead**, and it needs no game-specific
+address. `WiiXLaunch::Mem::UseCoreinitHeap()` (base framework,
+`wiixlaunch/mem.hpp`) reaches `MEMGetBaseHeapHandle` and
+`MEMAllocFromExpHeapEx` through `import.coreinit.<Name>` shims - the same
+mechanism `OSGetTime` and the FS calls already used - takes the MEM2 base heap
+(**~68 MB free on v208**) and installs it with `Backend::SetHeapProvider`. Call
+it from a `GX2::OnInitialized` callback, before anything large is allocated;
+the base heaps do not exist at module entry. With it, all six faces fit and the
+cave stays at ~176 KB.
+
+Two things that do NOT work, both measured rather than assumed: the game's own
+MEM1 wrapper at 0x0309BB68 (`BotW::Heap::UseGameHeap`) returns null, because
+BotW carves MEM1 up during boot and the base heap has nothing left; and
+`MEMAllocFromDefaultHeapEx` cannot be used through a shim at all, being a
+coreinit DATA export - a function pointer - so branching to the symbol would
+jump to the pointer's storage rather than through it.
 
 A frame is capped at 2048 quads (the record) and the vertex ring holds about
 2180 per frame, so the record is what runs out first and it says so in the
