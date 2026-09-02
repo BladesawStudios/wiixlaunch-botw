@@ -564,10 +564,13 @@ public:
     // additively (lyt 1,4,1) and its pane alpha is 128, which is why the real
     // cursor brightens the row instead of drawing a hard bracket over it -
     // the first version used 230 and corners only, and read as a hot outline.
+    // `shimmer` is the cloud drift the game runs through this frame; pass 0
+    // for a static cursor. See Metrics::kCursorShimmer.
     void CursorCorners(const GUI::Rect& r, Color c = Colors::Cream.WithAlpha(128), float size = 48.0f,
-                       const GX2::BlendState& blend = GX2::Blend::Additive) {
+                       const GX2::BlendState& blend = GX2::Blend::Additive,
+                       float shimmer = Metrics::kCursorShimmer) {
         if (!SpriteReady(Sprite::CursorCorner)) { RoundedOutline(r, c); return; }
-        FrameFromCorner(Sprite::CursorCorner, r, size, c, blend);
+        FrameFromCorner(Sprite::CursorCorner, r, size, c, blend, shimmer);
     }
 
     // The thin bracket cursor (Nt_Cursor_00). Like the option cursor this is
@@ -781,6 +784,68 @@ public:
     }
 
     // A plain label row that takes no focus (section headings inside a list).
+    // A list of `count` rows in a box that shows only as many as fit, with the
+    // rest scrolled off. Returns true on the frame a row is activated with A;
+    // `index` is the highlighted row and is updated as focus moves.
+    //
+    // How it fits the focus model: EVERY row claims a focus slot, not just the
+    // visible ones, so the D-pad walks the whole list and the slot indices stay
+    // put as it scrolls. Only the visible window is drawn. Without that, the
+    // focusable count would change while scrolling and focus would jump to a
+    // different item under the cursor.
+    //
+    // The window position is derived from `index` rather than stored, which
+    // keeps the widget immediate-mode with no per-list state to own or reset:
+    // the focused row sits in the middle of the window except at the two ends,
+    // where it clamps.
+    bool List(const GUI::Rect& r, const char* const* items, int count, int& index,
+              float rowHeight = Metrics::kListRowHeight, float rowGap = Metrics::kListRowGap) {
+        if (count <= 0 || rowHeight <= 0.0f) return false;
+        const int base = impl::g_FocusCount;
+        int focusedRow = -1;
+        for (int i = 0; i < count; ++i) {
+            if (ClaimFocus()) focusedRow = i;
+        }
+        if (focusedRow >= 0) index = focusedRow;
+        if (index < 0) index = 0;
+        if (index >= count) index = count - 1;
+        (void)base;
+
+        const float step = rowHeight + rowGap;
+        int visible = static_cast<int>((r.h + rowGap) / step);
+        if (visible < 1) visible = 1;
+        if (visible > count) visible = count;
+        const int maxFirst = count - visible;
+        int first = index - (visible - 1) / 2;
+        if (first > maxFirst) first = maxFirst;
+        if (first < 0) first = 0;
+
+        const bool scrolls = count > visible;
+        const float trackW = Metrics::kListScrollbarWidth;
+        const float rowW = scrolls ? r.w - trackW - Metrics::kListScrollbarGap : r.w;
+
+        for (int i = first; i < first + visible; ++i) {
+            const GUI::Rect row{r.x, r.y + (i - first) * step, rowW, rowHeight};
+            DrawOptionRow(row, i == focusedRow, Colors::OptionBox);
+            TextBox(GUI::Rect{row.x + 16.0f, row.y, row.w - 32.0f, row.h},
+                    items[i], Styles::Option(), false);
+        }
+
+        if (scrolls) {
+            // Track the full height, thumb proportional to the window and
+            // positioned by `first`, so its size says how much is off-screen.
+            const float trackX = r.Right() - trackW;
+            const float trackH = visible * step - rowGap;
+            Rect(GUI::Rect{trackX, r.y, trackW, trackH}, Colors::Dim);
+            const float thumbH = trackH * static_cast<float>(visible) / static_cast<float>(count);
+            const float travel = trackH - thumbH;
+            const float t = maxFirst > 0 ? static_cast<float>(first) / static_cast<float>(maxFirst) : 0.0f;
+            Rect(GUI::Rect{trackX, r.y + travel * t, trackW, thumbH}, Colors::OptionOutline);
+        }
+
+        return focusedRow >= 0 && Accept();
+    }
+
     void Label(const GUI::Rect& r, const char* text, const TextStyle& style = Styles::Option()) {
         TextBox(GUI::Rect{r.x + 16.0f, r.y, r.w - 32.0f, r.h}, text, style, false);
     }
@@ -789,12 +854,19 @@ private:
     // Four copies of a top-left corner sprite at the rect's corners, drawn
     // to the art's own extent (impl::EmitSpriteArt) so they meet the
     // stretched edges exactly.
+    // `shimmer` modulates each corner's brightness by the cloud field at its
+    // centre (see impl::CloudField). One value per corner rather than per
+    // vertex because these go through EmitSpriteArt, which carries the art's
+    // padding insets and takes a single colour.
     void Corners(Sprite s, const GUI::Rect& r, float size, Color c,
-                 const GX2::BlendState& blend = GX2::Blend::Alpha) {
-        impl::EmitSpriteArt(s, GUI::Rect{r.x, r.y, size, size}, c, OrientNone, blend);
-        impl::EmitSpriteArt(s, GUI::Rect{r.Right() - size, r.y, size, size}, c, OrientFlipH, blend);
-        impl::EmitSpriteArt(s, GUI::Rect{r.x, r.Bottom() - size, size, size}, c, OrientFlipV, blend);
-        impl::EmitSpriteArt(s, GUI::Rect{r.Right() - size, r.Bottom() - size, size, size}, c, OrientFlipH | OrientFlipV, blend);
+                 const GX2::BlendState& blend = GX2::Blend::Alpha, float shimmer = 0.0f) {
+        const float h = size * 0.5f;
+        const float lx = r.x + h, rx = r.Right() - h;
+        const float ty = r.y + h, by = r.Bottom() - h;
+        impl::EmitSpriteArt(s, GUI::Rect{r.x, r.y, size, size}, impl::ShimmerAt(c, lx, ty, shimmer), OrientNone, blend);
+        impl::EmitSpriteArt(s, GUI::Rect{r.Right() - size, r.y, size, size}, impl::ShimmerAt(c, rx, ty, shimmer), OrientFlipH, blend);
+        impl::EmitSpriteArt(s, GUI::Rect{r.x, r.Bottom() - size, size, size}, impl::ShimmerAt(c, lx, by, shimmer), OrientFlipV, blend);
+        impl::EmitSpriteArt(s, GUI::Rect{r.Right() - size, r.Bottom() - size, size, size}, impl::ShimmerAt(c, rx, by, shimmer), OrientFlipH | OrientFlipV, blend);
     }
 
     // Corners plus edges stretched from the corner texture's last column /
@@ -803,8 +875,8 @@ private:
     // only value that neither bleeds into its neighbour nor runs off the edge
     // whatever the texture's size.
     void FrameFromCorner(Sprite s, const GUI::Rect& r, float corner, Color c,
-                         const GX2::BlendState& blend = GX2::Blend::Alpha) {
-        Corners(s, r, corner, c, blend);
+                         const GX2::BlendState& blend = GX2::Blend::Alpha, float shimmer = 0.0f) {
+        Corners(s, r, corner, c, blend, shimmer);
         const GX2::TextureHandle tex = impl::SpriteTexture(s);
         const float eu = impl::EdgeU(s);
         const float ev = impl::EdgeV(s);
@@ -815,13 +887,31 @@ private:
         // right edges repeat its inner row. Spanning a range to 1.0 instead
         // fades the edge out along its own length wherever the art stops
         // short of the tile.
+        // The edges take the field at BOTH ends and let the hardware
+        // interpolate between them, so the shimmer runs along an edge
+        // continuously instead of stepping from piece to piece.
+        const float half = corner * 0.5f;
         if (midW > 0.0f) {
-            impl::EmitQuad(tex, GUI::Rect{r.x + corner, r.y, midW, corner}, eu, 0.0f, eu, 1.0f, c, OrientNone, blend);
-            impl::EmitQuad(tex, GUI::Rect{r.x + corner, r.Bottom() - corner, midW, corner}, eu, 0.0f, eu, 1.0f, c, OrientFlipV, blend);
+            const float x0 = r.x + corner, x1 = r.Right() - corner;
+            const Color tl = impl::ShimmerAt(c, x0, r.y + half, shimmer);
+            const Color tr = impl::ShimmerAt(c, x1, r.y + half, shimmer);
+            const Color bl = impl::ShimmerAt(c, x0, r.Bottom() - half, shimmer);
+            const Color br = impl::ShimmerAt(c, x1, r.Bottom() - half, shimmer);
+            impl::EmitQuad(tex, r.x + corner, r.y, r.Right() - corner, r.y + corner,
+                           eu, 0.0f, eu, 1.0f, tl, tr, tl, tr, OrientNone, blend);
+            impl::EmitQuad(tex, r.x + corner, r.Bottom() - corner, r.Right() - corner, r.Bottom(),
+                           eu, 0.0f, eu, 1.0f, bl, br, bl, br, OrientFlipV, blend);
         }
         if (midH > 0.0f) {
-            impl::EmitQuad(tex, GUI::Rect{r.x, r.y + corner, corner, midH}, 0.0f, ev, 1.0f, ev, c, OrientNone, blend);
-            impl::EmitQuad(tex, GUI::Rect{r.Right() - corner, r.y + corner, corner, midH}, 0.0f, ev, 1.0f, ev, c, OrientFlipH, blend);
+            const float y0 = r.y + corner, y1 = r.Bottom() - corner;
+            const Color lt = impl::ShimmerAt(c, r.x + half, y0, shimmer);
+            const Color lb = impl::ShimmerAt(c, r.x + half, y1, shimmer);
+            const Color rt = impl::ShimmerAt(c, r.Right() - half, y0, shimmer);
+            const Color rb = impl::ShimmerAt(c, r.Right() - half, y1, shimmer);
+            impl::EmitQuad(tex, r.x, r.y + corner, r.x + corner, r.Bottom() - corner,
+                           0.0f, ev, 1.0f, ev, lt, lt, lb, lb, OrientNone, blend);
+            impl::EmitQuad(tex, r.Right() - corner, r.y + corner, r.Right(), r.Bottom() - corner,
+                           0.0f, ev, 1.0f, ev, rt, rt, rb, rb, OrientFlipH, blend);
         }
     }
 
@@ -1175,7 +1265,7 @@ public:
     void RoundedOutline(const GUI::Rect&, Color, float = Metrics::kRoundedCorner, float = 0.0f) {}
     void SelectFrame(const GUI::Rect&, Color = Colors::SelectFrame, Color = Colors::SelectGlow) {}
     void CursorCorners(const GUI::Rect&, Color = Colors::Cream, float = 48.0f,
-                       const GX2::BlendState& = GX2::Blend::Alpha) {}
+                       const GX2::BlendState& = GX2::Blend::Alpha, float = 0.0f) {}
     // (stub Canvas::Image carries the rotation parameter too, below)
     void CursorBrackets(const GUI::Rect&, Color = Colors::White, float = 64.0f) {}
     void BoxedCursor(const GUI::Rect&, Color = Colors::White) {}
@@ -1187,6 +1277,7 @@ public:
     bool Toggle(const GUI::Rect&, const char*, bool&, const char* = "ON", const char* = "OFF") { return false; }
     bool Slider(const GUI::Rect&, const char*, float&, float, float, float, const char* = nullptr) { return false; }
     bool Selector(const GUI::Rect&, const char*, int&, const char* const*, int) { return false; }
+    bool List(const GUI::Rect&, const char* const*, int, int&, float = 40.0f, float = 2.0f) { return false; }
     void Label(const GUI::Rect&, const char*, const TextStyle& = Styles::Option()) {}
 };
 

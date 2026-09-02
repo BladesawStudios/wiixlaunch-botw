@@ -307,6 +307,16 @@ namespace Metrics {
     constexpr float kOptionCursorMargin = 28.0f;
     // PaBoxedCursor_00: arrows 75x75 at 0.21 (~16 px) 64 px out from the centre.
     constexpr float kBoxedCursorArrow = 75.0f * 0.21f;
+    // How far the option cursor's shimmer swings either side of its base
+    // brightness (0 = static). The game's cloud is stronger than this, but it
+    // is masked per-texel where ours is per-vertex, so a softer swing reads
+    // closer than matching its amplitude would.
+    constexpr float kCursorShimmer = 0.45f;
+    // Scrolling list: row pitch and the track down its right edge.
+    constexpr float kListRowHeight = 40.0f;
+    constexpr float kListRowGap = 2.0f;
+    constexpr float kListScrollbarWidth = 6.0f;
+    constexpr float kListScrollbarGap = 8.0f;
     // BtnDialog_00: 560x240 plate with 96 px corners, 530x186 select frame with 68 px corners.
     constexpr float kPlateCorner = 96.0f;
     constexpr float kSelectFrameCorner = 68.0f;

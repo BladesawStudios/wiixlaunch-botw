@@ -111,6 +111,7 @@ game's layouts; `GUI::Colors::` and `GUI::Metrics::` likewise. `Canvas` has:
 | `BoxedCursor(rect)` | `PaBoxedCursor_00`: `Nt_ArrowS_02^s` triangles at 0.21 scale, rotated 45 degrees off vertical so they point diagonally outward, 3 px out from each corner. |
 | `ButtonIcon` / `KeyHint` | `Nt_KeyTexA/B/X/Y/L/ZL_00^d`. The glyph fills its 48 px tile, so the icon size is the drawn size (32 px by default); `KeyHint` sets the label at about two thirds of that, centres it on the icon and returns the width it used, so a row of hints places itself. |
 | `Button` / `Toggle` / `Slider` / `Selector` | Option-row style: the three `PaOptionBtn_00` pieces above plus `T_Text_00` NormalS (19.2, 25.5) white. |
+| `List(rect, items, count, index)` | The same option-row style, for more rows than the box can show. EVERY row claims a focus slot, not just the visible ones, so the D-pad walks the whole list and the slot indices stay put while it scrolls - claiming only the visible ones would change the focusable count mid-scroll and move focus to a different item. The window position is derived from `index` rather than stored, keeping the widget stateless: the focused row sits mid-window except at the ends, where it clamps. A track appears on the right only when the list actually scrolls, its thumb sized by the visible fraction. Returns true on the frame a row is activated with A. Windowing checked exhaustively over 15,930 count/height/index combinations: the focused row is never off-screen, the window never leaves range, and it never draws past the end. |
 
 ### Blending
 
@@ -663,17 +664,42 @@ wnd1 W_SelectFrame_01 size=530x186 frameSize=68 tex=SelectFrame_04^t
   shadow; the plate's fill comes from a projected inner texture combined in
   the material's TEV stages. The GUI draws a flat rounded fill under the rim
   9-slice instead. Right shape and colours, not the exact shading.
-* **Cursor shimmer.** `Window_00`'s additive cloud texture (`Kumo64_00^r`)
-  and the various glow animations are not reproduced; the cursor is static
-  cream.
+* **Cursor shimmer.** `Window_00` scrolls `Kumo64_00^r` - a 64x64 BC4
+  luminance cloud, near-seamless (opposite edges differ by 6/255) - through
+  the option cursor's material to make it drift. `CursorCorners` reproduces
+  the MOTION but not the mechanism: `impl::CloudField` evaluates two drifting
+  sine octaves per vertex and modulates the frame's own colour, rather than
+  drawing the cloud as a second pass.
+
+  That choice is forced, not lazy. The renderer draws one texture per quad and
+  cannot mask one texture by another; the game confines its cloud with the
+  frame art's alpha in a TEV stage. As a separate additive pass the cloud would
+  show as a square patch at each 48x48 corner, which is worse than no shimmer
+  at all. Modulating the frame's colour is masked exactly by the art, needs no
+  second texture and adds no draw calls. The texture itself loads fine at 4 KB
+  and is available if the renderer ever gains a second sampler.
+
+  Measured over 60 s on a 460x40 row: brightness swings 0.55x to 1.44x around
+  unchanged, moves at most 0.5% of that swing per frame at 60fps (so it drifts
+  rather than flickers), and differs by up to 0.81 between an edge's two ends,
+  which is what makes it travel instead of pulsing as one. Corner and edge
+  sample points sit 24 px apart, so the pieces stay continuous.
+  `Metrics::kCursorShimmer` sets the amplitude; `CursorCorners(..., 0.0f)`
+  turns it off. The other glow animations are still not reproduced.
 * **Alpha test.** A few materials (the selection frame among them) enable
   lyt's alpha compare. Everything here is blended instead, which for UI art
   with soft edges is what you want anyway.
 * **Per-material separate alpha blending.** A handful of layouts carry a
   separate alpha blend block; the GUI always uses `ONE, INV_SRC_ALPHA` for
   alpha, which is right for every colour mode it exposes.
-* **Sprite size cap.** Textures over 32 KB are skipped by the loader (none of
-  the ones in the table are).
+* **Sprite size cap.** The staging buffer is now sized to the largest texture
+  the sprite table actually asks for, allocated once the SARC node table has
+  been read and the sizes are known. `kSpriteStagingLimit` (1 MB) is a ceiling
+  on any single `.bflim`, not a budget. The old flat 32 KB buffer skipped 179
+  of the layout archive's 917 textures - everything from
+  `Nt_DialogWindowBase_00^t` (393 KB) up - so adding larger art to the table
+  no longer means raising a constant. Nothing currently in the table is near
+  either figure, so the memory cost is unchanged.
 
 ## Runtime status
 

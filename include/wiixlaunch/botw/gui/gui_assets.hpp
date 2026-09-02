@@ -48,7 +48,12 @@ namespace WiiXLaunch::BotW::GUI::impl {
 
 constexpr uint32_t kChunkBytes = 64 * 1024;
 constexpr uint32_t kHeadBytes = 64 * 1024;          // SARC header + node table capture
-constexpr uint32_t kSpriteStagingBytes = 32 * 1024; // largest .bflim accepted
+// Ceiling on a single .bflim, not a budget: the staging buffer is allocated
+// once, sized to the largest file the sprite table actually asks for. It used
+// to be a flat 32 KB, which skipped 179 of the layout archive's 917 textures -
+// everything from the dialogue window base (393 KB) upward. Nothing in the
+// table is near this, so the cost is unchanged until a bigger sprite is added.
+constexpr uint32_t kSpriteStagingLimit = 1024 * 1024;
 constexpr uint32_t kFontHeaderBytes = 0x2000;       // the game's fonts start sheet data at 0x2000
 constexpr uint32_t kDefaultChunksPerStep = 4;
 
@@ -104,7 +109,8 @@ struct LoaderState {
     FontLoad fonts[static_cast<size_t>(FontId::Count)];
 
     RangeTarget spriteRanges[static_cast<size_t>(Sprite::Count)];
-    uint8_t* staging = nullptr;     // kSpriteStagingBytes
+    uint8_t* staging = nullptr;     // sized to the largest wanted sprite
+    uint32_t stagingBytes = 0;
     int32_t stagingSprite = -1;
     uint32_t spritesWanted = 0;
     uint32_t spritesLoaded = 0;
@@ -169,10 +175,11 @@ inline bool TryResolveRanges() {
             if (!path || !path[0]) continue;
             uint32_t off = 0, size = 0;
             if (SARC::Find(L.head, L.headFilled, L.sarc, path, off, size)) {
-                if (size > kSpriteStagingBytes) {
-                    OSLog("WiiXLaunch GUI: '%s' is %u bytes, over the %u staging limit - skipped\n", path, size, kSpriteStagingBytes);
+                if (size > kSpriteStagingLimit) {
+                    OSLog("WiiXLaunch GUI: '%s' is %u bytes, over the %u single-file limit - skipped\n", path, size, kSpriteStagingLimit);
                     continue;
                 }
+                if (size > L.stagingBytes) L.stagingBytes = size;
                 L.spriteRanges[i].offset = off;
                 L.spriteRanges[i].size = size;
                 L.spriteRanges[i].wanted = true;
@@ -180,6 +187,15 @@ inline bool TryResolveRanges() {
             } else {
                 OSLog("WiiXLaunch GUI: '%s' not in archive\n", path);
             }
+        }
+    }
+    // Now that every wanted file's size is known, the staging buffer can be
+    // exactly big enough. Deliberately after the loop: before it, nothing knows
+    // how large the biggest sprite is.
+    if (L.phase != LoadPhase::FontStream && L.stagingBytes > 0 && !L.staging) {
+        L.staging = reinterpret_cast<uint8_t*>(GX2::AllocMEM1(L.stagingBytes, 64));
+        if (!L.staging) {
+            OSLog("WiiXLaunch GUI: sprite staging buffer of %u bytes would not allocate\n", L.stagingBytes);
         }
     }
     L.rangesResolved = true;
@@ -223,6 +239,7 @@ inline void SinkSprites(uint32_t offset, const uint8_t* data, uint32_t length) {
         RangeTarget& r = L.spriteRanges[i];
         if (!r.wanted || r.done) continue;
         if (runEnd <= r.offset || offset >= r.offset + r.size) continue;
+        if (!L.staging) continue;
         if (L.stagingSprite != static_cast<int32_t>(i)) {
             if (L.stagingSprite >= 0) {
                 // Two files interleaved in one run cannot happen (ranges are
@@ -362,12 +379,11 @@ inline bool LoaderAllocScratch() {
     LoaderState& L = g_Loader;
     if (!L.chunk) L.chunk = reinterpret_cast<uint8_t*>(GX2::AllocMEM1(kChunkBytes, 64));
     if (!L.head) L.head = reinterpret_cast<uint8_t*>(GX2::AllocMEM1(kHeadBytes, 64));
-    if (!L.staging) L.staging = reinterpret_cast<uint8_t*>(GX2::AllocMEM1(kSpriteStagingBytes, 64));
     for (size_t i = 0; i < static_cast<size_t>(FontId::Count); ++i) {
         if (!L.fonts[i].header) L.fonts[i].header = reinterpret_cast<uint8_t*>(GX2::AllocMEM1(kFontHeaderBytes, 64));
         if (!L.fonts[i].header) return false;
     }
-    return L.chunk && L.head && L.staging;
+    return L.chunk && L.head;      // staging comes later, once its size is known
 }
 
 inline void BeginStream(uint32_t start, uint32_t end) {

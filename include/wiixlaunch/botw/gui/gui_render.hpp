@@ -429,6 +429,36 @@ inline float Wave(float period) {
     return 0.5f - 0.5f * c;
 }
 
+// A stand-in for Kumo64_00^r, the 64x64 cloud the game scrolls through the
+// option cursor's material (PaOptionBtn_00 Window_00) to make it shimmer.
+// Returns 0..1, mean 0.5, drifting slowly in both space and time.
+//
+// Why not the real texture: it is only 4 KB and loads fine, but this renderer
+// draws ONE texture per quad and cannot mask one by another. The game's cloud
+// is confined to the cursor by the frame art's own alpha in a TEV stage; as a
+// separate additive pass here it would show as a square patch at each corner,
+// which is worse than no shimmer. Evaluating the same low-frequency drift per
+// vertex instead modulates the frame's own colour, so it is masked exactly by
+// the art, costs no second texture, and adds no draw calls.
+//
+// Two octaves at different speeds and directions, off Phase so they stay exact
+// however long the game has been running.
+inline float CloudField(float x, float y) {
+    float s1 = 0.0f, c1 = 0.0f, s2 = 0.0f, c2 = 0.0f;
+    SinCosDeg(x * 0.55f + y * 0.35f + Phase(7.7f) * 360.0f, s1, c1);
+    SinCosDeg(x * -0.31f + y * 0.78f - Phase(11.3f) * 360.0f, s2, c2);
+    return 0.5f + 0.25f * s1 + 0.25f * s2;
+}
+
+// `base` brightened or dimmed by the field at a point. Additive blending is
+// (SRC_ALPHA, ONE), so scaling alpha scales how much light the quad adds.
+// amount 0 disables it; the mean is 1.0, so the average brightness is
+// unchanged and only the variation is new.
+inline Color ShimmerAt(Color base, float x, float y, float amount) {
+    if (amount <= 0.0f) return base;
+    return base.Scaled(1.0f - amount + 2.0f * amount * CloudField(x, y));
+}
+
 // The primitive: a textured quad covering [x0,x1) x [y0,y1) layout pixels,
 // sampling the texture rectangle (u0,v0)-(u1,v1) (v0 = top), per-corner
 // colours (TL, TR, BL, BR), optionally flipped/quarter-turned (orient) and
