@@ -335,6 +335,17 @@ inline float EdgeV(Sprite s) {
     return info.height ? 1.0f - 0.5f / static_cast<float>(info.height) : 1.0f;
 }
 
+// Like EmitSprite, but stopping at the innermost texel the artwork covers
+// instead of the texture's geometric edge - the same coordinate the stretched
+// edges repeat. Frame corners must use this: where a sprite's art stops short
+// of its tile (the selection frame stops one texel short), drawing the corner
+// out to 1.0 leaves a transparent sliver exactly where the stretched edge
+// begins, and that sliver is a visible line down every join.
+inline void EmitSpriteArt(Sprite s, const Rect& r, Color c, uint8_t orient = OrientNone,
+                          const GX2::BlendState& blend = GX2::Blend::Alpha) {
+    EmitQuad(SpriteTexture(s), r, 0.0f, 0.0f, EdgeU(s), EdgeV(s), c, orient, blend);
+}
+
 // A flat rectangle: the white sprite tinted.
 inline void EmitRect(const Rect& r, Color c, const GX2::BlendState& blend = GX2::Blend::Alpha) {
     EmitQuad(SpriteTexture(Sprite::White), r, 0.25f, 0.25f, 0.75f, 0.75f, c, OrientNone, blend);

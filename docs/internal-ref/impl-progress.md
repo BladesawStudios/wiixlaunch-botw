@@ -111,6 +111,12 @@
 - ~~plate corner keeps the layout's 96/240 proportion instead of the largest that fits~~ (gui.hpp)
 - ~~NormalS_00 (outlined face) dropped: not loaded, styles use Normal, FontId::NormalSmall falls back~~ (gui_types.hpp, gui_render.hpp, gui_text.hpp)
 - ~~MessageBox auto-shrinks past the box's three lines (Canvas::FitToBox)~~ (gui.hpp, gui_text.hpp)
+- ~~texture sampler CLAMP constant was 0 = WRAP (GX2 clamp is 2), so every quad edge wrapped into the art's transparent padding - the pale outline around every element~~ (gx2_shader_types.hpp; also fixes GX2::CreateTexture for existing mods)
+- ~~plate base fills exactly the visible plate (growing it past the soft rim read as a doubled outline); KeyHint proportions + returns its width~~ (gui.hpp)
+- ~~frame corners drawn to the art's extent (0..EdgeU/V), not the tile's - the leftover sliver was a line down every join on art that stops short (select frame)~~ (gui.hpp, gui_render.hpp)
+- ~~plate surface radius is the rim's real curve (42/96 of the tile, measured), not 16/96 - square-cornered fill inside a rounded rim~~ (gui.hpp)
+- ~~select frame corner keeps the layout's 68/186 proportion~~ (gui.hpp)
+- ~~dropped the black blob behind the dialogue speaker name (DialogShadow_00 is a radial QUADRANT, not a blob)~~ (gui.hpp)
 - input capture (stop the game seeing menu input) - not implemented
 - framebuffer blur behind windows (the game's FBLayout capture) - not reproduced, the biggest remaining visual gap
 - exact plate shading (BtnBasic inner texture via TEV) - approximated

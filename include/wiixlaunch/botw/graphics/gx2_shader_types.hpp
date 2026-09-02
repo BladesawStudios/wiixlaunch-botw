@@ -354,7 +354,17 @@ constexpr uint32_t kTileModeTiled1DThin1 = 2;
 constexpr uint32_t kTileModeTiled2DThin1 = 4;
 constexpr uint32_t kScanTargetTv = 1;
 constexpr uint32_t kLogicOpCopy = 0xCC;
-constexpr uint32_t kTexClampModeClamp = 0;
+// GX2TexClampMode. CLAMP is 2, NOT 0 - 0 is WRAP (checked against
+// vendor/wut/include/gx2/enum.h). This was 0 for a long time, so every
+// texture sampled with wrap addressing: at a quad's edge the sampler reached
+// past the last texel and came back around to the FIRST one, which for the
+// game's corner art is its transparent padding. The result was a pale seam
+// along every corner-to-edge join in every frame - visible as an outline
+// around each element once the UI was run at 1440p.
+constexpr uint32_t kTexClampModeWrap = 0;
+constexpr uint32_t kTexClampModeMirror = 1;
+constexpr uint32_t kTexClampModeClamp = 2;
+constexpr uint32_t kTexXYFilterModePoint = 0;
 constexpr uint32_t kTexXYFilterModeLinear = 1;
 constexpr uint32_t kClearFlagsDepth = 1;
 

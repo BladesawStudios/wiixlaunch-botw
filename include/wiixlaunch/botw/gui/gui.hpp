@@ -298,12 +298,13 @@ public:
     void MessageWindow(const GUI::Rect& r, Color color = Colors::MessageWindow, bool decorations = true) {
         const float capW = Metrics::kMessageCapWidth * (r.h / Metrics::kMessageCapHeight);
         if (SpriteReady(Sprite::MsgWindowCap) && r.w >= capW * 2.0f) {
-            impl::EmitQuad(impl::SpriteTexture(Sprite::MsgWindowCap), GUI::Rect{r.x, r.y, capW, r.h}, 0.0f, 0.0f, 1.0f, 1.0f, color);
-            const float capEdge = impl::EdgeU(Sprite::MsgWindowCap);
+            const float capU = impl::EdgeU(Sprite::MsgWindowCap);
+            const float capV = impl::EdgeV(Sprite::MsgWindowCap);
+            impl::EmitQuad(impl::SpriteTexture(Sprite::MsgWindowCap), GUI::Rect{r.x, r.y, capW, r.h}, 0.0f, 0.0f, capU, capV, color);
             impl::EmitQuad(impl::SpriteTexture(Sprite::MsgWindowCap), GUI::Rect{r.x + capW, r.y, r.w - 2.0f * capW, r.h},
-                           capEdge, 0.0f, capEdge, 1.0f, color);
+                           capU, 0.0f, capU, capV, color);
             impl::EmitQuad(impl::SpriteTexture(Sprite::MsgWindowCap), GUI::Rect{r.Right() - capW, r.y, capW, r.h},
-                           0.0f, 0.0f, 1.0f, 1.0f, color, OrientFlipH);
+                           0.0f, 0.0f, capU, capV, color, OrientFlipH);
         } else {
             RoundedBox(r, color, r.h * 0.5f);
         }
@@ -342,10 +343,12 @@ public:
                                 Metrics::kMessageTextWidth, Metrics::kMessageTextHeight};
         TextBox(textBox, text, FitToBox(text, Styles::Message().Alpha(alpha), textBox.w), true);
         if (name && name[0]) {
-            // P_Sh_00: a 210x40 soft shadow behind the name (the game blurs the
-            // framebuffer there; the shadow sprite stands in for it).
-            Image(Sprite::Shadow, GUI::Rect{Metrics::kMessageNameX - 30.0f, Metrics::kMessageNameCenterY - 26.0f, 240.0f, 52.0f},
-                  Color{0, 0, 0, 110}.Scaled(alpha));
+            // The game backs the name with P_Sh_00, which is a BLURRED CAPTURE
+            // of the framebuffer (FBLayout_00^r) at alpha 180 - not a shadow
+            // sprite. There is no blur here, and the stand-in that was used
+            // instead (DialogShadow_00, which is one quarter of a radial
+            // gradient and so drew as a hard dark box) looked far worse than
+            // nothing. The name's own hard black text shadow carries it.
             TextBox(GUI::Rect{Metrics::kMessageNameX, Metrics::kMessageNameCenterY - 13.0f, 176.0f, 26.0f}, name,
                     Styles::Name().Alpha(alpha), false);
         }
@@ -397,7 +400,14 @@ public:
     // rounded stroke corners with its edges stretched between them, and the
     // Sheikah-blue glow under it (BtnDialog_00 W_SelectFrame_00/01).
     void SelectFrame(const GUI::Rect& r, Color frame = Colors::SelectFrame, Color glow = Colors::SelectGlow) {
-        float corner = Metrics::kSelectFrameCorner;
+        // BtnDialog_00's frame is 68 px on a 530x186 window, so the corner is
+        // about 0.37 of the height. Taking the largest corner that fits
+        // instead makes the stroke far heavier than the game's and, since the
+        // top and bottom bands are each a corner tall, fills the middle with
+        // glow.
+        constexpr float kCornerOfHeight = 68.0f / 186.0f;
+        float corner = kCornerOfHeight * r.h;
+        if (corner > Metrics::kSelectFrameCorner) corner = Metrics::kSelectFrameCorner;
         const float maxCorner = (r.w < r.h ? r.w : r.h) * 0.5f;
         if (corner > maxCorner) corner = maxCorner;
         if (glow.a && SpriteReady(Sprite::SelectFrameGlow)) {
@@ -470,7 +480,13 @@ public:
         }
         // Art padding as fractions of the 96px tile (measured, see docs/gui.md).
         constexpr float kPadL = 36.0f / 96.0f, kPadT = 40.0f / 96.0f, kPadB = 24.0f / 96.0f;
-        constexpr float kSurfaceRadius = 16.0f / 96.0f;
+        // The rim's own corner curve, measured off the art: the plate's edge
+        // settles at x=36 / y=39 of the 96px tile and the arc reaches that
+        // straight run at about 80, so the visible corner radius is ~42/96 -
+        // not the 16/96 first assumed, which gave the fill much tighter
+        // corners than the rim around it and read as a square-cornered box
+        // inside a rounded one.
+        constexpr float kSurfaceRadius = 42.0f / 96.0f;
         // Corner size keeps BtnDialog_00's proportion rather than being made
         // as large as fits: its plate is a 560x240 window with a 96px frame,
         // so the corner is 0.4 of the window's height. Solving that for a
@@ -489,11 +505,10 @@ public:
             NineSlice(Sprite::PlateShadowTop, Sprite::PlateShadowBottom,
                       GUI::Rect{win.x, win.y + 4.0f, win.w, win.h}, corner, Colors::Black.WithAlpha(150));
         }
-        // The base is a CornerR3 frame, whose art is inset a quarter of its
-        // radius; grow it by that much so its edge meets the rim exactly and
-        // no shadow shows through the join.
-        const float baseRadius = kSurfaceRadius * corner;
-        RoundedBox(r.Inset(-baseRadius * 0.25f, -baseRadius * 0.25f), fill, baseRadius);
+        // The base fills exactly the visible plate. It must not be grown
+        // past it: the rim's own edge is soft, so a hard fill poking out
+        // beyond it reads as a second, doubled outline.
+        RoundedBox(r, fill, kSurfaceRadius * corner);
         NineSlice(Sprite::PlateTop, Sprite::PlateBottom, win, corner, Colors::White);
     }
 
@@ -521,14 +536,28 @@ public:
         return s;
     }
 
-    // A controller button glyph (Nt_KeyTexA_00 etc.), 48 px in the game.
-    void ButtonIcon(Sprite key, float x, float y, float size = 48.0f, Color c = Colors::White) {
+    // A controller button glyph (Nt_KeyTexA_00 etc.). The art is a 48 px
+    // tile and the glyph fills it, so this is the drawn size.
+    void ButtonIcon(Sprite key, float x, float y, float size = 32.0f, Color c = Colors::White) {
         Image(key, GUI::Rect{x, y, size, size}, c);
     }
-    // Icon plus a small label to its right, the way the game's key guides read.
-    void KeyHint(Sprite key, const char* label, float x, float y, Color c = Colors::White) {
-        ButtonIcon(key, x, y, 36.0f, c);
-        TextBox(GUI::Rect{x + 42.0f, y, 400.0f, 36.0f}, label, Styles::Small().WithSize(19.2f, 22.0f).WithColor(c), false);
+    // Icon plus its label, laid out the way the game's key guides read: the
+    // label is set at about two thirds of the icon's height and centred on
+    // it, and (x, y) is the guide's top-left. Returns the width used, so
+    // several can be placed in a row without measuring by hand.
+    float KeyHint(Sprite key, const char* label, float x, float y, Color c = Colors::White,
+                  float iconSize = 32.0f) {
+        ButtonIcon(key, x, y, iconSize, c);
+        const float textY = iconSize * 0.68f;
+        TextStyle st = Styles::Small().WithColor(c);
+        st.sizeY = textY;
+        st.sizeX = textY * (31.0f / 39.0f);   // Normal's own cell ratio
+        st.valign = VAlign::Middle;
+        const float gap = iconSize * 0.2f;
+        float w = 0.0f, h = 0.0f;
+        MeasureText(label, st, w, h);
+        TextBox(GUI::Rect{x + iconSize + gap, y, w + 4.0f, iconSize}, label, st, false);
+        return iconSize + gap + w;
     }
 
     // ---- widgets ----------------------------------------------------------
@@ -615,13 +644,15 @@ public:
     }
 
 private:
-    // Four copies of a top-left corner sprite at the rect's corners.
+    // Four copies of a top-left corner sprite at the rect's corners, drawn
+    // to the art's own extent (impl::EmitSpriteArt) so they meet the
+    // stretched edges exactly.
     void Corners(Sprite s, const GUI::Rect& r, float size, Color c,
                  const GX2::BlendState& blend = GX2::Blend::Alpha) {
-        Image(s, GUI::Rect{r.x, r.y, size, size}, c, OrientNone, blend);
-        Image(s, GUI::Rect{r.Right() - size, r.y, size, size}, c, OrientFlipH, blend);
-        Image(s, GUI::Rect{r.x, r.Bottom() - size, size, size}, c, OrientFlipV, blend);
-        Image(s, GUI::Rect{r.Right() - size, r.Bottom() - size, size, size}, c, OrientFlipH | OrientFlipV, blend);
+        impl::EmitSpriteArt(s, GUI::Rect{r.x, r.y, size, size}, c, OrientNone, blend);
+        impl::EmitSpriteArt(s, GUI::Rect{r.Right() - size, r.y, size, size}, c, OrientFlipH, blend);
+        impl::EmitSpriteArt(s, GUI::Rect{r.x, r.Bottom() - size, size, size}, c, OrientFlipV, blend);
+        impl::EmitSpriteArt(s, GUI::Rect{r.Right() - size, r.Bottom() - size, size, size}, c, OrientFlipH | OrientFlipV, blend);
     }
 
     // Corners plus edges stretched from the corner texture's last column /
@@ -898,8 +929,8 @@ public:
     void CursorBrackets(const GUI::Rect&, Color = Colors::White, float = 64.0f) {}
     void BoxedCursor(const GUI::Rect&, Color = Colors::White) {}
     void Plate(const GUI::Rect&, Color = Colors::Plate) {}
-    void ButtonIcon(Sprite, float, float, float = 48.0f, Color = Colors::White) {}
-    void KeyHint(Sprite, const char*, float, float, Color = Colors::White) {}
+    void ButtonIcon(Sprite, float, float, float = 32.0f, Color = Colors::White) {}
+    float KeyHint(Sprite, const char*, float, float, Color = Colors::White, float = 32.0f) { return 0.0f; }
     bool Button(const GUI::Rect&, const char*, Color = Colors::OptionBox) { return false; }
     bool PlateButton(const GUI::Rect&, const char*) { return false; }
     bool Toggle(const GUI::Rect&, const char*, bool&, const char* = "ON", const char* = "OFF") { return false; }

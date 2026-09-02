@@ -89,11 +89,11 @@ game's layouts; `GUI::Colors::` and `GUI::Metrics::` likewise. `Canvas` has:
 | `RoundedBox(rect, color, 8)` | `PaOptionBtn_00` `W_Base_00`: an 8 px window frame from `CornerR3_00^s` (corners + stretched edges) with a filled centre, black alpha 200. |
 | `RoundedOutline(rect, color, 8)` | `PaOptionBtn_00` `W_BaseLine_02`: the same frame construction from `CornerLineR2_00^s`, cream `(255,252,198)`; rests at alpha 8 in the layout and is animated up on select. |
 | `CursorCorners(rect)` | `PaOptionBtn_00` `Window_00`: `Nt_CursorS_00^s` as a 48 px frame (corners + stretched edges) on a box 28 px larger than the row, cream at alpha 128, additive (the game adds an animated cloud texture through it). |
-| `SelectFrame(rect)` | `BtnDialog_00` `W_SelectFrame_00/01`: `SelectFrame_04^t` 68 px corners with stretched edges, `SelectFrameGlow_00^s` under it in `(0,193,242)` alpha 102. |
+| `SelectFrame(rect)` | `BtnDialog_00` `W_SelectFrame_00/01`: `SelectFrame_04^t` with stretched edges, `SelectFrameGlow_00^s` under it in `(0,193,242)` alpha 102. The corner keeps the layout's proportion (68 px on a 186 px window, ~0.37 of the height); sizing it to fit made the stroke heavy and, since the top and bottom bands are each a corner tall, filled the middle with glow. |
 | `Plate(rect)` / `PlateButton` | `BtnDialog_00` `W_Pict_00`: a nine-slice of `BtnBasic_08T^t` / `08B^t` over the `08TS`/`08BS` shadow with an opaque fill beneath, `T_BtnDialog` Normal 1:1 in `(40,40,40)`. The corner keeps the layout's proportion (96 px on a 240 px window, so about 0.55 of the button's height) rather than being made as large as fits, which turned small buttons into fat pills. **Approximate** - see below. |
 | `CursorBrackets(rect)` | `Nt_Cursor_00^t` 64 px bracket corners (the inventory cursor). |
 | `BoxedCursor(rect)` | `PaBoxedCursor_00`: `Nt_ArrowS_02^s` triangles at 0.21 scale, rotated 45 degrees off vertical so they point diagonally outward, 3 px out from each corner. |
-| `ButtonIcon` / `KeyHint` | `Nt_KeyTexA/B/X/Y/L/ZL_00^d`, 48 px. |
+| `ButtonIcon` / `KeyHint` | `Nt_KeyTexA/B/X/Y/L/ZL_00^d`. The glyph fills its 48 px tile, so the icon size is the drawn size (32 px by default); `KeyHint` sets the label at about two thirds of that, centres it on the icon and returns the width it used, so a row of hints places itself. |
 | `Button` / `Toggle` / `Slider` / `Selector` | Option-row style: the three `PaOptionBtn_00` pieces above plus `T_Text_00` NormalS (19.2, 25.5) white. |
 
 ### Blending
@@ -218,6 +218,22 @@ where the shape is solid it ranges 0-216 with a median of 55 - so routing it
 into RGB painted the frame black-through-white instead of tinting it. Those
 sprites take `kCompMapShapeFromG` (RGB = 1, alpha = green) and let the vertex
 colour supply the colour.
+
+**A frame corner must be drawn to the artwork's extent, not the tile's.**
+`Canvas::Corners` samples `0..EdgeU/EdgeV` rather than `0..1`, for the same
+reason the edges repeat that texel: where the art stops short of its tile,
+drawing the corner all the way out leaves a transparent sliver exactly where
+the stretched edge begins, and that sliver is a line down every join. The
+selection frame stops one texel short, so it showed the seam even after the
+sampler was fixed.
+
+**The sampler must clamp, and GX2's CLAMP is 2.** `GX2TexClampMode` numbers
+WRAP as 0, MIRROR 1, CLAMP 2, so a constant of 0 named "clamp" - which is
+what `gx2_shader_types.hpp` had - makes every texture wrap. At a quad's edge
+the sampler then reaches past the last texel and comes back to the FIRST one,
+which for the game's corner art is its transparent padding, so every
+corner-to-edge join in every frame carried a pale seam. That is what an
+element's "outline" was at 1440p; the fix is the single constant.
 
 **Padding is part of the art, and lyt applies it uniformly.** `CornerR3_00`
 is an 8x8 tile whose quarter disc occupies only the bottom-right 6x6; the two
@@ -425,7 +441,11 @@ wnd1 W_SelectFrame_01 size=530x186 frameSize=68 tex=SelectFrame_04^t
 ## What is approximate
 
 * **Backdrop blur.** See Transparency above - the biggest single difference
-  from the real thing.
+  from the real thing. The speaker name in `MessageBox` has no backing at
+  all for this reason: the game puts a blurred framebuffer capture behind it,
+  and the nearest sprite (`DialogShadow_00`, which is one QUADRANT of a
+  radial gradient) drew as a hard dark box when stretched across it, which
+  was worse than nothing. The name's own hard text shadow carries it.
 * **The plate** (`Canvas::Plate`). `BtnBasic_08T/B` only carry the rim and
   shadow; the plate's fill comes from a projected inner texture combined in
   the material's TEV stages. The GUI draws a flat rounded fill under the rim

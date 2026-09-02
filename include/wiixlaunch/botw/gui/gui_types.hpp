@@ -227,7 +227,11 @@ enum class Sprite : uint8_t {
     KeyL,               // Nt_KeyTexL_00^d
     KeyZL,              // Nt_KeyTexZL_00^d
     Glow,               // CircleEnv32_00^t    32x32   soft radial glow
-    Shadow,             // DialogShadow_00^s  128x128  soft shadow blob
+    Shadow,             // DialogShadow_00^s  128x128  ONE QUADRANT of a soft radial
+                        //   shadow (alpha runs 0 at its top-left to 245 at its
+                        //   bottom-right) - mirror it into four corners, as
+                        //   Canvas::Corners does; a single stretched quad of it
+                        //   is a hard-edged dark box, not a blob.
     PlateTop,           // BtnBasic_08T^t      96x96   light plate corner (top row)
     PlateBottom,        // BtnBasic_08B^t      96x96   light plate corner (bottom row)
     PlateShadowTop,     // BtnBasic_08TS^s     96x96   its drop shadow
