@@ -39,7 +39,7 @@ projects that want it.
 | `botw/game/map.hpp` | `Map` - map reveal: the fifteen tower regions (`Get`/`SetMapRegionUnlock`) and shrine travel destinations (`Get`/`SetMapUnlock`) |
 | `botw/game/region.hpp` | `Region` - the fifteen regions as PLACES: which one a world position is in (`GetRegionAt`, off the game's own `Ecosystem/MapTower.beco` raster), whether the player may enter it (`Get`/`SetRegionUnlock`, `SyncFromTowers`), and invisible walls built along the borders of the locked ones from spawned `AirWallCurseGanon` panels - see `docs/region-walls.md` |
 | `botw/game/events.hpp` | `Events` - edge-triggered callbacks: `OnKorokGet`, `OnShrineComplete`, `OnTowerOpen`, polled by index so a per-frame check costs nothing to speak of |
-| `botw/game/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core) |
+| `botw/game/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core), input injection, and input capture (hide the pad from the game while a menu is up) |
 | `botw/game/camera.hpp` | `Camera` - typed get/set accessors for a live camera object's position/look-at/up |
 | `botw/graphics/nvn.hpp` | `NVN` - Switch NVN graphics injection, custom textures, packaged data, samplers, and 2D/3D drawing |
 | `botw/graphics/gx2.hpp` | `GX2` - Wii U/Cemu GX2 graphics injection, mirrors `NVN`'s API (`Init`, `RegisterDrawCallback`, `CreateTexture`, `LoadTexture`, `LoadMesh`, `DrawSprite`, `DrawMesh`), plus pre-tiled surface upload (`CreateTextureFromSurface`) and batched quads (`BeginBatch`/`BatchQuad`/`EndBatch`) for the GUI |

@@ -70,9 +70,15 @@ extern "C" void WiiXLaunch_Init() {
   activates, `B` is only *reported* (`Canvas::Cancel()`) - what it closes is
   the mod's call. Focus order is issue order; each frame's widget list may
   differ (the focus index is clamped).
-* The GUI does not swallow input - the game still sees the buttons. A mod that
-  opens a menu will usually want to pause or block on its side; see
-  `Controller` for injection, and note there is no "eat input" facility yet.
+* `Canvas::CaptureInput()` takes the pad away from the game: call it every
+  frame a menu is up and the player's buttons, sticks and GamePad touches stop
+  reaching the game while the GUI carries on reading them. It is never
+  automatic, because an overlay that merely draws must not swallow input, and
+  it lapses a few frames after the last call, so a menu that stops drawing
+  cannot leave the pad dead. `Controller::SetInputCapture(true)` is the
+  latched form for non-GUI callers. Input the mod injects with
+  `Controller::Send()` still reaches the game - that is the mod acting, not
+  the player.
 * `GUI::IsReady()` turns true once the loader is done (fonts and art take a
   couple of dozen frames to stream in on Cemu; see below). Text and sprites
   that have not arrived yet draw nothing - a frame callback may run before

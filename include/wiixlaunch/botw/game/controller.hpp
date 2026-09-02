@@ -181,6 +181,11 @@ namespace impl {
     constexpr uint8_t kExtNunchuk       = 0x01;
     constexpr uint8_t kExtMplusNunchuk  = 0x06;
     constexpr uint8_t kExtProController = 0x1f;
+    // Reading a Classic Controller is not implemented (the core path covers
+    // it), but input capture still has to know its buttons live in the same
+    // place a Pro Controller's do, or they would not be blanked.
+    constexpr uint8_t kExtClassic       = 0x02;
+    constexpr uint8_t kExtMplusClassic  = 0x07;
 #endif
 
 inline uint32_t ButtonBit(Button b) {
@@ -276,6 +281,43 @@ inline FrameCallback& FrameCallbackRef() {
     return callback;
 }
 
+// ---------------------------------------------------------------------------
+// Input capture
+// ---------------------------------------------------------------------------
+// Hides the player's input from the GAME without hiding it from us: the read
+// hooks store the real values for Controller's own accessors first, then
+// blank the buffer the game is about to read. That is what lets a mod's menu
+// take the D-pad and A without Link running around behind it, or the pause
+// menu opening on top of it.
+//
+// Injected input (Controller::Send) is deliberately NOT blanked - it is the
+// mod asking the game to do something, which is the opposite of what capture
+// is for. While both are active the game sees exactly the injected buttons
+// and nothing the player is doing.
+//
+// Like injection, this is a countdown rather than a plain flag. A latched
+// "capture on" that outlives whatever set it leaves the player unable to move
+// with no way back short of closing the game; SetInputCapture(true) still
+// latches for callers that want to own it, but HoldInputCapture() is the
+// per-frame form, and if whatever was calling it stops, input comes back on
+// its own within a few frames.
+constexpr uint32_t kCaptureIndefinitely = 0xFFFFFFFFu;
+
+inline uint32_t& CaptureFramesRef() {
+    static uint32_t frames = 0;
+    return frames;
+}
+
+inline bool CaptureActive() { return CaptureFramesRef() != 0; }
+
+// Counted down once per VPAD read, i.e. once per game frame. The KPAD hook
+// deliberately does not tick it - both hooks fire every frame, and ticking in
+// both would halve every hold.
+inline void TickCapture() {
+    uint32_t& frames = CaptureFramesRef();
+    if (frames != 0 && frames != kCaptureIndefinitely) frames--;
+}
+
 #if WIIXL_SWITCH
 
 struct NpadState {
@@ -299,6 +341,20 @@ inline void ProcessNpadState(NpadState* state) {
     float rx = static_cast<float>(state->RStickX) / 32767.0f;
     float ry = static_cast<float>(state->RStickY) / 32767.0f;
     StoreState(VpadStateRef(), static_cast<uint32_t>(state->Buttons), lx, ly, rx, ry);
+
+    // Capture: blank the sample the game is about to read, after we have
+    // taken our own copy of it. nn::hid hands out the whole state, so unlike
+    // VPAD there are no separate trigger/release words to rebuild - the game
+    // derives its own edges from consecutive samples, and a sample that reads
+    // as "nothing held" is exactly what is wanted.
+    if (CaptureActive()) {
+        state->Buttons = 0;
+        state->LStickX = 0;
+        state->LStickY = 0;
+        state->RStickX = 0;
+        state->RStickY = 0;
+        TickCapture();
+    }
 }
 
 // nn::hid::GetNpadStates returns void, so there's no result to gate on -
@@ -425,6 +481,7 @@ inline Injection& InjectionRef() {
     return injection;
 }
 
+
 #if !WIIXL_SWITCH
 
 // VPADStatus: hold +0x00, trigger +0x04, release +0x08, sticks from +0x0C.
@@ -489,6 +546,77 @@ inline void ApplyInjection(uint8_t* vpad, uint32_t realHold) {
     }
 }
 
+// What the GAME last saw, which is not what the pad last reported once
+// capture is on - the release edge below has to be built against it.
+inline uint32_t& GameVisibleHold() {
+    static uint32_t hold = 0;
+    return hold;
+}
+
+// Blanks the player's input in a VPADStatus (hold/trigger/release at
+// 0x00/0x04/0x08, sticks at 0x0C and 0x14, touch at 0x52/0x5A/0x62 - offsets
+// from wut's WUT_CHECK_OFFSET asserts). Call AFTER the real values have been
+// stored for our own use.
+inline void ApplyCapture(uint8_t* vpad) {
+    if (!CaptureActive()) {
+        GameVisibleHold() = *reinterpret_cast<uint32_t*>(vpad + kVpadHoldOffset);
+        return;
+    }
+
+    const Injection& injection = InjectionRef();
+    const bool injecting = injection.framesRemaining > 0;
+    const uint32_t keep = injecting ? injection.buttons : 0u;
+
+    // The frame capture starts, whatever was held has to be given a release
+    // edge, or game code that tracks its own press/release sees the button
+    // stay down forever.
+    const uint32_t previous = GameVisibleHold();
+    *reinterpret_cast<uint32_t*>(vpad + kVpadHoldOffset) = keep;
+    *reinterpret_cast<uint32_t*>(vpad + kVpadTriggerOffset) = keep & ~previous;
+    *reinterpret_cast<uint32_t*>(vpad + kVpadReleaseOffset) = previous & ~keep;
+    GameVisibleHold() = keep;
+
+    if (!injecting || !injection.overrideLeftStick) {
+        *reinterpret_cast<float*>(vpad + 0x0C) = 0.0f;
+        *reinterpret_cast<float*>(vpad + 0x10) = 0.0f;
+    }
+    if (!injecting || !injection.overrideRightStick) {
+        *reinterpret_cast<float*>(vpad + 0x14) = 0.0f;
+        *reinterpret_cast<float*>(vpad + 0x18) = 0.0f;
+    }
+
+    // VPADTouchData is { u16 x, y, touched, validity }; clearing `touched` on
+    // all three copies is enough to read as "not being touched", and leaves
+    // the coordinates alone.
+    *reinterpret_cast<uint16_t*>(vpad + 0x52 + 4) = 0;
+    *reinterpret_cast<uint16_t*>(vpad + 0x5A + 4) = 0;
+    *reinterpret_cast<uint16_t*>(vpad + 0x62 + 4) = 0;
+}
+
+// The same for one KPADStatus (Wii Remote / Pro Controller). Core buttons at
+// 0x00/0x04/0x08; the 0x60 union is whatever extensionType at 0x5C says.
+inline void ApplyCaptureKpad(uint8_t* kpad) {
+    *reinterpret_cast<uint32_t*>(kpad + 0x00) = 0;
+    *reinterpret_cast<uint32_t*>(kpad + 0x04) = 0;
+    *reinterpret_cast<uint32_t*>(kpad + 0x08) = 0;
+
+    const uint8_t extensionType = *reinterpret_cast<uint8_t*>(kpad + 0x5C);
+    if (extensionType == kExtProController || extensionType == kExtClassic || extensionType == kExtMplusClassic) {
+        // pro/classic: hold, trigger, release, then both sticks.
+        *reinterpret_cast<uint32_t*>(kpad + 0x60) = 0;
+        *reinterpret_cast<uint32_t*>(kpad + 0x64) = 0;
+        *reinterpret_cast<uint32_t*>(kpad + 0x68) = 0;
+        for (uint32_t o = 0x6C; o < 0x7C; o += 4) *reinterpret_cast<float*>(kpad + o) = 0.0f;
+    } else if (extensionType == kExtNunchuk || extensionType == kExtMplusNunchuk) {
+        // nunchuk: stick first, its buttons at 0x7C.
+        *reinterpret_cast<float*>(kpad + 0x60) = 0.0f;
+        *reinterpret_cast<float*>(kpad + 0x64) = 0.0f;
+        *reinterpret_cast<uint32_t*>(kpad + 0x7C) = 0;
+        *reinterpret_cast<uint32_t*>(kpad + 0x80) = 0;
+        *reinterpret_cast<uint32_t*>(kpad + 0x84) = 0;
+    }
+}
+
 #endif
 
 WIIXL_HOOK_DEFINE_TRAMPOLINE(VPADReadWrapperHook) {
@@ -503,6 +631,11 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(VPADReadWrapperHook) {
         float rx = *reinterpret_cast<float*>(vpad + 0x14);
         float ry = *reinterpret_cast<float*>(vpad + 0x18);
         StoreState(VpadStateRef(), hold, lx, ly, rx, ry);
+
+        // After StoreState, so capture hides the pad from the game and not
+        // from us, and after ApplyInjection, so injected buttons survive it.
+        ApplyCapture(vpad);
+        TickCapture();
 
         if (FrameCallback callback = FrameCallbackRef()) callback();
     }
@@ -556,6 +689,14 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(KPADReadExWrapperHook) {
                 if (coreHold == 0) continue;
                 StoreState(KpadStateRef(), TranslateToCanonical(coreHold, PadSource::WPAD_CORE), 0.0f, 0.0f, 0.0f, 0.0f);
                 break;
+            }
+        }
+
+        // Every channel, not just the one read above: the loop stops at the
+        // first active controller, but the game reads them all.
+        if (CaptureActive()) {
+            for (int i = 0; i < 4; i++) {
+                ApplyCaptureKpad(static_cast<uint8_t*>(obj) + 0x1118 + (i * 0xF08));
             }
         }
     }
@@ -623,6 +764,36 @@ public:
 
     // The raw bit for a button, for building masks to put in Input::buttons.
     static uint32_t MaskFor(Button b) { return impl::ButtonBit(b); }
+
+    // ---- Input capture ---------------------------------------------------
+    //
+    // Stops the GAME seeing the player's buttons, sticks and (on the GamePad)
+    // touches, while Controller's own accessors keep reporting them - so a
+    // mod's menu can take the D-pad and A without Link running around behind
+    // it or the pause menu opening over it. Input the mod itself injects with
+    // Send() is not blocked: that is the mod asking the game to act, which is
+    // the opposite of what this is for.
+    //
+    // Capture applies from the next input read, which is the next game frame.
+    static constexpr bool SupportsInputCapture = true;
+
+    // Latches capture on until it is turned off again - the caller owns it.
+    // Prefer HoldInputCapture() unless there is a reason not to.
+    static void SetInputCapture(bool on) {
+        impl::CaptureFramesRef() = on ? impl::kCaptureIndefinitely : 0;
+    }
+
+    // Capture for the next `frames` game frames, to be called again every
+    // frame it should stay on. This is the safe form: if whatever was calling
+    // it stops - the menu closes, the drawing thread stalls, the mod crashes -
+    // input comes back on its own instead of leaving the player stuck.
+    static void HoldInputCapture(uint32_t frames = 8) {
+        if (frames == 0) return;
+        uint32_t& current = impl::CaptureFramesRef();
+        if (current != impl::kCaptureIndefinitely && frames > current) current = frames;
+    }
+
+    static bool IsInputCaptured() { return impl::CaptureActive(); }
 
     // One injection, described completely.
     //

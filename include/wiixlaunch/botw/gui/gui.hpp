@@ -51,6 +51,10 @@
 // is reported through Canvas::Cancel() for the mod to act on. Focus order is
 // the order the widgets are issued in each frame.
 //
+// Call Canvas::CaptureInput() every frame a menu is open and the game stops
+// seeing the pad, so the D-pad does not walk Link around underneath it. It is
+// never automatic: an overlay that only draws must not swallow input.
+//
 // GX2 only. On Switch (NVN) every call compiles to a no-op and
 // SupportsGUI is false - the NVN backend is a stub for now.
 
@@ -79,6 +83,11 @@ inline uint32_t g_FrameCounter = 0;
 
 // Input: edge detection and D-pad/stick navigation with key repeat, in
 // terms of Controller's canonical hold bits.
+// How long each Canvas::CaptureInput() call holds the pad for. Comfortably
+// more than one game frame, so capture survives a dropped or slow frame, and
+// short enough that it lapses almost immediately once the calls stop.
+constexpr uint32_t kCaptureHoldFrames = 8;
+
 constexpr int kNavRepeatDelay = 18;
 constexpr int kNavRepeatRate = 6;
 constexpr float kStickThreshold = 0.5f;
@@ -229,6 +238,15 @@ public:
     bool NavRight() const { return (impl::g_Input.navFired & impl::NavRightBit) != 0; }
     void GetLeftStick(float& x, float& y) const { x = impl::g_Input.leftX; y = impl::g_Input.leftY; }
     void GetRightStick(float& x, float& y) const { x = impl::g_Input.rightX; y = impl::g_Input.rightY; }
+
+    // Take the pad away from the game for as long as this keeps being called:
+    // call it every frame a menu is up, and the player's buttons, sticks and
+    // touches stop reaching the game while the GUI carries on reading them.
+    // Nothing here calls it for you - a HUD overlay that draws every frame
+    // must not swallow input - and because it lapses a few frames after the
+    // last call, a menu that stops drawing cannot leave the pad dead.
+    void CaptureInput() { Controller::HoldInputCapture(impl::kCaptureHoldFrames); }
+    bool IsInputCaptured() const { return Controller::IsInputCaptured(); }
 
     // ---- focus ------------------------------------------------------------
     int Focus() const { return impl::g_FocusIndex; }
@@ -901,6 +919,8 @@ public:
     bool NavRight() const { return false; }
     void GetLeftStick(float& x, float& y) const { x = 0; y = 0; }
     void GetRightStick(float& x, float& y) const { x = 0; y = 0; }
+    void CaptureInput() {}
+    bool IsInputCaptured() const { return false; }
     int Focus() const { return 0; }
     void SetFocus(int) {}
     int FocusableCount() const { return 0; }

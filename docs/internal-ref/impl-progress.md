@@ -117,7 +117,7 @@
 - ~~plate surface radius is the rim's real curve (42/96 of the tile, measured), not 16/96 - square-cornered fill inside a rounded rim~~ (gui.hpp)
 - ~~select frame corner keeps the layout's 68/186 proportion~~ (gui.hpp)
 - ~~dropped the black blob behind the dialogue speaker name (DialogShadow_00 is a radial QUADRANT, not a blob)~~ (gui.hpp)
-- input capture (stop the game seeing menu input) - not implemented
+- ~~input capture (stop the game seeing menu input): Controller::SetInputCapture/HoldInputCapture blanks buttons, sticks and GamePad touch in the VPAD/KPAD/npad read hooks AFTER our own state is stored, rebuilding the release edge so game code doesn't see a stuck button; injected input still passes. Canvas::CaptureInput() is the per-frame form and lapses if it stops being called~~ (controller.hpp, gui.hpp)
 - framebuffer blur behind windows (the game's FBLayout capture) - not reproduced, the biggest remaining visual gap
 - exact plate shading (BtnBasic inner texture via TEV) - approximated
 - alpha compare (a few materials enable it) - everything is blended instead
@@ -164,6 +164,7 @@ I'd really love to get custom shaders replacing in game ones (basically reconstr
 | `events.hpp::Events::OnKorokGet/OnShrineComplete/OnTowerOpen` | X | ✓ |
 | `controller.hpp::Controller::IsPressed/GetLeftStick/GetRightStick` | ✓ | ✓ |
 | `controller.hpp::Controller::Send/Hold/Release` | X | ✓ |
+| `controller.hpp::Controller::SetInputCapture/HoldInputCapture` | ✓ (untested) | ✓ |
 | `camera.hpp::Camera::Get/SetPosition/LookAt/Up` | ✓ | ✓ |
 | `flyt.hpp::FLYT::Pane/PicturePane/Layout` | X | ✓ |
 | `nvn.hpp::NVN::*` | ✓ | X |
