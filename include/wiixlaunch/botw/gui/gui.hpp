@@ -328,6 +328,43 @@ public:
         if (!info.texture) return;
         impl::EmitSprite(s, GUI::Rect{x, y, info.width * scale, info.height * scale}, tint, orient, blend);
     }
+    // ---- a mod's own textures ---------------------------------------------
+    // The Sprite overloads above index the fixed table of the GAME's art. These
+    // take a handle the mod owns - from GUI::LoadTexture, or anything else that
+    // produces a Backend::TextureHandle - and put it through the same path:
+    // layout-pixel mapping, the group-alpha stack, blend, orientation, pixel
+    // snapping and batching. Without them a mod-loaded texture could be created
+    // but never drawn through the GUI.
+    //
+    // The handle must outlive the frame. Nothing here owns or frees it.
+    void Image(Backend::TextureHandle tex, const GUI::Rect& r, Color tint = Colors::White,
+               uint8_t orient = OrientNone, const Backend::BlendState& blend = Backend::Blend::Alpha,
+               float rotation = 0.0f) {
+        impl::EmitQuad(tex, r, 0.0f, 0.0f, 1.0f, 1.0f, tint, orient, blend, true, rotation);
+    }
+    void ImageUV(Backend::TextureHandle tex, const GUI::Rect& r, float u0, float v0, float u1, float v1,
+                 Color tint = Colors::White, uint8_t orient = OrientNone,
+                 const Backend::BlendState& blend = Backend::Blend::Alpha) {
+        impl::EmitQuad(tex, r, u0, v0, u1, v1, tint, orient, blend);
+    }
+    // At its native pixel size, top-left at (x, y). False if the size is not
+    // known, in which case nothing is drawn.
+    bool ImageAt(Backend::TextureHandle tex, float x, float y, Color tint = Colors::White,
+                 uint8_t orient = OrientNone, float scale = 1.0f,
+                 const Backend::BlendState& blend = Backend::Blend::Alpha) {
+        uint32_t w = 0, h = 0;
+        if (!tex || !Backend::GetTextureSize(tex, w, h) || w == 0 || h == 0) return false;
+        impl::EmitQuad(tex, GUI::Rect{x, y, w * scale, h * scale}, 0.0f, 0.0f, 1.0f, 1.0f, tint, orient, blend);
+        return true;
+    }
+    bool TextureSize(Backend::TextureHandle tex, float& w, float& h) const {
+        uint32_t tw = 0, th = 0;
+        if (!tex || !Backend::GetTextureSize(tex, tw, th)) { w = 0.0f; h = 0.0f; return false; }
+        w = static_cast<float>(tw);
+        h = static_cast<float>(th);
+        return true;
+    }
+
     void SpriteSize(Sprite s, float& w, float& h) const {
         const impl::SpriteInfo& info = impl::SpriteAt(s);
         w = static_cast<float>(info.width);
@@ -1098,6 +1135,17 @@ inline void Init() {
 // The per-frame builder. One slot; call again to replace.
 inline void OnFrame(FrameCallback callback) { impl::g_FrameCallback = callback; }
 
+// Load a mod's own texture from the content mount - a `.bflim`, the format the
+// game's own art is in, so tools/preview_ui_assets.py and pack_texture_gx2.py
+// both understand it. Returns 0 on failure. The GUI never frees it.
+//
+// Only meaningful once the graphics pipeline is up, i.e. from inside a
+// GUI/GX2 initialisation callback or later. Draw it with the Canvas::Image
+// overloads that take a handle.
+inline Backend::TextureHandle LoadTexture(const char* path, size_t maxFileSize = 1024 * 1024) {
+    return Backend::LoadTexture(path, maxFileSize);
+}
+
 // True once the asset loader has finished (successfully or not). Fonts and
 // sprites that did load draw before this; missing ones draw nothing.
 inline bool IsReady() { return impl::LoaderFinished(); }
@@ -1255,6 +1303,14 @@ public:
     void ImageAt(Sprite, float, float, Color = Colors::White, uint8_t = 0, float = 1.0f,
                  const Backend::BlendState& = Backend::Blend::Alpha) {}
     void SpriteSize(Sprite, float& w, float& h) const { w = 0; h = 0; }
+    void Image(Backend::TextureHandle, const GUI::Rect&, Color = Colors::White, uint8_t = 0,
+               const Backend::BlendState& = Backend::Blend::Alpha, float = 0.0f) {}
+    void ImageUV(Backend::TextureHandle, const GUI::Rect&, float, float, float, float,
+                 Color = Colors::White, uint8_t = 0,
+                 const Backend::BlendState& = Backend::Blend::Alpha) {}
+    bool ImageAt(Backend::TextureHandle, float, float, Color = Colors::White, uint8_t = 0,
+                 float = 1.0f, const Backend::BlendState& = Backend::Blend::Alpha) { return false; }
+    bool TextureSize(Backend::TextureHandle, float& w, float& h) const { w = 0; h = 0; return false; }
     void Text(float, float, const char*, const TextStyle& = Styles::Message()) {}
     void TextBox(const GUI::Rect&, const char*, const TextStyle&, bool = true) {}
     void MeasureText(const char*, const TextStyle&, float& w, float& h, float = 0.0f) const { w = 0; h = 0; }
@@ -1288,6 +1344,7 @@ inline void OnFrame(FrameCallback) {}
 inline bool IsReady() { return false; }
 inline void SetLoadBudget(uint32_t) {}
 inline void SetAssetPaths(const char*, const char*) {}
+inline Backend::TextureHandle LoadTexture(const char*, size_t = 0) { return 0; }
 inline void LoadNow() {}
 inline uint32_t QuadsLastFrame() { return 0; }
 

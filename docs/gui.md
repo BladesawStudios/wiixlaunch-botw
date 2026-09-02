@@ -653,6 +653,35 @@ wnd1 W_SelectFrame_00 size=530x186 frameSize=71 tex=SelectFrameGlow_00^s mat bac
 wnd1 W_SelectFrame_01 size=530x186 frameSize=68 tex=SelectFrame_04^t
 ```
 
+## A mod's own art
+
+The `Sprite` overloads index a fixed table of the GAME's textures, measured at
+build time. For a mod's own art there is a second set of entry points that take
+a `Backend::TextureHandle`:
+
+```cpp
+static GUI::Backend::TextureHandle icon = 0;   // load once, not per frame
+if (!icon) icon = GUI::LoadTexture("Layout/MyIcon.bflim");
+
+c.Image(icon, {100, 100, 64, 64});                     // stretched to the rect
+c.ImageUV(icon, {200, 100, 64, 64}, 0, 0, 0.5f, 0.5f); // one corner of it
+c.ImageAt(icon, 300, 100);                             // native pixel size
+```
+
+They go through the same path as the game's own art - layout-pixel mapping, the
+group-alpha stack, blend states, orientation, pixel snapping, batching - so a
+mod's texture behaves like any sprite and batches with them.
+
+`.bflim` is the format, the same one the game's art is in, which means
+`tools/preview_ui_assets.py` decodes it and `tools/pack_texture_gx2.py` builds
+it. `GUI::LoadTexture` reads through the game's content mount and is only
+meaningful once the pipeline is up, so call it from an initialisation callback
+or on first use, never per frame. Nothing in the GUI owns or frees the handle,
+and it must outlive the frames it is drawn in.
+
+`Canvas::TextureSize(handle, w, h)` reports the native size, and `ImageAt`
+returns false rather than drawing if the size is unknown.
+
 ## Porting the renderer
 
 The GUI reaches a graphics API through `GUI::Backend` and nothing else.

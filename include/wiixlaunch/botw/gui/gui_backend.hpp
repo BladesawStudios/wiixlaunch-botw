@@ -54,6 +54,9 @@
 //   CreateTextureFromSurface(desc, data, size)   Allocate, copy, finalize.
 //   CreateTexture(pixels, size, w, h, format)    Small untiled RGBA8 helper.
 //   FinalizeTexture(handle)    Publish CPU-written texels to the GPU.
+//   LoadTexture(path, maxSize) Read one texture file from the content mount.
+//                              A mod's own art arrives this way.
+//   GetTextureSize(handle, &w, &h)  Native pixel size, false if unknown.
 //
 // Memory
 //   AllocMEM1(size, align)     Graphics-visible memory. Never freed by the
@@ -100,6 +103,8 @@ using GX2::AllocTextureSurface;
 using GX2::CreateTextureFromSurface;
 using GX2::CreateTexture;
 using GX2::FinalizeTexture;
+using GX2::LoadTexture;
+using GX2::GetTextureSize;
 
 using GX2::BackdropReady;
 using GX2::BackdropTexture;
