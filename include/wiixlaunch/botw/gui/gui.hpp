@@ -710,6 +710,24 @@ public:
     // nine-sliced over is `r` grown by that padding, and an opaque rounded
     // fill goes under the rim first to stand in for the surface texture.
     // Without it the plate was a translucent grey over whatever was behind.
+    // The bounds Plate(r) actually draws into, and the corner size it uses.
+    // BIGGER than r, because the rim art sits outside the fill, and ASYMMETRIC
+    // vertically, because the art's top padding (40/96) is larger than its
+    // bottom (24/96). Anything that has to line up with a plate has to use
+    // this rather than r - a symmetric inset of r lands inside the plate at the
+    // top and nearly on its edge at the bottom.
+    GUI::Rect PlateBounds(const GUI::Rect& r, float* outCorner = nullptr) const {
+        constexpr float kPadL = 36.0f / 96.0f, kPadT = 40.0f / 96.0f, kPadB = 24.0f / 96.0f;
+        constexpr float kCornerOfWindow = 96.0f / 240.0f;
+        float corner = kCornerOfWindow * r.h / (1.0f - kCornerOfWindow * (kPadT + kPadB));
+        if (corner > Metrics::kPlateCorner) corner = Metrics::kPlateCorner;
+        const float maxW = r.w / (2.0f - 2.0f * kPadL);
+        if (corner > maxW) corner = maxW;
+        if (outCorner) *outCorner = corner;
+        return GUI::Rect{r.x - kPadL * corner, r.y - kPadT * corner,
+                         r.w + 2.0f * kPadL * corner, r.h + (kPadT + kPadB) * corner};
+    }
+
     void Plate(const GUI::Rect& r, Color fill = Colors::Plate) {
         if (!SpriteReady(Sprite::PlateTop) || !SpriteReady(Sprite::PlateBottom)) {
             RoundedBox(r, fill, 20.0f);
@@ -730,13 +748,8 @@ public:
         // window of r.h + (padT+padB)*corner gives the line below - about
         // 0.55*r.h. Taking the largest corner that fit instead turned every
         // small button into a fat pill, which is what "way too big" was.
-        constexpr float kCornerOfWindow = 96.0f / 240.0f;
-        float corner = kCornerOfWindow * r.h / (1.0f - kCornerOfWindow * (kPadT + kPadB));
-        if (corner > Metrics::kPlateCorner) corner = Metrics::kPlateCorner;   // never upscale past the art
-        const float maxW = r.w / (2.0f - 2.0f * kPadL);
-        if (corner > maxW) corner = maxW;
-        const GUI::Rect win{r.x - kPadL * corner, r.y - kPadT * corner,
-                            r.w + 2.0f * kPadL * corner, r.h + (kPadT + kPadB) * corner};
+        float corner = 0.0f;
+        const GUI::Rect win = PlateBounds(r, &corner);   // never upscales past the art
 
         if (SpriteReady(Sprite::PlateShadowTop) && SpriteReady(Sprite::PlateShadowBottom)) {
             NineSlice(Sprite::PlateShadowTop, Sprite::PlateShadowBottom,
@@ -746,6 +759,45 @@ public:
         // past it: the rim's own edge is soft, so a hard fill poking out
         // beyond it reads as a second, doubled outline.
         RoundedBox(r, fill, kSurfaceRadius * corner);
+
+        // The satin sheen. The game gets it by projecting ProjectTex_01^o
+        // through a BC5 normal map (BtnBasic_08TI/BI+t) in the material's TEV
+        // stages. Measured, those normal maps are flat 128/127 across the
+        // whole stretched region - there is no baked gradient to copy, the
+        // shading IS the projection - so this draws the projected texture
+        // itself, stretched over the plate and MULTIPLIED. Same soft diagonal
+        // bands; no normal-map lighting. The texture is 216-255, so it darkens
+        // by at most 15% and usually under 6%, which is why it needs no
+        // strength control: it cannot be loud.
+        //
+        // Three quads rather than one, because the fill is a ROUNDED rect and
+        // a square quad's corners would fall outside it - multiply would then
+        // darken the scene behind the plate in four little squares, which is
+        // the same class of mistake as a hard-edged blur. A middle band plus
+        // top and bottom strips covers everything except the four corner
+        // squares, which is exactly where the rounding is. UVs are taken from
+        // each piece's position in the whole plate, so the pattern is
+        // continuous across the seams.
+        //
+        // Skipped while a group alpha is pushed: Blend::Multiply takes its
+        // alpha factors from the destination, so the sheen cannot fade with
+        // the panel around it, and a plate that fades out while its sheen
+        // stays put looks worse than one with no sheen.
+        if (SpriteReady(Sprite::PlateSheen) && CurrentAlpha() >= 0.999f) {
+            const float rad = kSurfaceRadius * corner;
+            const Backend::TextureHandle sheenTex = impl::SpriteTexture(Sprite::PlateSheen);
+            auto sheen = [&](float x0, float y0, float x1, float y1) {
+                if (x1 <= x0 || y1 <= y0) return;
+                impl::EmitQuad(sheenTex, GUI::Rect{x0, y0, x1 - x0, y1 - y0},
+                               (x0 - r.x) / r.w, (y0 - r.y) / r.h,
+                               (x1 - r.x) / r.w, (y1 - r.y) / r.h,
+                               Colors::White, OrientNone, Backend::Blend::Multiply);
+            };
+            sheen(r.x,       r.y + rad,          r.Right(),       r.Bottom() - rad);
+            sheen(r.x + rad, r.y,                r.Right() - rad, r.y + rad);
+            sheen(r.x + rad, r.Bottom() - rad,   r.Right() - rad, r.Bottom());
+        }
+
         NineSlice(Sprite::PlateTop, Sprite::PlateBottom, win, corner, Colors::White);
     }
 
@@ -818,9 +870,34 @@ public:
         const bool focused = ClaimFocus();
         Plate(r);
         TextBox(r, label, Styles::Plate(), false);
-        // BtnDialog_00: a 530x186 frame on a 560x240 window whose visible
-        // plate is ~488x176, so the frame runs a little outside the plate.
-        if (focused) SelectFrame(r.Inset(-4.0f, -4.0f));
+        // Clearance scaled to the plate's corner, not a fixed nudge and not
+        // the plate's outer bound.
+        //
+        // Measured rather than assumed: the rim art's visible pixels start at
+        // 0.365/0.406 of its 96px tile against the 0.375/0.417 padding Plate()
+        // assumes, so the rim becomes visible essentially AT r - and
+        // SelectFrame_04^t's stroke starts 1-2 px into its own 68px tile, so
+        // the frame draws on the rect it is given. Neither art hides an offset;
+        // the rect was just the wrong size.
+        //
+        // Two knobs, both scaled to the corner so they hold at any button size.
+        // `clear` is how far the frame stands off the fill; `drop` shifts it
+        // down, because the plate does not sit centred in what it draws - the
+        // rim art's top padding is 40/96 of the corner against 24/96 at the
+        // bottom, and Plate's shadow is offset down another 4 px, so a frame
+        // centred on r rides high on the button it is framing.
+        //
+        // Arrived at by eye against the running game, not from the layout:
+        // r.Inset(-4,-4) read tight, the plate's full outer bound overflowed
+        // everywhere, and an even 0.25 of the corner still overhung the top.
+        if (focused) {
+            float corner = 0.0f;
+            PlateBounds(r, &corner);
+            const float clearX = 0.17f * corner;  // 4.1 px on the 170x44 button
+            const float clearY = 0.21f * corner;  // 5.0 px - the height reads right
+            const float drop   = 0.08f * corner;  // 2.0 px down
+            SelectFrame(r.Inset(-clearX, -clearY).Offset(0.0f, drop));
+        }
         return focused && Accept();
     }
 

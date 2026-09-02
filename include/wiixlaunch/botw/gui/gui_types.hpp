@@ -259,6 +259,9 @@ enum class Sprite : uint8_t {
     PlateShadowTop,     // BtnBasic_08TS^s     96x96   its drop shadow
     PlateShadowBottom,  // BtnBasic_08BS^s
     CursorCircle,       // Nt_CursorCircle_00^t 32x64  half-ring cursor
+    // ProjectTex_01^o 256x256 BC1: the satin sheen the game projects across a
+    // plate. 32 KB, so the loader's old flat 32 KB cap would have skipped it.
+    PlateSheen,
     Count
 };
 

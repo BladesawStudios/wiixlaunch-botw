@@ -74,6 +74,7 @@ inline SpriteInfo g_Sprites[static_cast<size_t>(Sprite::Count)] = {
     { "timg/BtnBasic_08TS^s.bflim",      0, 0, 0, 0.0f,    0.0f,    0 },
     { "timg/BtnBasic_08BS^s.bflim",      0, 0, 0, 0.0f,    0.0f,    0 },
     { "timg/Nt_CursorCircle_00^t.bflim", 0, 0, 0, 0.0f,    0.0f,    Backend::kCompMapShapeFromG },
+    { "timg/ProjectTex_01^o.bflim",      0, 0, 0, 0.0f,    0.0f,    0 },
 };
 
 struct FontInfo {

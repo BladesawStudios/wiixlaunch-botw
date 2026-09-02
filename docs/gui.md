@@ -789,10 +789,30 @@ working around.
   (`DialogShadow_00`, one quarter of a radial gradient, which drew as a hard
   dark box and was worse than nothing). With blur off or not yet ready it draws
   nothing and the name's own hard text shadow carries it, as before.
-* **The plate** (`Canvas::Plate`). `BtnBasic_08T/B` only carry the rim and
-  shadow; the plate's fill comes from a projected inner texture combined in
-  the material's TEV stages. The GUI draws a flat rounded fill under the rim
-  9-slice instead. Right shape and colours, not the exact shading.
+* **The plate** (`Canvas::Plate`). `BtnBasic_08T/B` carry only the rim and
+  shadow. Reading `BtnDialog_00.bflyt`'s texture list settled what the fill
+  actually is: `ProjectTex_01^o` (256x256 BC1, a soft satin sheen) projected
+  through `BtnBasic_08TI/BI+t`, which are BC5 NORMAL MAPS, in the material's
+  TEV stages.
+
+  That rules out the obvious approximation. Sampled down the stretched column,
+  those normal maps are flat 128/127 for their whole height - there is no baked
+  gradient to copy, because the shading IS the projection. A vertical gradient
+  would have been inventing shading the game does not have.
+
+  What the GUI draws instead is the projected texture itself, stretched over
+  the plate and multiplied: the same soft diagonal bands without the normal-map
+  lighting. It cannot be loud - the texture is 216-255, so at most 15% darkening
+  and usually under 6% - which is why it needs no strength control. Three quads,
+  not one, because the fill is rounded and a square quad's corners would fall
+  outside it and multiply the scene behind the plate instead; a middle band plus
+  top and bottom strips covers 95% of the fill with 0 pixels outside it,
+  measured. Skipped while a group alpha is pushed, since `Blend::Multiply`
+  takes its alpha factors from the destination and so cannot fade with the
+  panel around it.
+
+  At 32 KB, `ProjectTex_01^o` is also the first sprite the old flat 32 KB
+  staging cap would have refused.
 * **Cursor shimmer.** `Window_00` scrolls `Kumo64_00^r` - a 64x64 BC4
   luminance cloud, near-seamless (opposite edges differ by 6/255) - through
   the option cursor's material to make it drift. `CursorCorners` reproduces
