@@ -261,4 +261,148 @@ inline bool WriteFile(const char* path, const void* buffer, size_t size, size_t*
 #endif
 }
 
+// An open file that supports positioned reads, for pulling pieces out of
+// archives far too large to ReadFile whole (Pack/Bootup.pack is ~30 MB; the
+// Cemu payload's entire heap is 6 MB). Same path candidates as ReadFile.
+// `buffer` passed to ReadAt must be 64-byte aligned - coreinit's FSReadFile
+// family requires it - and the read size should be a multiple of 64 unless
+// it is the tail of the file.
+//
+// Trivially destructible on purpose (no auto-Close): the Cemu payload runs
+// without a C runtime, so nothing may need static destructors, and this is
+// held as an inline global by the GUI's asset loader. Call Close().
+class File {
+public:
+    File() = default;
+    File(const File&) = delete;
+    File& operator=(const File&) = delete;
+
+    bool Open(const char* path) {
+        Close();
+        if (!path || !impl::EnsureFSClient()) return false;
+
+        auto concat2 = [](char* dst, size_t cap, const char* a, const char* b) {
+            size_t la = strlen(a);
+            size_t lb = strlen(b);
+            if (la + lb + 1 > cap) { dst[0] = '\0'; return; }
+            memcpy(dst, a, la);
+            memcpy(dst + la, b, lb);
+            dst[la + lb] = '\0';
+        };
+
+        const char* pathsToTry[4] = { path, nullptr, nullptr, nullptr };
+        char altPath1[256];
+        char altPath2[256];
+        char altPath3[256];
+        if (path[0] != '/') {
+            concat2(altPath1, sizeof(altPath1), "/vol/content/", path);
+            concat2(altPath2, sizeof(altPath2), "content/", path);
+            concat2(altPath3, sizeof(altPath3), "/vol/content/WiiXLaunch/", path);
+            pathsToTry[1] = altPath1;
+            pathsToTry[2] = altPath2;
+            pathsToTry[3] = altPath3;
+        }
+
+#if WIIXL_CEMU
+        using FnFSOpenFile = int32_t (*)(void* client, void* block, const char* path, const char* mode, uint32_t* handle, uint32_t errorMask);
+        using FnFSGetStatFile = int32_t (*)(void* client, void* block, uint32_t handle, void* stat, uint32_t errorMask);
+        auto openFile = Backend::ResolveCemuFs<FnFSOpenFile>(Backend::CemuFsImport::FSOpenFile);
+        auto getStat = Backend::ResolveCemuFs<FnFSGetStatFile>(Backend::CemuFsImport::FSGetStatFile);
+        if (!openFile) return false;
+
+        for (int i = 0; i < 4; ++i) {
+            if (!pathsToTry[i] || !pathsToTry[i][0]) continue;
+            uint32_t handle = 0;
+            if (openFile(impl::g_FSClient, impl::g_FSCmdBlock, pathsToTry[i], "r", &handle, 218) == 0) {
+                m_Handle = handle;
+                m_Open = true;
+                break;
+            }
+        }
+        if (!m_Open) {
+            WIIXL_LOG("WiiXLaunch: File::Open failed for '%s'", path);
+            return false;
+        }
+
+        struct FsStatBuf { uint32_t flags, mode, owner, group, size, rest[20]; };
+        static_assert(sizeof(FsStatBuf) == 0x64, "must match coreinit FSStat exactly");
+        alignas(64) FsStatBuf statBuf{};
+        if (getStat && getStat(impl::g_FSClient, impl::g_FSCmdBlock, m_Handle, &statBuf, 0xFFFFFFFF) == 0) {
+            m_Size = statBuf.size;
+        }
+        return true;
+#elif WIIXL_WIIU
+        for (int i = 0; i < 4; ++i) {
+            if (!pathsToTry[i] || !pathsToTry[i][0]) continue;
+            FSFileHandle handle = 0;
+            if (FSOpenFile(reinterpret_cast<FSClient*>(impl::g_FSClient),
+                           reinterpret_cast<FSCmdBlock*>(impl::g_FSCmdBlock),
+                           pathsToTry[i], "r", &handle, FS_ERROR_FLAG_ALL) == FS_STATUS_OK) {
+                m_Handle = handle;
+                m_Open = true;
+                break;
+            }
+        }
+        if (!m_Open) return false;
+        FSStat stat{};
+        if (FSGetStatFile(reinterpret_cast<FSClient*>(impl::g_FSClient),
+                          reinterpret_cast<FSCmdBlock*>(impl::g_FSCmdBlock),
+                          m_Handle, &stat, FS_ERROR_FLAG_ALL) == FS_STATUS_OK) {
+            m_Size = stat.size;
+        }
+        return true;
+#else
+        (void)pathsToTry;
+        return false;
+#endif
+    }
+
+    bool IsOpen() const { return m_Open; }
+    uint32_t Size() const { return m_Size; }
+
+    // Reads up to `size` bytes at absolute `offset`. Returns the byte count
+    // actually read (0 at/after EOF or on error).
+    uint32_t ReadAt(uint32_t offset, void* buffer, uint32_t size) {
+        if (!m_Open || !buffer || size == 0) return 0;
+        if (m_Size && offset >= m_Size) return 0;
+        if (m_Size && offset + size > m_Size) size = m_Size - offset;
+#if WIIXL_CEMU
+        using FnFSReadFileWithPos = int32_t (*)(void* client, void* block, void* buffer, uint32_t size, uint32_t count,
+                                                uint32_t pos, uint32_t handle, uint32_t flags, uint32_t errorMask);
+        auto readAt = Backend::ResolveCemuFs<FnFSReadFileWithPos>(Backend::CemuFsImport::FSReadFileWithPos);
+        if (!readAt) return 0;
+        int32_t got = readAt(impl::g_FSClient, impl::g_FSCmdBlock, buffer, 1, size, offset, m_Handle, 0, 0xFFFFFFFF);
+        return got > 0 ? static_cast<uint32_t>(got) : 0;
+#elif WIIXL_WIIU
+        int32_t got = FSReadFileWithPos(reinterpret_cast<FSClient*>(impl::g_FSClient),
+                                        reinterpret_cast<FSCmdBlock*>(impl::g_FSCmdBlock),
+                                        reinterpret_cast<uint8_t*>(buffer), 1, size, offset, m_Handle, 0, FS_ERROR_FLAG_ALL);
+        return got > 0 ? static_cast<uint32_t>(got) : 0;
+#else
+        (void)offset;
+        return 0;
+#endif
+    }
+
+    void Close() {
+        if (!m_Open) return;
+#if WIIXL_CEMU
+        using FnFSCloseFile = int32_t (*)(void* client, void* block, uint32_t handle, uint32_t errorMask);
+        auto closeFile = Backend::ResolveCemuFs<FnFSCloseFile>(Backend::CemuFsImport::FSCloseFile);
+        if (closeFile) closeFile(impl::g_FSClient, impl::g_FSCmdBlock, m_Handle, 0xFFFFFFFF);
+#elif WIIXL_WIIU
+        FSCloseFile(reinterpret_cast<FSClient*>(impl::g_FSClient),
+                    reinterpret_cast<FSCmdBlock*>(impl::g_FSCmdBlock), m_Handle, FS_ERROR_FLAG_ALL);
+#endif
+        m_Open = false;
+        m_Handle = 0;
+        m_Size = 0;
+    }
+
+private:
+    uint32_t m_Handle = 0;
+    uint32_t m_Size = 0;
+    bool m_Open = false;
+};
+
 } // namespace WiiXLaunch::BotW::FS

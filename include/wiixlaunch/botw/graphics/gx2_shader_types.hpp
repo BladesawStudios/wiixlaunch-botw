@@ -293,6 +293,59 @@ constexpr uint32_t kSurfaceFormatUnormR8G8B8A8 = 0x01a;
 // round trip is neutral.
 constexpr uint32_t kSurfaceFormatSrgbR8G8B8A8 = 0x41a;
 constexpr uint32_t kSurfaceFormatFloatD32 = 0x11;
+// Formats the game's own UI assets come in (BFLIM footers / BFFNT sheets) -
+// see graphics/bflim.hpp and graphics/bffnt.hpp for which byte maps where.
+constexpr uint32_t kSurfaceFormatUnormR8       = 0x001;  // L8 / A8 (one channel, routed via compMap)
+constexpr uint32_t kSurfaceFormatUnormR8G8     = 0x007;  // LA8
+constexpr uint32_t kSurfaceFormatUnormR5G6B5   = 0x008;
+constexpr uint32_t kSurfaceFormatUnormBC1      = 0x031;
+constexpr uint32_t kSurfaceFormatUnormBC2      = 0x032;
+constexpr uint32_t kSurfaceFormatUnormBC3      = 0x033;
+constexpr uint32_t kSurfaceFormatUnormBC4      = 0x034;
+constexpr uint32_t kSurfaceFormatUnormBC5      = 0x035;
+constexpr uint32_t kSurfaceFormatSrgbBC1       = 0x431;
+constexpr uint32_t kSurfaceFormatSrgbBC3       = 0x433;
+// Texture component map: (x << 24) | (y << 16) | (z << 8) | w, each a
+// selector 0=R 1=G 2=B 3=A 4=zero 5=one. The sprite pixel shader multiplies
+// the sampled RGBA by the vertex colour, so single-channel art is routed
+// into the alpha (or all three colour) lanes here rather than in a shader.
+constexpr uint32_t kCompMapRGBA        = 0x00010203;
+constexpr uint32_t kCompMapAlphaOnly   = 0x05050500; // RGB = 1, A = R  (A8, BC4 alpha)
+constexpr uint32_t kCompMapLumOnly     = 0x00000005; // RGB = R, A = 1  (L8, BC4 luminance)
+constexpr uint32_t kCompMapLumAlpha    = 0x00000001; // RGB = R, A = G  (LA8, BC5 "^t")
+constexpr uint32_t kCompMapRGBOpaque   = 0x00010205; // RGB, A = 1      (RGB565)
+// RGB = 1, A = G. For a BC5 ("^t") sprite whose red channel is NOT a white
+// mask but a gradient the game feeds to a TEV stage as the ratio between two
+// material colours (SelectFrame_04, Nt_CursorCircle). Routing that gradient
+// into RGB paints the shape black-to-white instead of tinting it, so those
+// sprites take this map and let the vertex colour supply the colour.
+constexpr uint32_t kCompMapShapeFromG  = 0x05050501;
+
+// GX2BlendMode - the src/dst factors GX2SetBlendControl takes (wut gx2/enum.h).
+constexpr uint32_t kBlendZero            = 0;
+constexpr uint32_t kBlendOne             = 1;
+constexpr uint32_t kBlendSrcColor        = 2;
+constexpr uint32_t kBlendInvSrcColor     = 3;
+constexpr uint32_t kBlendSrcAlpha        = 4;
+constexpr uint32_t kBlendInvSrcAlpha     = 5;
+constexpr uint32_t kBlendDstAlpha        = 6;
+constexpr uint32_t kBlendInvDstAlpha     = 7;
+constexpr uint32_t kBlendDstColor        = 8;
+constexpr uint32_t kBlendInvDstColor     = 9;
+constexpr uint32_t kBlendSrcAlphaSat     = 10;
+
+// GX2BlendCombineMode - how the two weighted terms are combined.
+constexpr uint32_t kBlendCombineAdd      = 0;
+constexpr uint32_t kBlendCombineSub      = 1;  // src - dst
+constexpr uint32_t kBlendCombineMin      = 2;
+constexpr uint32_t kBlendCombineMax      = 3;
+constexpr uint32_t kBlendCombineRevSub   = 4;  // dst - src
+
+// The scan buffer BotW renders into is UNORM_R10_G10_B10_A2 (seen live:
+// "dstFormat=0x19"), so its alpha channel is only 2 bits and is never
+// displayed. Blend factors that read DESTINATION alpha are therefore close
+// to useless on it - prefer the source-alpha factors below.
+constexpr uint32_t kSurfaceFormatUnormR10G10B10A2 = 0x019;
 constexpr uint32_t kAaMode1x = 0;
 constexpr uint32_t kSurfaceUseTexture = 1;
 constexpr uint32_t kSurfaceUseDepthBuffer = 4;

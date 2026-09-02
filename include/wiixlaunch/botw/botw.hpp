@@ -29,3 +29,4 @@
 #include "graphics/nvn.hpp"
 #include "platform/log.hpp"
 #include "graphics/gx2.hpp"
+#include "gui/gui.hpp"

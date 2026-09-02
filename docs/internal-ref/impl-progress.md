@@ -94,6 +94,28 @@
 
 ### GX2 (Wii U):
 - ~~CreateTexture, DrawSprite, DrawMesh~~ (gx2.hpp, gfd.hpp, gx2_shader_types.hpp, gx2_imports.hpp)
+- ~~CreateTextureFromSurface (pre-tiled BCn/A8 upload), BeginBatch/BatchQuad/EndBatch~~ (gx2.hpp)
+
+## GUI (custom in-game UI, base-game style):
+- ~~GX2: fonts (Normal_00/NormalS_00 BFFNT) + layout art (Common.sblarc BFLIM) streamed from the game's own archives at runtime, text with the game's metrics, MessageBox/RoundedBox/SelectFrame/cursors, Button/Toggle/Slider/Selector with D-pad focus~~ (gui/gui.hpp + gui_*.hpp, graphics/bffnt.hpp, bflim.hpp, platform/yaz0.hpp, sarc.hpp) - verified in Cemu 2.6/v208: loader gets 2/2 fonts + 27/27 sprites, dialogue box renders correctly; widget panel not yet seen (test mod: ../BreathOfTheWild_GUITest), see docs/gui.md
+- NVN: stub (SupportsGUI=false)
+- ~~GX2 blend modes (Blend::Alpha/Additive/Overlay/Multiply/Opaque/Premultiplied/Subtract + FromLyt, batched by (texture, blend))~~ (gx2.hpp)
+- ~~group alpha stack (PushAlpha/PopAlpha, the lyt pane-alpha chain)~~ (gui.hpp)
+- ~~resolution handling: real device size, Fit/Stretch mapping, device-pixel snapping, exact last-texel edge sampling~~ (gui_render.hpp) - the colour buffer is 854x480 on the GamePad view, not 1280x720
+- ~~kerning (KRNG, word offsets, keyed by character code)~~ (bffnt.hpp, gui_text.hpp)
+- ~~free quad rotation (libm-free sin/cos; lyt angles need their sign flipped, panes are y-up)~~ (gui_render.hpp)
+- ~~cursors/frames drawn as real lyt window frames (corners + stretched edges), measured edge-sampling UVs per sprite, option cursor at its true additive alpha 128, nine-sliced plate with shadow~~ (gui.hpp, gui_render.hpp)
+- ~~rounded boxes/outlines as window frames too (the corner art carries transparent padding that only lines up when the edges come from the same texture) - fixes the notch at every corner seen at 1440p; plate = shadow + opaque base + rim over a padded window~~ (gui.hpp)
+- ~~edge quads repeat ONE texel column/row (a degenerate UV range) instead of spanning to 1.0 - the span was fading every frame edge out left-to-right wherever the art stops short of the tile~~ (gui.hpp)
+- ~~per-sprite component-map override: a BC5 '^t' red channel is sometimes a TEV gradient, not a colour (SelectFrame_04 rendered black-grey-white)~~ (gui_render.hpp, gx2_shader_types.hpp)
+- ~~plate corner keeps the layout's 96/240 proportion instead of the largest that fits~~ (gui.hpp)
+- ~~NormalS_00 (outlined face) dropped: not loaded, styles use Normal, FontId::NormalSmall falls back~~ (gui_types.hpp, gui_render.hpp, gui_text.hpp)
+- ~~MessageBox auto-shrinks past the box's three lines (Canvas::FitToBox)~~ (gui.hpp, gui_text.hpp)
+- input capture (stop the game seeing menu input) - not implemented
+- framebuffer blur behind windows (the game's FBLayout capture) - not reproduced, the biggest remaining visual gap
+- exact plate shading (BtnBasic inner texture via TEV) - approximated
+- alpha compare (a few materials enable it) - everything is blended instead
+- Caption_00 / Special_00 / External_00 fonts - not loaded (loader handles them, just not in the table)
 
 ## Layouts (flyt & flan):
 - ~~flyt: Pane/PicturePane/Layout - translate/rotate/scale/size/alpha/visible, FindPane, corner colors, load hook+redirect~~ (flyt.hpp)
@@ -140,5 +162,9 @@ I'd really love to get custom shaders replacing in game ones (basically reconstr
 | `flyt.hpp::FLYT::Pane/PicturePane/Layout` | X | ✓ |
 | `nvn.hpp::NVN::*` | ✓ | X |
 | `gx2.hpp::GX2::*` | X | ✓ |
+| `gx2.hpp::GX2::CreateTextureFromSurface, Begin/BatchQuad/EndBatch` | X | ✓ |
+| `gui/gui.hpp::GUI::Init/OnFrame, Canvas::*` | X (stub) | ✓ (compiles, untested in-game) |
+| `graphics/bffnt.hpp, bflim.hpp, platform/yaz0.hpp, sarc.hpp` | ✓ (parsers are platform-agnostic) | ✓ |
+| `fs.hpp::FS::File::Open/ReadAt/Close` | X | ✓ |
 | `fs.hpp::FS::ReadFile/WriteFile` | ✓ | ✓ |
 | `log.hpp::OSLog` | X | ✓ (Cemu only) |

@@ -93,6 +93,108 @@ namespace WrapMode {
 using DrawCallback = void (*)(CommandBuffer* cmdBuf, void* dstTexture, int width, int height);
 using InitCallback = void (*)();
 
+// ---------------------------------------------------------------------------
+// Blend state
+// ---------------------------------------------------------------------------
+// One GX2SetBlendControl worth of state. Colour and alpha are always
+// specified separately here (GX2's separateAlphaBlend flag is set), because
+// leaving alpha to follow the colour factors is wrong whenever the colour
+// factors read DESTINATION colour - and it is the alpha channel that decides
+// what a later draw blends against.
+struct BlendState {
+    uint32_t colorSrc = GX2Types::kBlendSrcAlpha;
+    uint32_t colorDst = GX2Types::kBlendInvSrcAlpha;
+    uint32_t colorCombine = GX2Types::kBlendCombineAdd;
+    uint32_t alphaSrc = GX2Types::kBlendOne;
+    uint32_t alphaDst = GX2Types::kBlendInvSrcAlpha;
+    uint32_t alphaCombine = GX2Types::kBlendCombineAdd;
+
+    bool operator==(const BlendState& o) const {
+        return colorSrc == o.colorSrc && colorDst == o.colorDst && colorCombine == o.colorCombine &&
+               alphaSrc == o.alphaSrc && alphaDst == o.alphaDst && alphaCombine == o.alphaCombine;
+    }
+    bool operator!=(const BlendState& o) const { return !(*this == o); }
+};
+
+namespace Blend {
+    // Straight (non-premultiplied) alpha - what a .bflyt material with no
+    // blend block gets, and what all but a handful of BotW's UI materials use.
+    constexpr BlendState Alpha{GX2Types::kBlendSrcAlpha, GX2Types::kBlendInvSrcAlpha, GX2Types::kBlendCombineAdd,
+                               GX2Types::kBlendOne, GX2Types::kBlendInvSrcAlpha, GX2Types::kBlendCombineAdd};
+    // Colour already multiplied by its alpha.
+    constexpr BlendState Premultiplied{GX2Types::kBlendOne, GX2Types::kBlendInvSrcAlpha, GX2Types::kBlendCombineAdd,
+                                       GX2Types::kBlendOne, GX2Types::kBlendInvSrcAlpha, GX2Types::kBlendCombineAdd};
+    // lyt (op 1, src 4, dst 1): the game's glow blend - 1557 materials in
+    // Layout/Common.sblarc, more than every other explicit blend combined.
+    constexpr BlendState Additive{GX2Types::kBlendSrcAlpha, GX2Types::kBlendOne, GX2Types::kBlendCombineAdd,
+                                  GX2Types::kBlendOne, GX2Types::kBlendOne, GX2Types::kBlendCombineAdd};
+    constexpr BlendState AdditivePremultiplied{GX2Types::kBlendOne, GX2Types::kBlendOne, GX2Types::kBlendCombineAdd,
+                                               GX2Types::kBlendOne, GX2Types::kBlendOne, GX2Types::kBlendCombineAdd};
+    // lyt (op 1, src 2, dst 4): src*dst + dst*srcAlpha. BotW uses it for
+    // overlay ornaments (Message_00's Nt_MsgDeco_02/03, P_Overlay_00, ...).
+    constexpr BlendState Overlay{GX2Types::kBlendDstColor, GX2Types::kBlendSrcAlpha, GX2Types::kBlendCombineAdd,
+                                 GX2Types::kBlendOne, GX2Types::kBlendInvSrcAlpha, GX2Types::kBlendCombineAdd};
+    // lyt (op 1, src 2, dst 0).
+    constexpr BlendState Multiply{GX2Types::kBlendDstColor, GX2Types::kBlendZero, GX2Types::kBlendCombineAdd,
+                                  GX2Types::kBlendDstAlpha, GX2Types::kBlendZero, GX2Types::kBlendCombineAdd};
+    // lyt (op 1, src 1, dst 0) - writes the source through, ignoring alpha.
+    constexpr BlendState Opaque{GX2Types::kBlendOne, GX2Types::kBlendZero, GX2Types::kBlendCombineAdd,
+                                GX2Types::kBlendOne, GX2Types::kBlendZero, GX2Types::kBlendCombineAdd};
+    // lyt (op 3, src 4, dst 1): dst - src*srcAlpha.
+    constexpr BlendState Subtract{GX2Types::kBlendSrcAlpha, GX2Types::kBlendOne, GX2Types::kBlendCombineRevSub,
+                                  GX2Types::kBlendZero, GX2Types::kBlendOne, GX2Types::kBlendCombineAdd};
+
+    // Translates a .bflyt material blend block - the four bytes
+    // (blendOp, sourceFactor, destFactor, logicOp) a BFLYT stores, whose
+    // factor numbering is NOT GX2's - into GX2 state, so a value read out of
+    // a layout dump can be used directly. logicOp is ignored (GX2 takes it
+    // through GX2SetColorControl, and every BotW UI material leaves it at 0).
+    //
+    //   lyt op:     0 disable, 1 add, 2 subtract, 3 reverse subtract, 4 min, 5 max
+    //   lyt factor: 0 zero, 1 one, 2 dstColor, 3 invDstColor, 4 srcAlpha,
+    //               5 invSrcAlpha, 6 dstAlpha, 7 invDstAlpha, 8 srcColor, 9 invSrcColor
+    inline uint32_t FactorFromLyt(uint8_t f) {
+        switch (f) {
+        case 0: return GX2Types::kBlendZero;
+        case 1: return GX2Types::kBlendOne;
+        case 2: return GX2Types::kBlendDstColor;
+        case 3: return GX2Types::kBlendInvDstColor;
+        case 4: return GX2Types::kBlendSrcAlpha;
+        case 5: return GX2Types::kBlendInvSrcAlpha;
+        case 6: return GX2Types::kBlendDstAlpha;
+        case 7: return GX2Types::kBlendInvDstAlpha;
+        case 8: return GX2Types::kBlendSrcColor;
+        case 9: return GX2Types::kBlendInvSrcColor;
+        default: return GX2Types::kBlendOne;
+        }
+    }
+
+    inline uint32_t CombineFromLyt(uint8_t op) {
+        switch (op) {
+        case 2: return GX2Types::kBlendCombineSub;
+        case 3: return GX2Types::kBlendCombineRevSub;
+        case 4: return GX2Types::kBlendCombineMin;
+        case 5: return GX2Types::kBlendCombineMax;
+        default: return GX2Types::kBlendCombineAdd;
+        }
+    }
+
+    inline BlendState FromLyt(uint8_t blendOp, uint8_t srcFactor, uint8_t dstFactor) {
+        if (blendOp == 0) return Opaque;   // lyt "disable" writes the source unblended
+        BlendState s;
+        s.colorSrc = FactorFromLyt(srcFactor);
+        s.colorDst = FactorFromLyt(dstFactor);
+        s.colorCombine = CombineFromLyt(blendOp);
+        // The layouts' own separate-alpha block is not honoured here; keeping
+        // straight-alpha accumulation in the alpha channel is right for every
+        // colour mode above and harmless on a 2-bit destination alpha.
+        s.alphaSrc = GX2Types::kBlendOne;
+        s.alphaDst = GX2Types::kBlendInvSrcAlpha;
+        s.alphaCombine = GX2Types::kBlendCombineAdd;
+        return s;
+    }
+}
+
 namespace impl {
 
 constexpr uintptr_t kGraphicsContextSlot = 0x1046c92c;
@@ -239,7 +341,9 @@ struct TextureWrapper {
     GX2Types::Sampler sampler;
 };
 
-constexpr size_t kMaxTextures = 16;
+// 64 rather than 16: the GUI alone holds ~25 pieces of the game's own UI art
+// plus three font sheets (see gui/gui_assets.hpp).
+constexpr size_t kMaxTextures = 64;
 inline TextureWrapper g_Textures[kMaxTextures]{};
 inline uint32_t g_TextureCount = 0;
 
@@ -436,6 +540,77 @@ inline void InitializeAllPipelines() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Quad batching (the GUI's draw path)
+// ---------------------------------------------------------------------------
+// DrawSprite sets the whole pipeline up and syncs the GPU (DrawDone) for
+// every quad, which is fine for a handful of sprites and hopeless for text -
+// one dialog box is a few hundred glyph quads. The batch path sets state
+// once per BeginBatch, appends quads (six vertices each) for one texture at
+// a time, and issues a single DrawEx per texture change or flush. No
+// DrawDone: the vertex ring is split into two halves that alternate per
+// frame, so a frame's vertices are not overwritten until the frame after
+// next, by which point the game's own swap has waited for that GPU work.
+constexpr size_t kBatchRingBytes = 512 * 1024;
+constexpr size_t kBatchHalfBytes = kBatchRingBytes / 2;
+constexpr uint32_t kBatchMaxQuadsPerFlush = 256;   // 256 quads * 6 verts * 40 B = 60 KB staging
+inline uint8_t* g_BatchRing = nullptr;
+inline uint32_t g_BatchFrame = 0;                  // selects the live half of the ring
+inline size_t g_BatchHalfUsed = 0;                 // bytes of the live half used this frame
+inline TextureWrapper* g_BatchTexture = nullptr;
+inline TextureVertex g_BatchVerts[kBatchMaxQuadsPerFlush * 6];
+inline uint32_t g_BatchVertCount = 0;
+inline bool g_BatchActive = false;
+inline uint32_t g_BatchDrawCalls = 0;
+inline uint32_t g_BatchDroppedQuads = 0;
+// Blend is part of the batch key: quads are only merged into one draw while
+// both the texture and the blend state stay the same.
+inline BlendState g_BatchBlend{};
+inline BlendState g_BatchBlendApplied{};
+inline bool g_BatchBlendValid = false;
+
+inline void ApplyBlend(const BlendState& b) {
+    if (g_BatchBlendValid && b == g_BatchBlendApplied) return;
+    SetBlendControl()(0, b.colorSrc, b.colorDst, b.colorCombine, 1, b.alphaSrc, b.alphaDst, b.alphaCombine);
+    g_BatchBlendApplied = b;
+    g_BatchBlendValid = true;
+}
+
+inline void BatchNewFrame() {
+    g_BatchFrame++;
+    g_BatchHalfUsed = 0;
+    g_BatchDrawCalls = 0;
+    g_BatchDroppedQuads = 0;
+}
+
+inline void BatchFlush() {
+    if (g_BatchVertCount == 0 || !g_BatchTexture || !g_BatchRing) {
+        g_BatchVertCount = 0;
+        return;
+    }
+    const size_t bytes = g_BatchVertCount * sizeof(TextureVertex);
+    if (g_BatchHalfUsed + bytes > kBatchHalfBytes) {
+        // Frame budget exhausted: drop rather than scribble over vertices
+        // the GPU may still be reading from the previous frame.
+        g_BatchDroppedQuads += g_BatchVertCount / 6;
+        g_BatchVertCount = 0;
+        return;
+    }
+    uint8_t* dst = g_BatchRing + (g_BatchFrame & 1) * kBatchHalfBytes + g_BatchHalfUsed;
+    memcpy(dst, g_BatchVerts, bytes);
+    Invalidate()(GX2Types::kInvalidateModeCpuAttributeBuffer, dst, static_cast<uint32_t>(bytes));
+
+    ApplyBlend(g_BatchBlend);
+    SetPixelTexture()(&g_BatchTexture->texture, 0);
+    SetPixelSampler()(&g_BatchTexture->sampler, 0);
+    SetAttribBuffer()(0, static_cast<uint32_t>(bytes), sizeof(TextureVertex), dst);
+    DrawEx()(GX2Types::kPrimitiveModeTriangles, g_BatchVertCount, 0, 1);
+
+    g_BatchHalfUsed += (bytes + 255) & ~static_cast<size_t>(255);
+    g_BatchVertCount = 0;
+    g_BatchDrawCalls++;
+}
+
 WIIXL_HOOK_DEFINE_TRAMPOLINE(AglCopyToScanBufferHook) {
     static void Callback(uintptr_t renderBuffer, uintptr_t param2, int32_t param3) {
             if (renderBuffer) {
@@ -449,6 +624,7 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(AglCopyToScanBufferHook) {
                     uint32_t height = tvColorBuffer->surface.height ? tvColorBuffer->surface.height : 720;
 
                     g_DepthClearedThisFrame = false;
+                    BatchNewFrame();
 
                     static uint32_t s_count = 0;
                     if ((s_count++ % 300) == 0) {
@@ -578,6 +754,167 @@ inline TextureHandle CreateTexture(
         width, height, wrap.texture.surface.pitch, wrap.texture.surface.image, &wrap);
 
     return reinterpret_cast<TextureHandle>(&wrap);
+}
+
+// ---------------------------------------------------------------------------
+// Pre-tiled surfaces (the game's own BFLIM / BFFNT art)
+// ---------------------------------------------------------------------------
+// CreateTexture takes linear RGBA8 and tiles it on the CPU. The game's UI
+// art is already a finished GX2 surface (tiled, BCn-compressed, with the tile
+// mode and swizzle recorded next to it), so it is uploaded as-is and the GPU
+// addresses it exactly as it does for the game. Nothing is decoded.
+struct SurfaceDesc {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t format = GX2Types::kSurfaceFormatUnormR8G8B8A8;  // GX2 surface format
+    uint32_t tileMode = GX2Types::kTileModeTiled2DThin1;
+    uint32_t swizzle = 0;                                     // GX2Surface::swizzle (bank/pipe bits at 8..10)
+    uint32_t compMap = GX2Types::kCompMapRGBA;
+    bool linearFilter = true;
+};
+
+// Sets the surface up and allocates its image memory, returning where to
+// put the tiled bytes (and how many are expected). Call FinalizeTexture once
+// they are in place. Lets a streaming loader write straight into GPU memory.
+inline TextureHandle AllocTextureSurface(const SurfaceDesc& desc, void** outImage, uint32_t* outImageSize) {
+    if (impl::g_TextureCount >= impl::kMaxTextures || desc.width == 0 || desc.height == 0) return 0;
+
+    auto& wrap = impl::g_Textures[impl::g_TextureCount];
+    wrap = impl::TextureWrapper{};
+    wrap.texture.surface.dim = GX2Types::kSurfaceDimTexture2D;
+    wrap.texture.surface.width = desc.width;
+    wrap.texture.surface.height = desc.height;
+    wrap.texture.surface.depth = 1;
+    wrap.texture.surface.mipLevels = 1;
+    wrap.texture.surface.format = desc.format;
+    wrap.texture.surface.aa = GX2Types::kAaMode1x;
+    wrap.texture.surface.use = GX2Types::kSurfaceUseTexture;
+    wrap.texture.surface.tileMode = desc.tileMode;
+    wrap.texture.surface.swizzle = desc.swizzle;
+
+    impl::CalcSurfaceSizeAndAlignment()(&wrap.texture.surface);
+    if (wrap.texture.surface.imageSize == 0) return 0;
+
+    wrap.texture.surface.image = impl::AllocMEM1(wrap.texture.surface.imageSize, wrap.texture.surface.alignment);
+    if (!wrap.texture.surface.image) {
+        BotW::OSLog("WiiXLaunch: GX2 AllocTextureSurface alloc failed (%u bytes)\n", wrap.texture.surface.imageSize);
+        return 0;
+    }
+
+    wrap.texture.viewFirstMip = 0;
+    wrap.texture.viewNumMips = 1;
+    wrap.texture.viewFirstSlice = 0;
+    wrap.texture.viewNumSlices = 1;
+    wrap.texture.compMap = desc.compMap;
+
+    impl::InitSampler()(&wrap.sampler, GX2Types::kTexClampModeClamp,
+                        desc.linearFilter ? GX2Types::kTexXYFilterModeLinear : 0);
+    impl::InitSamplerClamping()(&wrap.sampler, GX2Types::kTexClampModeClamp, GX2Types::kTexClampModeClamp, GX2Types::kTexClampModeClamp);
+
+    impl::g_TextureCount++;
+    if (outImage) *outImage = wrap.texture.surface.image;
+    if (outImageSize) *outImageSize = wrap.texture.surface.imageSize;
+    return reinterpret_cast<TextureHandle>(&wrap);
+}
+
+inline void FinalizeTexture(TextureHandle handle) {
+    if (!handle) return;
+    auto* wrap = reinterpret_cast<impl::TextureWrapper*>(handle);
+    impl::InitTextureRegs()(&wrap->texture);
+    impl::Invalidate()(GX2Types::kInvalidateModeCpuTexture, wrap->texture.surface.image, wrap->texture.surface.imageSize);
+}
+
+// One-shot: allocate, copy the tiled bytes in, finalize. `dataSize` must be
+// at least the surface's computed image size (it is logged if it is not, so
+// a wrong tile mode/swizzle guess shows up as a size mismatch).
+inline TextureHandle CreateTextureFromSurface(const SurfaceDesc& desc, const void* data, uint32_t dataSize) {
+    if (!data) return 0;
+    void* image = nullptr;
+    uint32_t imageSize = 0;
+    TextureHandle handle = AllocTextureSurface(desc, &image, &imageSize);
+    if (!handle) return 0;
+    if (dataSize < imageSize) {
+        BotW::OSLog("WiiXLaunch: GX2 CreateTextureFromSurface %ux%u fmt=0x%x tile=%u: have %u bytes, surface wants %u - rejecting\n",
+                    desc.width, desc.height, desc.format, desc.tileMode, dataSize, imageSize);
+        // The slot is spent (this module never frees) but the handle is not handed out.
+        return 0;
+    }
+    memcpy(image, data, imageSize);
+    FinalizeTexture(handle);
+    return handle;
+}
+
+inline bool GetTextureSize(TextureHandle handle, uint32_t& width, uint32_t& height) {
+    if (!handle) return false;
+    auto* wrap = reinterpret_cast<impl::TextureWrapper*>(handle);
+    width = wrap->texture.surface.width;
+    height = wrap->texture.surface.height;
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Batched quads
+// ---------------------------------------------------------------------------
+// BeginBatch(dst) once per draw callback, then any number of BatchQuad calls
+// (vertices in NDC, the same TL/TR/BL/BR order and per-vertex UV+colour as
+// DrawSprite's strip), then EndBatch. Quads for the same texture in a row
+// share one draw call. See impl::BatchFlush for the ring-buffer rules.
+inline void BeginBatch(void* dstTexture) {
+    if (!impl::g_SpritePipelineReady || impl::g_BatchActive) return;
+    auto* colorBuf = reinterpret_cast<GX2Types::ColorBuffer*>(dstTexture);
+    if (!colorBuf || !colorBuf->surface.image) return;
+    void* contextState = impl::GetContextState();
+    if (!contextState) return;
+
+    if (!impl::g_BatchRing) {
+        impl::g_BatchRing = reinterpret_cast<uint8_t*>(impl::AllocMEM1(impl::kBatchRingBytes, 256));
+        if (!impl::g_BatchRing) return;
+    }
+
+    uint32_t dispW = colorBuf->surface.width ? colorBuf->surface.width : 1280;
+    uint32_t dispH = colorBuf->surface.height ? colorBuf->surface.height : 720;
+
+    impl::SetContextState()(contextState);
+    impl::SetShaderModeEx()(GX2Types::kShaderModeUniformRegister, 0x30, 0x40, 0x0, 0x0, 0xc8, 0xc0);
+    impl::SetColorBuffer()(colorBuf, 0);
+    impl::SetTargetChannelMasks()(0x0F, 0, 0, 0, 0, 0, 0, 0);
+    impl::SetViewport()(0.0f, 0.0f, static_cast<float>(dispW), static_cast<float>(dispH), 0.0f, 1.0f);
+    impl::SetScissor()(0, 0, dispW, dispH);
+    impl::SetDepthOnlyControl()(0, 0, GX2Types::kCompareFuncAlways);
+    impl::SetCullOnlyControl()(GX2Types::kFrontFaceCcw, 0, 0);
+    impl::SetColorControl()(GX2Types::kLogicOpCopy, 1, 0, 1);
+    impl::SetFetchShader()(&impl::g_SpriteFetchShader);
+    impl::SetVertexShader()(impl::g_SpriteVertexShader);
+    impl::SetPixelShader()(impl::g_SpritePixelShader);
+
+    impl::g_BatchTexture = nullptr;
+    impl::g_BatchVertCount = 0;
+    impl::g_BatchBlend = Blend::Alpha;
+    impl::g_BatchBlendValid = false;   // force the first flush to program the blend registers
+    impl::g_BatchActive = true;
+}
+
+inline void BatchQuad(TextureHandle textureHandle, const TextureVertex verts[4],
+                      const BlendState& blend = Blend::Alpha) {
+    if (!impl::g_BatchActive || !textureHandle || !verts) return;
+    auto* wrap = reinterpret_cast<impl::TextureWrapper*>(textureHandle);
+    if (wrap != impl::g_BatchTexture || blend != impl::g_BatchBlend ||
+        impl::g_BatchVertCount + 6 > impl::kBatchMaxQuadsPerFlush * 6) {
+        impl::BatchFlush();
+        impl::g_BatchTexture = wrap;
+        impl::g_BatchBlend = blend;
+    }
+    TextureVertex* out = impl::g_BatchVerts + impl::g_BatchVertCount;
+    out[0] = verts[0]; out[1] = verts[1]; out[2] = verts[2];
+    out[3] = verts[2]; out[4] = verts[1]; out[5] = verts[3];
+    impl::g_BatchVertCount += 6;
+}
+
+inline void EndBatch() {
+    if (!impl::g_BatchActive) return;
+    impl::BatchFlush();
+    impl::g_BatchTexture = nullptr;
+    impl::g_BatchActive = false;
 }
 
 // Reads a texture packaged by scripts/pack_resources.py/pack_texture_gx2.py
@@ -808,6 +1145,35 @@ inline TextureHandle LoadTexture(const char*, size_t = 0) { return 0; }
 inline MeshData LoadMesh(const char*, size_t = 0) { return MeshData{}; }
 inline void DrawSprite(void*, void*, TextureHandle, float, float, float, float, float = 1, float = 1, float = 1, float = 1) {}
 inline void DrawMesh(void*, void*, const MeshVertex*, size_t) {}
+
+struct SurfaceDesc {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    uint32_t format = 0;
+    uint32_t tileMode = 4;
+    uint32_t swizzle = 0;
+    uint32_t compMap = 0x00010203;
+    bool linearFilter = true;
+};
+inline TextureHandle AllocTextureSurface(const SurfaceDesc&, void**, uint32_t*) { return 0; }
+inline void FinalizeTexture(TextureHandle) {}
+inline TextureHandle CreateTextureFromSurface(const SurfaceDesc&, const void*, uint32_t) { return 0; }
+inline bool GetTextureSize(TextureHandle, uint32_t&, uint32_t&) { return false; }
+
+struct BlendState {
+    uint32_t colorSrc = 4, colorDst = 5, colorCombine = 0;
+    uint32_t alphaSrc = 1, alphaDst = 5, alphaCombine = 0;
+    bool operator==(const BlendState&) const { return true; }
+    bool operator!=(const BlendState&) const { return false; }
+};
+namespace Blend {
+    constexpr BlendState Alpha{}, Premultiplied{}, Additive{}, AdditivePremultiplied{};
+    constexpr BlendState Overlay{}, Multiply{}, Opaque{}, Subtract{};
+    inline BlendState FromLyt(uint8_t, uint8_t, uint8_t) { return BlendState{}; }
+}
+inline void BeginBatch(void*) {}
+inline void BatchQuad(TextureHandle, const TextureVertex*, const BlendState& = Blend::Alpha) {}
+inline void EndBatch() {}
 
 } // namespace WiiXLaunch::BotW::GX2
 

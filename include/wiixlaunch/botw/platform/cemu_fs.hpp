@@ -27,6 +27,9 @@ enum class CemuFsImport : uint32_t {
     FSReadFile,
     FSWriteFile,
     FSCloseFile,
+    // Appended for FS::File::ReadAt (positioned reads of large archives
+    // without loading them whole - see fs.hpp). Keep new entries at the END.
+    FSReadFileWithPos,
     Count
 };
 

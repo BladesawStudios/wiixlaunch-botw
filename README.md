@@ -42,12 +42,13 @@ projects that want it.
 | `botw/game/controller.hpp` | `Controller` - unified button/stick reads across Switch NPad and Wii U VPAD/KPAD (WPAD Pro + Core) |
 | `botw/game/camera.hpp` | `Camera` - typed get/set accessors for a live camera object's position/look-at/up |
 | `botw/graphics/nvn.hpp` | `NVN` - Switch NVN graphics injection, custom textures, packaged data, samplers, and 2D/3D drawing |
-| `botw/graphics/gx2.hpp` | `GX2` - Wii U/Cemu GX2 graphics injection, mirrors `NVN`'s API (`Init`, `RegisterDrawCallback`, `CreateTexture`, `LoadTexture`, `LoadMesh`, `DrawSprite`, `DrawMesh`) |
-| `botw/platform/fs.hpp` | `FS` - cross-platform file read/write, used internally by `GX2::LoadTexture`/`LoadMesh` and available directly |
+| `botw/graphics/gx2.hpp` | `GX2` - Wii U/Cemu GX2 graphics injection, mirrors `NVN`'s API (`Init`, `RegisterDrawCallback`, `CreateTexture`, `LoadTexture`, `LoadMesh`, `DrawSprite`, `DrawMesh`), plus pre-tiled surface upload (`CreateTextureFromSurface`) and batched quads (`BeginBatch`/`BatchQuad`/`EndBatch`) for the GUI |
+| `botw/gui/gui.hpp` | `GUI` - immediate-mode in-game UI in the base game's own style: dialogue boxes, rounded option rows, cursors, selection frames and focus-navigated widgets (`Button`, `Toggle`, `Slider`, `Selector`), set in the game's own fonts and drawn with its own layout art, streamed out of `Font_XX.sbfarc` / `Layout/Common.sblarc` at runtime so a mod ships no assets - see `docs/gui.md` |
+| `botw/platform/fs.hpp` | `FS` - cross-platform file read/write (`ReadFile`/`WriteFile`) and `FS::File` for positioned reads of large archives, used internally by `GX2::LoadTexture`/`LoadMesh` and the GUI asset loader, and available directly |
 | `botw/platform/log.hpp` | `OSLog` - Cemu-only logger (`OSReport`), used internally by `GX2`/`FS` for their own diagnostics |
 | `botw/botw.hpp` | Umbrella include for all of the above |
 
-`botw/graphics/gfd.hpp`, `botw/graphics/gx2_shader_types.hpp`, `botw/graphics/gx2_imports.hpp`, `botw/platform/cemu_fs.hpp`, and `botw/platform/cemu_logging.hpp` are internal support headers `gx2.hpp`/`fs.hpp`/`log.hpp` build on (GX2 shader-blob parsing, GX2 type/constant mirrors, and the Cemu "resolve real OS/GX2 calls from a bare code cave" shim tables). Not part of the public API, but worth knowing about if you're digging into how the Cemu side actually works.
+`botw/graphics/gfd.hpp`, `botw/graphics/gx2_shader_types.hpp`, `botw/graphics/gx2_imports.hpp`, `botw/platform/cemu_fs.hpp`, and `botw/platform/cemu_logging.hpp` are internal support headers `gx2.hpp`/`fs.hpp`/`log.hpp` build on (GX2 shader-blob parsing, GX2 type/constant mirrors, and the Cemu "resolve real OS/GX2 calls from a bare code cave" shim tables). The GUI adds `botw/graphics/bffnt.hpp` and `bflim.hpp` (the game's font and layout-texture formats), `botw/platform/yaz0.hpp` and `sarc.hpp` (a streaming Yaz0 decoder and SARC lookup, so the 31 MB layout archive is never held in memory), and `botw/gui/gui_types.hpp`, `gui_render.hpp`, `gui_text.hpp`, `gui_assets.hpp` behind `gui.hpp`. Not part of the public API, but worth knowing about if you're digging into how the Cemu side actually works.
 
 Public API headers live under `botw/game/` and `botw/graphics/`; `botw/platform/` is internal-only (Cemu/Wii U shim plumbing for `fs.hpp`/`log.hpp`/`gx2.hpp`), grouped this way so the split doubles as documentation of what a mod is actually meant to reach for. `src/cemu/*.asm` (the shim tables `platform/cemu_fs.hpp`, `platform/cemu_logging.hpp`, and `graphics/gx2_imports.hpp` resolve against) stays at that exact path - the base WiiXLaunch template's `scripts/deploy.py` scans `vendor/wiixlaunch-*/src/cemu/` by hardcoded path to splice these into the Cemu payload, so it can't move without also patching that scanner in the base repo.
 
@@ -104,6 +105,7 @@ a runtime check:
 | File read/write (`FS::ReadFile`/`WriteFile`) | ✅ | ✅ |
 | Graphics injection (`NVN::SupportsNVN`) | ✅ | N/A |
 | Graphics injection (`GX2::SupportsGX2`) | N/A | ✅ |
+| In-game GUI (`GUI::SupportsGUI`) | ❌ (NVN stub) | ✅ (untested in-game) |
 | Equipped item value (`Pouch::SupportsEquippedValue`) | ❌ | ✅ |
 | Armour effects (`Armour::SupportsArmourEffects`) | ❌ | ✅ |
 | In-game clock (`Time::SupportsGameTime`) | ❌ | ✅ |
