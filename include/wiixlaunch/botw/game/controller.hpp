@@ -310,6 +310,19 @@ inline uint32_t& CaptureFramesRef() {
 
 inline bool CaptureActive() { return CaptureFramesRef() != 0; }
 
+// Runs inside the input hook, after the pad has been sampled into
+// Controller's own state and BEFORE the game is allowed to see it. Capture
+// turned on from here takes effect on THIS frame's input rather than the
+// next one, which is the difference between a menu's opening press reaching
+// the game and not. The GUI uses it to run a mod's frame callback at the
+// only point where that decision can still be acted on.
+using PreCaptureCallback = void (*)();
+
+inline PreCaptureCallback& PreCaptureCallbackRef() {
+    static PreCaptureCallback callback = nullptr;
+    return callback;
+}
+
 // Counted down once per VPAD read, i.e. once per game frame. The KPAD hook
 // deliberately does not tick it - both hooks fire every frame, and ticking in
 // both would halve every hold.
@@ -632,6 +645,11 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(VPADReadWrapperHook) {
         float ry = *reinterpret_cast<float*>(vpad + 0x18);
         StoreState(VpadStateRef(), hold, lx, ly, rx, ry);
 
+        // Between StoreState and ApplyCapture: this is the last moment
+        // anything can decide to hide THIS frame's input from the game, and
+        // the pad has already been stored for our own accessors to read.
+        if (PreCaptureCallback pre = PreCaptureCallbackRef()) pre();
+
         // After StoreState, so capture hides the pad from the game and not
         // from us, and after ApplyInjection, so injected buttons survive it.
         ApplyCapture(vpad);
@@ -794,6 +812,15 @@ public:
     }
 
     static bool IsInputCaptured() { return impl::CaptureActive(); }
+
+    // Runs every input read, after the pad is sampled and before the game can
+    // see it - so capture requested from here hides the input being read
+    // right now, not the next frame's. One slot, separate from OnFrame (which
+    // fires after the game's copy is final); the GUI installs itself here.
+    // Wii U/Cemu only, like the rest of the capture path's timing guarantee.
+    static void OnInputRead(impl::PreCaptureCallback callback) {
+        impl::PreCaptureCallbackRef() = callback;
+    }
 
     // One injection, described completely.
     //
