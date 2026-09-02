@@ -164,9 +164,8 @@ inline bool g_FocusMoved = false;
 inline int64_t g_FocusChangedTicks = 0;
 inline int g_FocusPrevIndex = -1;
 
-// The game's menu sounds, on by default. They can only fire when focusable
-// widgets exist, so a mod that draws a HUD and nothing else stays silent
-// without having to ask.
+// The game's menu sounds. They can only fire when focusable widgets exist, so
+// a mod that draws a HUD and nothing else stays silent without asking.
 inline bool g_UiSounds = true;
 
 // A menu event only resolves while the sound group holding it is loaded, and
@@ -176,23 +175,43 @@ inline bool g_UiSounds = true;
 // in both places. Play() reports that, because it calls the inner routine
 // which returns whether the name resolved; the usual wrapper discards it.
 inline const char* const kCursorMoveEvents[] = {
-    Sound::Events::kCursorMove,   // mc_CursorMove - the in-game menus
-    "TitleCursorMove",            // the title screen's own
-    "mc_List_FocusMove",
+    Sound::Events::kCursorMove,   // mc_Key_On - the keyboard's key press
+    Sound::Events::kTitleMove,    // TitleCursorMove, if the keyboard set is gone
 };
 inline const char* const kDecideEvents[] = {
-    Sound::Events::kDecide,       // mc_Decide
-    "TitleCursorDecide",
-    "mc_List_Decide",
+    Sound::Events::kDecide,       // mc_Key_Decide
+    Sound::Events::kTitleDecide,
 };
 
-// Plays one of a candidate list and says which won, once, so a silent menu can
-// be diagnosed without guessing.
-inline void PlayUiEvent(const char* const* names, uint32_t count, const char* what) {
+// Override which events the menu uses. Any name DumpEvents() prints will work;
+// the defaults are the keyboard's, which are the only crisp UI sounds in the
+// resource this manager searches.
+inline const char* g_CursorEventOverride = nullptr;
+inline const char* g_DecideEventOverride = nullptr;
+
+// Plays a UI event, remembering which name worked.
+//
+// The remembering is not an optimisation, it is the fix for a real defect.
+// 0x0359A950 STARTS the sound and then returns whether the handle came out
+// valid, so walking a candidate list does not skip the names that fail - it
+// plays them. Every cursor move was firing mc_CursorMove and TitleCursorMove
+// on top of each other, and two overlapping voices is what "not what the title
+// sounds like" was.
+//
+// So the list is walked ONCE, and after that only the name that worked is
+// played. If it stops working - the loaded sound group changed, which is what
+// happens between the title screen and an in-game menu - the list is walked
+// again to find the new one.
+inline const char* g_LastCursorEvent = nullptr;
+inline const char* g_LastDecideEvent = nullptr;
+
+inline void PlayUiEvent(const char* const* names, uint32_t count, const char* what,
+                        const char*& resolved, const char* overrideName = nullptr) {
+    if (overrideName && Sound::Play(overrideName)) return;
+    if (resolved && Sound::Play(resolved)) return;      // the known-good one, alone
     const char* played = Sound::PlayFirstAvailable(names, count);
-    static uint32_t s_logged = 0;
-    if (s_logged < 4) {
-        ++s_logged;
+    if (played != resolved) {
+        resolved = played;
         OSLog("WiiXLaunch GUI: %s sound -> %s\n", what, played ? played : "(none resolved)");
     }
 }
@@ -214,7 +233,7 @@ inline void ApplyNavigationToFocus() {
         if (!firstEver && g_UiSounds) {
             PlayUiEvent(kCursorMoveEvents,
                         static_cast<uint32_t>(sizeof(kCursorMoveEvents) / sizeof(kCursorMoveEvents[0])),
-                        "cursor");
+                        "cursor", g_LastCursorEvent, g_CursorEventOverride);
         }
     }
 }
@@ -1280,7 +1299,7 @@ inline void BuildFrame() {
     if (g_UiSounds && g_FocusCountLast > 0 && PressedNow(Button::A)) {
         PlayUiEvent(kDecideEvents,
                     static_cast<uint32_t>(sizeof(kDecideEvents) / sizeof(kDecideEvents[0])),
-                    "decide");
+                    "decide", g_LastDecideEvent, g_DecideEventOverride);
     }
 
     g_RecordCount = 0;
@@ -1433,6 +1452,15 @@ inline ScalingMode GetScalingMode() { return impl::g_ScalingMode; }
 // is the general form if you want a different event.
 inline void SetUiSounds(bool on) { impl::g_UiSounds = on; }
 inline bool AreUiSoundsEnabled() { return impl::g_UiSounds; }
+
+// Pick different events for the menu. Pass any name Sound::DumpEvents() prints;
+// nullptr restores the default. The defaults are the software keyboard's key
+// press and confirm, which are the only crisp UI sounds in the resource the
+// game's event lookup actually searches.
+inline void SetUiSoundEvents(const char* cursorMove, const char* decide) {
+    impl::g_CursorEventOverride = cursorMove;
+    impl::g_DecideEventOverride = decide;
+}
 
 inline void SetPixelSnapping(bool on) { impl::g_SnapToPixels = on; }
 
@@ -1587,6 +1615,7 @@ inline ScalingMode GetScalingMode() { return ScalingMode::Fit; }
 inline void SetPixelSnapping(bool) {}
 inline void SetUiSounds(bool) {}
 inline bool AreUiSoundsEnabled() { return false; }
+inline void SetUiSoundEvents(const char*, const char*) {}
 inline void RequestFont(FontId, bool = true) {}
 inline bool FontRequested(FontId) { return false; }
 inline uint32_t FontSheetBytes(FontId) { return 0; }
