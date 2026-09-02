@@ -210,16 +210,23 @@ public:
     uint32_t DeviceWidth() const { return impl::g_ReportWidth; }
     uint32_t DeviceHeight() const { return impl::g_ReportHeight; }
     // Device pixels per layout pixel, for that same buffer.
-    float PixelScaleX() const {
-        const float sx = static_cast<float>(impl::g_ReportWidth) / kVirtualWidth;
-        const float sy = static_cast<float>(impl::g_ReportHeight) / kVirtualHeight;
-        return impl::g_ScalingMode == impl::ScalingMode::Stretch ? sx : (sx < sy ? sx : sy);
-    }
-    float PixelScaleY() const {
-        const float sx = static_cast<float>(impl::g_ReportWidth) / kVirtualWidth;
-        const float sy = static_cast<float>(impl::g_ReportHeight) / kVirtualHeight;
-        return impl::g_ScalingMode == impl::ScalingMode::Stretch ? sy : (sx < sy ? sx : sy);
-    }
+    float PixelScaleX() const { return impl::g_ReportScaleX; }
+    float PixelScaleY() const { return impl::g_ReportScaleY; }
+
+    // ---- time -------------------------------------------------------------
+    // Animate from these, never from Frame(): BotW runs at 30 and the FPS++
+    // pack makes it 60, so anything counting frames runs at double speed.
+    float DeltaSeconds() const { return impl::g_DeltaSeconds; }
+    float TimeSeconds() const { return impl::g_TimeSeconds; }
+    // Measured, smoothed, and the game's real rate - not an assumption.
+    float FramesPerSecond() const { return impl::g_Fps; }
+    // Position in a repeating cycle of `period` seconds, 0 to 1 - a sawtooth,
+    // for anything that should move at a constant rate.
+    float Phase(float periodSeconds) const { return impl::Phase(periodSeconds); }
+    // A smooth 0..1 oscillation over the same period, easing in and out. Use
+    // this for anything that pulses, bobs or breathes; stepping a Phase into
+    // a handful of states reads as stutter.
+    float Wave(float periodSeconds) const { return impl::Wave(periodSeconds); }
     // Where the 1280x720 rectangle sits inside the buffer (non-zero only
     // when Fit is letterboxing a non-16:9 buffer).
     float ViewportOffsetX() const { return impl::g_OffsetX; }
@@ -417,7 +424,7 @@ public:
         }
         if (showArrow) {
             // Nt_ArrowMsg_00: the "more" arrow at the bottom-right, bobbing.
-            const float bob = ((impl::g_FrameCounter / 8) % 4) * 1.0f;
+            const float bob = 4.0f * impl::Wave(1.1f);
             ImageAt(Sprite::ArrowMsg, win.Right() - 70.0f, win.Bottom() - 36.0f + bob, Colors::Cream.Scaled(alpha), OrientNone, 0.75f);
         }
     }
@@ -581,7 +588,9 @@ public:
     // (y down) is +135/+225/+45/-45; each arrow also sits 3px diagonally out
     // from its corner, at 0.21 scale of the 75px sprite.
     void BoxedCursor(const GUI::Rect& r, Color c = Colors::White) {
-        const float pulse = 1.0f + 0.08f * static_cast<float>((impl::g_FrameCounter / 10) % 2);
+        // A slow breathe rather than a two-state blink: the blink was only
+        // ever tolerable because it ran at double speed.
+        const float pulse = 1.0f + 0.06f * impl::Wave(1.4f);
         const float s = Metrics::kBoxedCursorArrow * pulse;
         const float o = 3.0f;   // the layout's own diagonal nudge
         const float h = s * 0.5f;
@@ -917,6 +926,7 @@ inline void BuildFrame() {
     if (!g_Initialized || !g_PipelineReady || !EnsureRecord()) return;
 
     g_FrameCounter++;
+    UpdateClock();
     UpdateInput();
     ApplyNavigationToFocus();
     ResetAlpha();
@@ -1037,6 +1047,26 @@ inline ScalingMode GetScalingMode() { return impl::g_ScalingMode; }
 // glyphs). Turn it off for smoothly animating positions.
 inline void SetPixelSnapping(bool on) { impl::g_SnapToPixels = on; }
 
+// Override the aspect ratio the frame is presented at. 0 - the default - is
+// AUTOMATIC and is normally what you want: it reads the game's own aspect
+// constant, which a Cemu ultrawide pack has to rewrite for the game itself to
+// render correctly, so 21:9 is handled with no configuration at all. See
+// game/display.hpp. Set it only to override that.
+inline void SetOutputAspect(float aspect) { impl::g_OutputAspect = aspect > 0.0f ? aspect : 0.0f; }
+inline float GetOutputAspect() { return impl::g_OutputAspect; }
+
+// What the mapping is actually using, however it was arrived at - detected,
+// overridden, or the colour buffer's own shape.
+inline float GetEffectiveOutputAspect() {
+    const float bufferAspect = static_cast<float>(impl::g_ReportWidth) /
+                               static_cast<float>(impl::g_ReportHeight);
+    return impl::ResolveOutputAspect(bufferAspect);
+}
+
+// The game's measured frame rate, smoothed. Real, not assumed: BotW is 30 by
+// default and 60 with the FPS++ pack.
+inline float FramesPerSecond() { return impl::g_Fps; }
+
 // Backdrop blur - BotW's frosted glass behind its windows. OFF by default:
 // it costs two render targets (a quarter-size pair, ~460 KB) and a handful of
 // full-screen draws on any frame that uses it, and an overlay that is not
@@ -1095,6 +1125,11 @@ public:
     void GetRightStick(float& x, float& y) const { x = 0; y = 0; }
     void CaptureInput() {}
     bool IsInputCaptured() const { return false; }
+    float DeltaSeconds() const { return 0.0f; }
+    float TimeSeconds() const { return 0.0f; }
+    float FramesPerSecond() const { return 0.0f; }
+    float Phase(float) const { return 0.0f; }
+    float Wave(float) const { return 0.0f; }
     void BlurBehind(const GUI::Rect&, Color = Colors::White) {}
     void FrostedBox(const GUI::Rect&, Color, float = Metrics::kRoundedCorner) {}
     int Focus() const { return 0; }
@@ -1149,6 +1184,10 @@ enum class ScalingMode : uint8_t { Fit, Stretch };
 inline void SetScalingMode(ScalingMode) {}
 inline ScalingMode GetScalingMode() { return ScalingMode::Fit; }
 inline void SetPixelSnapping(bool) {}
+inline void SetOutputAspect(float) {}
+inline float GetOutputAspect() { return 0.0f; }
+inline float GetEffectiveOutputAspect() { return 16.0f / 9.0f; }
+inline float FramesPerSecond() { return 0.0f; }
 inline void SetBackdropBlur(bool, uint32_t = 4, uint32_t = 2) {}
 inline bool IsBackdropBlurEnabled() { return false; }
 

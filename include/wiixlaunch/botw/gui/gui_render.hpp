@@ -4,10 +4,13 @@
 
 #if WIIXL_CEMU || WIIXL_WIIU
 
+#include <wiixlaunch/time.hpp>
+
 #include <cstdint>
 #include <cstddef>
 
 #include "gui_types.hpp"
+#include "../game/display.hpp"
 #include "../graphics/gx2.hpp"
 #include "../graphics/bffnt.hpp"
 
@@ -91,6 +94,55 @@ inline FontInfo g_Fonts[static_cast<size_t>(FontId::Count)] = {
 inline SpriteInfo& SpriteAt(Sprite s) { return g_Sprites[static_cast<size_t>(s)]; }
 inline BFFNT::Font& FontAt(FontId f) { return g_Fonts[static_cast<size_t>(f)].font; }
 
+// ---------------------------------------------------------------------------
+// Clock
+// ---------------------------------------------------------------------------
+// Animation is driven by elapsed TIME, never by a frame count. BotW runs at 30
+// but the FPS++ graphic pack makes it 60, which doubled the rate of anything
+// counting frames - cursors blinked twice as fast, arrows bobbed twice as
+// fast. Time::GetMonotonicTicks is the Espresso timebase read with mftb: no
+// import, no OS call, and it keeps real time under Cemu too.
+inline int64_t g_LastTicks = 0;
+inline int64_t g_NowTicks = 0;
+inline float g_DeltaSeconds = 0.0f;
+inline float g_TimeSeconds = 0.0f;
+inline float g_Fps = 0.0f;
+
+inline void UpdateClock() {
+    const int64_t now = WiiXLaunch::Time::GetMonotonicTicks();
+    g_NowTicks = now;
+    if (g_LastTicks != 0) {
+        const int64_t elapsed = now - g_LastTicks;
+        float dt = static_cast<float>(elapsed) / static_cast<float>(WiiXLaunch::Time::kTicksPerSecond);
+        // A load screen, a breakpoint or a first frame must not make an
+        // animation jump; clamp rather than let a huge delta through.
+        if (dt < 0.0f) dt = 0.0f;
+        if (dt > 0.25f) dt = 0.25f;
+        g_DeltaSeconds = dt;
+        g_TimeSeconds += dt;
+        if (dt > 0.0f) {
+            const float instant = 1.0f / dt;
+            g_Fps = g_Fps > 0.0f ? (g_Fps * 0.9f + instant * 0.1f) : instant;
+        }
+    }
+    g_LastTicks = now;
+}
+
+// Position within a repeating cycle of `period` seconds, 0 to 1 - the unit
+// every animation here is built from.
+//
+// Taken from the tick count with an integer modulo rather than from
+// accumulated seconds: a float holding elapsed time loses resolution as it
+// grows, and an animation that is smooth at boot would gradually start to
+// step. This stays exact however long the game has been running.
+inline float Phase(float period) {
+    if (period <= 0.0f || g_NowTicks == 0) return 0.0f;
+    const int64_t ticks = static_cast<int64_t>(period * static_cast<float>(WiiXLaunch::Time::kTicksPerSecond));
+    if (ticks <= 0) return 0.0f;
+    const int64_t within = g_NowTicks % ticks;
+    return static_cast<float>(within) / static_cast<float>(ticks);
+}
+
 // Per-frame render target, set by the draw callback.
 inline void* g_FrameDst = nullptr;
 inline bool g_FrameOpen = false;
@@ -124,6 +176,26 @@ inline uint32_t g_DeviceHeight = 720;
 inline uint32_t g_ReportWidth = 1280;
 inline uint32_t g_ReportHeight = 720;
 inline uint32_t g_ReportBestArea = 0;
+inline float g_ReportScaleX = 1.0f;
+inline float g_ReportScaleY = 1.0f;
+
+// The aspect ratio the finished frame is actually PRESENTED at, when that is
+// not the colour buffer's own. 0 means "work it out", which is the default
+// and is what handles ultrawide without being told anything.
+//
+// The colour buffer cannot answer it: a Cemu pack scales the render target
+// behind the game's back and the declared GX2 surface stays 1280x720. But the
+// GAME's own aspect constant can, because an ultrawide pack has to rewrite
+// that for the game itself to render correctly - see game/display.hpp. So the
+// automatic path reads it, and falls back to the buffer's own shape only if
+// what it finds is not a plausible aspect.
+inline float g_OutputAspect = 0.0f;
+
+inline float ResolveOutputAspect(float bufferAspect) {
+    if (g_OutputAspect > 0.0f) return g_OutputAspect;      // told explicitly
+    const float detected = Display::GetAspectRatio();
+    return detected > 0.0f ? detected : bufferAspect;
+}
 inline float g_ScaleX = 1.0f;      // device pixels per layout pixel
 inline float g_ScaleY = 1.0f;
 inline float g_OffsetX = 0.0f;     // device-pixel origin of the layout rectangle
@@ -142,25 +214,42 @@ inline bool g_SnapToPixels = false;
 inline void UpdateViewport(uint32_t deviceWidth, uint32_t deviceHeight) {
     g_DeviceWidth = deviceWidth ? deviceWidth : 1280;
     g_DeviceHeight = deviceHeight ? deviceHeight : 720;
+    const float bufW = static_cast<float>(g_DeviceWidth);
+    const float bufH = static_cast<float>(g_DeviceHeight);
+
+    if (g_ScalingMode == ScalingMode::Stretch) {
+        g_ScaleX = bufW / kVirtualWidth;
+        g_ScaleY = bufH / kVirtualHeight;
+        g_OffsetX = 0.0f;
+        g_OffsetY = 0.0f;
+    } else {
+        // How much wider a buffer pixel is DISPLAYED than it is tall. 1 when
+        // the buffer is presented at its own shape; 1.31 when a 16:9 buffer is
+        // stretched across a 21:9 screen.
+        const float bufAspect = bufW / bufH;
+        const float outAspect = ResolveOutputAspect(bufAspect);
+        const float pixelAspect = outAspect / bufAspect;
+
+        // A layout pixel has to come out square on the SCREEN, so the
+        // horizontal scale is divided by that - which is what stops the UI
+        // stretching when the output is wider than the buffer says.
+        float sy = bufH / kVirtualHeight;
+        const float syLimit = pixelAspect * bufW / kVirtualWidth;
+        if (sy > syLimit) sy = syLimit;
+        g_ScaleY = sy;
+        g_ScaleX = sy / pixelAspect;
+        g_OffsetX = (bufW - kVirtualWidth * g_ScaleX) * 0.5f;
+        g_OffsetY = (bufH - kVirtualHeight * g_ScaleY) * 0.5f;
+    }
+
+    // The report pair is the largest buffer of the frame - see below.
     const uint32_t area = g_DeviceWidth * g_DeviceHeight;
     if (area > g_ReportBestArea) {
         g_ReportBestArea = area;
         g_ReportWidth = g_DeviceWidth;
         g_ReportHeight = g_DeviceHeight;
-    }
-    const float sx = static_cast<float>(g_DeviceWidth) / kVirtualWidth;
-    const float sy = static_cast<float>(g_DeviceHeight) / kVirtualHeight;
-    if (g_ScalingMode == ScalingMode::Stretch) {
-        g_ScaleX = sx;
-        g_ScaleY = sy;
-        g_OffsetX = 0.0f;
-        g_OffsetY = 0.0f;
-    } else {
-        const float s = sx < sy ? sx : sy;
-        g_ScaleX = s;
-        g_ScaleY = s;
-        g_OffsetX = (static_cast<float>(g_DeviceWidth) - kVirtualWidth * s) * 0.5f;
-        g_OffsetY = (static_cast<float>(g_DeviceHeight) - kVirtualHeight * s) * 0.5f;
+        g_ReportScaleX = g_ScaleX;
+        g_ReportScaleY = g_ScaleY;
     }
 }
 
@@ -318,6 +407,17 @@ inline uint8_t RecordBlend(const GX2::BlendState& blend) {
     if (g_RecordBlendCount >= kMaxRecordedBlends) return 0;
     g_RecordBlends[g_RecordBlendCount] = blend;
     return static_cast<uint8_t>(g_RecordBlendCount++);
+}
+
+// A smooth 0..1 oscillation over `period` seconds - one cosine, easing in and
+// out of both ends. This is what UI motion should be built from: Phase() on
+// its own is a sawtooth, and quantising it into a few steps (which is what the
+// first version did, counting frames) reads as stutter the moment it runs at
+// the right speed rather than double.
+inline float Wave(float period) {
+    float s = 0.0f, c = 1.0f;
+    SinCosDeg(Phase(period) * 360.0f, s, c);
+    return 0.5f - 0.5f * c;
 }
 
 // The primitive: a textured quad covering [x0,x1) x [y0,y1) layout pixels,

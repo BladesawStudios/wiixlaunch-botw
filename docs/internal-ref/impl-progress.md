@@ -55,8 +55,9 @@
 - Get/SetCameraParams (layered on top, so only values we pass change)
 
 ## Display/System:
-- Get/SetResolution
-- Get/SetFramerate
+- Get/SetResolution - not settable; the GUI READS the colour buffer it is handed (largest of the frame, since the TV and the 854x480 GamePad view are both drawn) via Canvas::DeviceWidth/Height
+- ~~read the real framerate~~ (gui_render.hpp: Time::GetMonotonicTicks/mftb, Canvas::FramesPerSecond/DeltaSeconds/TimeSeconds/Phase - animation is time-based so FPS++ at 60 no longer doubles its speed)
+- ~~output aspect, including a Cemu ultrawide pack: read from the game's own aspect constant, which such a pack must rewrite anyway~~ (game/display.hpp, gui_render.hpp; GUI::SetOutputAspect overrides)
 
 ## Checks & Subscriptions:
 - OnBulletTime

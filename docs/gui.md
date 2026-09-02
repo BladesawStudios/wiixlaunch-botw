@@ -222,6 +222,46 @@ happy with it, real hardware may not be. And at the alpha the game's own
 windows use (230, so 90% opaque) the blur is a subtle thing: it is most
 visible behind something more translucent.
 
+### Frame rate
+
+**Animate from time, never from a frame count.** BotW runs at 30, and the
+FPS++ graphic pack makes it 60 - anything counting frames then runs at double
+speed, which is what made the cursors blink and the arrows bob twice as fast.
+`Canvas::DeltaSeconds()`, `TimeSeconds()`, `Phase(period)` and `Wave(period)`
+are the units to build on, and everything here uses them.
+
+The clock is `WiiXLaunch::Time::GetMonotonicTicks`, the Espresso timebase read
+with `mftb`: no import, no OS call, and Cemu keeps it on real time. Deltas are
+clamped to a quarter second so a load screen or a breakpoint cannot make an
+animation jump. `Canvas::FramesPerSecond()` reports the game's measured rate,
+smoothed - measured, not assumed.
+
+`Phase` is taken from the tick count with an integer modulo rather than from
+accumulated seconds. A float holding elapsed time loses resolution as it grows,
+so an animation smooth at boot would quietly start to step after a long
+session; the modulo is exact however long the game has been running.
+
+**Move smoothly, not in steps.** Getting the rate right exposed a second
+problem the doubled speed had been hiding: the cursor pulse was a two-state
+blink and the message arrow bobbed in four fixed positions, and at the correct
+speed both read as stutter rather than as motion. `Wave(period)` is the fix - a
+cosine, 0 to 1, easing in and out of both ends, built on `SinCosDeg` so it
+needs no libm. The cursor now breathes over 1.4 s and the arrow bobs 4 px over
+1.1 s, continuously. `Phase` stays the right unit for anything that should run
+at a constant rate, like a loading bar; a triangle folded out of it turns
+around in a single frame at each end, which is visible as a flick.
+
+`Display::GetAspectTerms` turns the ratio into whole numbers, so a UI can show
+16:9 rather than 1.78:1. The named ratios are matched first, with a deliberately
+loose 3% tolerance, because the pack writes width/height of the chosen
+RESOLUTION rather than the aspect picked from the dropdown: its "21:9" category
+offers 2560x1080, 3440x1440 and 3840x1600, which are 2.370, 2.389 and 2.400 -
+three different numbers, none of them 21/9, all of which should read back as the
+21:9 that was selected. 3% covers all three without any two names colliding, the
+closest pair (16:10 and 5:3) being 4.2% apart. All twelve values the pack can
+produce were checked against the category they come from. Anything unrecognised
+falls back to the smallest denominator within 0.25%, and then to the decimal.
+
 ### Resolution and pixel alignment
 
 The colour buffer is **not** 1280x720: BotW renders the GamePad view at
@@ -229,9 +269,18 @@ The colour buffer is **not** 1280x720: BotW renders the GamePad view at
 the TV buffer any size. Layout coordinates stay 1280x720; the mapping onto
 the buffer is recomputed every frame from the size the hook is given.
 
-* `ScalingMode::Fit` (default) scales uniformly and centres, so a buffer that
-  is not 16:9 letterboxes instead of stretching the UI. `ScalingMode::Stretch`
-  fills the buffer. On any 16:9 buffer the two are identical.
+* `ScalingMode::Fit` (default) keeps the layout's shape on the SCREEN and
+  centres it, so a buffer that is not 16:9 letterboxes instead of stretching
+  the UI. `ScalingMode::Stretch` fills the buffer.
+* **Ultrawide is detected**, and does not need configuring. The colour buffer
+  cannot answer it - a Cemu pack scales the render target behind the game's
+  back and the declared GX2 surface stays 1280x720 - but the GAME's own aspect
+  constant can, because an ultrawide pack has to rewrite that for the game
+  itself to render correctly. `Display::GetAspectRatio()` reads it (see
+  `game/display.hpp`); the mapping then divides the horizontal scale by how
+  much wider a buffer pixel is displayed than it is tall, and pillarboxes the
+  result. `GUI::SetOutputAspect()` overrides it, and
+  `GUI::GetEffectiveOutputAspect()` reports what is actually in use.
 * The draw hook runs once per colour buffer, and BotW has two: the TV and the
   854x480 GamePad view. Both are drawn into, with the mapping recomputed for
   each. `Canvas::DeviceWidth/Height` and `PixelScaleX/Y` report the LARGEST

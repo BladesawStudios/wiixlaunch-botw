@@ -25,6 +25,7 @@
 #include "game/events.hpp"
 #include "game/controller.hpp"
 #include "game/camera.hpp"
+#include "game/display.hpp"
 #include "game/flyt.hpp"
 #include "graphics/nvn.hpp"
 #include "platform/log.hpp"
