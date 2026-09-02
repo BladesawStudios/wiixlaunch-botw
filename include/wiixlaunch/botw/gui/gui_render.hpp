@@ -115,6 +115,16 @@ inline int64_t g_LastTicks = 0;
 inline int64_t g_NowTicks = 0;
 inline float g_DeltaSeconds = 0.0f;
 inline float g_TimeSeconds = 0.0f;
+
+// Presented frames per second, measured in UpdateFrameRate below - NOT here.
+// UpdateClock runs once per pad read, and BotW reads the pad several times per
+// presented frame, so timing this function reported about three times the real
+// rate (~180 against Cemu's own 60). The clock itself was never wrong: it
+// reads real ticks, so animation is right whatever rate it is called at. Only
+// the reported number was.
+inline int64_t g_LastPresentTicks = 0;
+inline void* g_RateBuffer = nullptr;
+inline uint32_t g_RateMisses = 0;
 inline float g_Fps = 0.0f;
 
 inline void UpdateClock() {
@@ -129,12 +139,35 @@ inline void UpdateClock() {
         if (dt > 0.25f) dt = 0.25f;
         g_DeltaSeconds = dt;
         g_TimeSeconds += dt;
-        if (dt > 0.0f) {
+    }
+    g_LastTicks = now;
+}
+
+// Called from the draw hook, which fires once per SCAN BUFFER rather than once
+// per frame: BotW scans the TV and the GamePad, so it runs twice per presented
+// frame - measured at 120 calls/s against Cemu's own reported 60. Timing every
+// call would report double, so one buffer is latched and only that one timed.
+//
+// The latch re-arms if that buffer stops appearing for a couple of seconds,
+// which is what happens when the game changes buffers, so this cannot get
+// stuck reporting nothing.
+inline void UpdateFrameRate(void* dst) {
+    if (!g_RateBuffer) g_RateBuffer = dst;
+    if (dst != g_RateBuffer) {
+        if (++g_RateMisses > 240) { g_RateBuffer = dst; g_RateMisses = 0; g_LastPresentTicks = 0; }
+        return;
+    }
+    g_RateMisses = 0;
+    const int64_t now = WiiXLaunch::Time::GetMonotonicTicks();
+    if (g_LastPresentTicks != 0) {
+        const int64_t elapsed = now - g_LastPresentTicks;
+        const float dt = static_cast<float>(elapsed) / static_cast<float>(WiiXLaunch::Time::kTicksPerSecond);
+        if (dt > 0.0f && dt < 0.25f) {
             const float instant = 1.0f / dt;
             g_Fps = g_Fps > 0.0f ? (g_Fps * 0.9f + instant * 0.1f) : instant;
         }
     }
-    g_LastTicks = now;
+    g_LastPresentTicks = now;
 }
 
 // Position within a repeating cycle of `period` seconds, 0 to 1 - the unit

@@ -1091,6 +1091,7 @@ inline void BuildFrame() {
 }
 
 inline void OnDraw(Backend::CommandBuffer*, void* dst, int width, int height) {
+    impl::UpdateFrameRate(dst);  // per scan buffer, deduped; see gui_render.hpp
     if (!g_Initialized || !g_PipelineReady) return;
     if (!LoaderFinished()) LoaderStep();
 

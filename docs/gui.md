@@ -773,41 +773,64 @@ working around.
 
 ## Runtime status
 
-Compiled (devkitPPC 15.1) for the Cemu and Wii U targets and the Switch
-stub, with no dynamic static initialisers in the object (the Cemu payload
-has no C runtime).
+Compiled (devkitPPC 15.1 / devkitA64) for the Cemu and Wii U targets and the
+Switch stub, with no dynamic static initialisers in the object - checked with
+`powerpc-eabi-nm` for `__cxa_guard` and `_GLOBAL__sub_I`, because the Cemu
+payload has no C runtime.
 
-**Run in Cemu 2.6 against v208 (2026-09-01)** with the
-`BreathOfTheWild_GUITest` mod next to this repo: the loader reports
-`2/2 fonts, 27/27 sprites, 34533412 bytes decompressed` about 1.2 s after the
-first injected frame (`Font/Font_US.sbfarc`, then `Layout/Common.sblarc` at
-offset 4857632 inside `Pack/Bootup.pack`), and the dialogue box renders as
-intended - cap art, ornaments, cream Normal text with its shadow, the
-NormalS name tag and the "more" arrow, all upright, at the game's own
-placement. The first run found one bug: `SARC::ParseHeader` read the node
-count from the SFAT header-size field, so every lookup failed; fixed. The
-widget panel (option rows, plate button, select frame, cursors) was closed
-by a stray B press before it could be captured, so it has NOT been seen on
-screen yet - that is the next thing to check (the panel's art, then D-pad
-focus movement, A on a Toggle, left/right on the Slider). The test mod now
-ignores B so the panel stays up.
+**Run in Cemu 2.6 against v208 (2026-09-02)**, TV at 1440p through the
+Graphics pack with FPS++ at 60, using the `BreathOfTheWild_GUITest` mod. The
+loader reports `4 font(s), 27/27 sprites, 34533412 bytes decompressed` about
+0.7 s after the first injected frame. Confirmed on screen: the dialogue box
+with its cap art, ornaments and cream Normal text; the widget panel with option
+rows, selector arrows, plate button, D-pad focus movement; the cursor and
+selection-frame composites; the blend-mode strip; frosted blur behind the
+panel; the scrolling list with its track; and the status line reading
+`1280x720 @1.00x 16:9`, the aspect detected rather than configured.
 
-A second pass went over blending, transparency, resolution handling and
-kerning. A third fixed what a screenshot of the running menu showed to be
-wrong: the option cursor was drawn as four corners at alpha 230 instead of a
-frame at 128 (a hot glow around every focused row), the boxed cursor's arrows
-were quarter-turned instead of rotated 45 degrees, the selection frame's
-edges sampled an empty texel and so drew nothing, and the plate had no
-stretched centre. Those were found and fixed against the decoded art offline
-(`tools/preview_ui_assets.py` plus a compositor that renders the same rules),
-and they compile for all three targets. A second screenshot at 1440p then
-showed the corner-padding problem described under "Frames, corners and
-rotation" (notches on every rounded box, ticks on every outline, a grey
-translucent plate). A third pass, from a 1440p screenshot of the menu, fixed
-the rest: edge quads spanning a texture-coordinate range instead of repeating
-one column (the left-to-right transparency ramp), `SelectFrame`'s red channel
-being routed into RGB (black-grey-white instead of a tint), the plate corner
-being sized to fit rather than to the layout's proportion, and the outlined
-font. All of it is verified with the offline compositor - bilinear, at 2x and
-4x, which is how the ramp was finally pinned down - but has NOT been seen in
-the game since. Wii U hardware: untested.
+Wii U hardware: still untested. Everything above is Cemu.
+
+### What the last few sessions found in the game
+
+Screenshots and logs from actual runs found things offline verification had
+not, which is the argument for testing rather than reasoning:
+
+* The option cursor was four corners at alpha 230 instead of a frame at 128,
+  the boxed cursor's arrows were quarter-turned instead of rotated 45 degrees,
+  the selection frame's edges sampled an empty texel, and the plate had no
+  stretched centre. All four fixed against the decoded art offline.
+* Corner-art padding produced notches on every rounded box and ticks on every
+  outline; edge quads spanning a coordinate range instead of repeating one
+  column produced a left-to-right transparency ramp; `SelectFrame`'s red
+  channel was routed into RGB. All found from 1440p screenshots.
+* `SARC::ParseHeader` read the node count from the SFAT header-size field, so
+  every lookup failed. First run, first bug.
+* A silent crash that looked like a font bug was the heap: the payload's
+  code-cave heap ends at 0x01C00000 and the allocator had been given a wall
+  4 MB too high, so a fourth font walked into unmapped memory. The font code
+  was innocent. See the Cemu heap notes above.
+* The frame-rate readout said ~180 while Cemu's own counter said 60. Two
+  separate errors, one on top of the other: the clock updates once per PAD
+  READ and BotW reads the pad about three times a frame, and the draw hook
+  fires once per SCAN BUFFER, of which BotW presents two (TV and GamePad) -
+  measured at exactly 120 calls in 20.0 s of wall clock against a reported 60.
+  `UpdateFrameRate` now latches one buffer and times only that; the readout
+  reads 60.0 against Cemu's own 60, confirmed in game. The clock itself was never wrong: it reads real ticks, so
+  animation was correct at any call rate - only the reported figure was off.
+
+### Verified without the game
+
+Where a check could be made offline it was, because it is faster and repeatable:
+
+* Frosted-box corner geometry: 0 rects outside the shape, 99.4-100% coverage.
+* `Display::GetAspectTerms` against all twelve aspect/resolution combinations
+  the Cemu pack can produce - each reports the category the user selected.
+* `Canvas::List` windowing over 15,930 count/height/index combinations: the
+  focused row is never off-screen, the window never leaves range, it never
+  draws past the end, and the scrollbar thumb never overflows its track.
+* Cursor shimmer: swing 0.55x-1.44x, at most 0.5% of that per frame at 60fps,
+  up to 0.81 difference between an edge's two ends.
+* The six fonts' headers, sheet formats, tail offsets and CMAP coverage, read
+  straight out of `Font_US.sbfarc`.
+* Every emitted graphic pack: exactly two `.origin` directives, the code cave
+  and the entry hook.
