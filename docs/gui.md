@@ -283,6 +283,29 @@ the buffer is recomputed every frame from the size the hook is given.
   much wider a buffer pixel is displayed than it is tall, and pillarboxes the
   result. `GUI::SetOutputAspect()` overrides it, and
   `GUI::GetEffectiveOutputAspect()` reports what is actually in use.
+* **The output RESOLUTION is not detectable**, and the contrast with aspect is
+  the whole point. An ultrawide pack has to rewrite the game's own aspect
+  constant, because the game could not render correctly otherwise - so the
+  value is sitting in `.rodata` at a fixed address for anyone to read.
+  Resolution is different: it is applied entirely outside the game, by
+  `[TextureRedefine]` rules that rewrite surface dimensions as Cemu sees them
+  created (`overwriteWidth = ($width/$gameWidth) * 1280`). The game is never
+  told, and never needs to be. `Canvas::DeviceWidth/Height` therefore report
+  1280x720 under a 1440p pack, and that is the true size of the buffer the game
+  declared - it is not the size of the picture.
+
+  The only place `$width` reaches game-visible memory at all is a UI padding
+  constant in the Graphics pack's own patch
+  (`(($gameWidth/$gameHeight)/($width/$height)) * (($width/2) - 640)`), which is
+  algebraically solvable for the width given the aspect - but it lives at
+  `.origin = codecave`, an address that moves with graphic-pack load order, so
+  it is not something to build on.
+
+  None of this affects how the UI looks. Quads go out in normalised
+  coordinates, so they rasterise into whatever surface Cemu actually allocated:
+  at a 1440p pack the GUI is genuinely drawn at 1440p, not upscaled from 720p.
+  The buffer size is a diagnostic, not a scale factor - which is why the test
+  mod labels it `buf`.
 * The draw hook runs once per colour buffer, and BotW has two: the TV and the
   854x480 GamePad view. Both are drawn into, with the mapping recomputed for
   each. `Canvas::DeviceWidth/Height` and `PixelScaleX/Y` report the LARGEST
@@ -724,12 +747,16 @@ working around.
 
 ## What is approximate
 
-* **Backdrop blur.** See Transparency above - the biggest single difference
-  from the real thing. The speaker name in `MessageBox` has no backing at
-  all for this reason: the game puts a blurred framebuffer capture behind it,
-  and the nearest sprite (`DialogShadow_00`, which is one QUADRANT of a
-  radial gradient) drew as a hard dark box when stretched across it, which
-  was worse than nothing. The name's own hard text shadow carries it.
+* **Backdrop blur.** See Transparency above. The speaker name in `MessageBox`
+  now has its real backing: the game uses `P_Sh_00`, a blurred capture of the
+  framebuffer (`FBLayout_00^r`) at alpha 180, which is what `BlurBehind`
+  provides - so this is the mechanism rather than a stand-in. It is sized to
+  the measured text rather than to the pane, so a short name gets a short
+  backing, and `BlurBehindFaded` fades its two ends out, because a hard-edged
+  rectangle of blurred scene was exactly the failure of the earlier stand-in
+  (`DialogShadow_00`, one quarter of a radial gradient, which drew as a hard
+  dark box and was worse than nothing). With blur off or not yet ready it draws
+  nothing and the name's own hard text shadow carries it, as before.
 * **The plate** (`Canvas::Plate`). `BtnBasic_08T/B` only carry the rim and
   shadow; the plate's fill comes from a projected inner texture combined in
   the material's TEV stages. The GUI draws a flat rounded fill under the rim
@@ -785,8 +812,10 @@ loader reports `4 font(s), 27/27 sprites, 34533412 bytes decompressed` about
 with its cap art, ornaments and cream Normal text; the widget panel with option
 rows, selector arrows, plate button, D-pad focus movement; the cursor and
 selection-frame composites; the blend-mode strip; frosted blur behind the
-panel; the scrolling list with its track; and the status line reading
-`1280x720 @1.00x 16:9`, the aspect detected rather than configured.
+panel; the blurred backing under the speaker name; the scrolling list with its
+track; and the status line reading `buf 1280x720 @1.00x 60.0fps 16:9` - the
+frame rate matching Cemu's own counter, and the aspect detected rather than
+configured.
 
 Wii U hardware: still untested. Everything above is Cemu.
 
@@ -809,6 +838,13 @@ not, which is the argument for testing rather than reasoning:
   code-cave heap ends at 0x01C00000 and the allocator had been given a wall
   4 MB too high, so a fourth font walked into unmapped memory. The font code
   was innocent. See the Cemu heap notes above.
+* The speaker name's blurred backing took two attempts, and neither fault
+  would have appeared offline. Fading only its left and right ends left hard
+  horizontal edges, so it read as a slab; and tinting it white handed back the
+  scene at face value, which over a bright sky is pale grey, making white text
+  on it HARDER to read than no backing at all. `P_Sh_00` is a shadow pane and
+  has to be tinted down to behave like one. Both faults depend on what happens
+  to be behind the box, which no offline check exercises.
 * The frame-rate readout said ~180 while Cemu's own counter said 60. Two
   separate errors, one on top of the other: the clock updates once per PAD
   READ and BotW reads the pad about three times a frame, and the draw hook

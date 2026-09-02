@@ -283,6 +283,46 @@ public:
                        r.Right() / kVirtualWidth, r.Bottom() / kVirtualHeight, tint);
     }
 
+    // BlurBehind faded out on ALL FOUR sides, so it reads as a soft patch of
+    // the scene rather than a rectangle of it. A 3x3 grid of quads: the middle
+    // is solid, the edges ramp to transparent, the corners ramp in both
+    // directions at once. Fewer quads cannot do it - fading only left and right
+    // leaves hard horizontal edges, which is exactly what a first attempt at
+    // this looked like, and one quad with opposite ends clear interpolates to
+    // clear the whole way across.
+    //
+    // `tint` MULTIPLIES the sampled scene, so a dark tint gives a shadow and
+    // white gives the scene at face value. Same caveat as BlurBehind: issue it
+    // BEFORE whatever sits on top.
+    void BlurBehindFaded(const GUI::Rect& r, Color tint = Colors::White,
+                         float fadeX = 20.0f, float fadeY = 10.0f) {
+        if (!impl::g_BlurEnabled || !Backend::BackdropReady()) return;
+        if (r.w <= 0.0f || r.h <= 0.0f) return;
+        if (fadeX * 2.0f > r.w) fadeX = r.w * 0.5f;
+        if (fadeY * 2.0f > r.h) fadeY = r.h * 0.5f;
+        impl::g_BlurRequested = true;
+        const Backend::TextureHandle tex = Backend::BackdropTexture();
+
+        const float xs[4] = { r.x, r.x + fadeX, r.Right() - fadeX, r.Right() };
+        const float ys[4] = { r.y, r.y + fadeY, r.Bottom() - fadeY, r.Bottom() };
+        const float ax[4] = { 0.0f, 1.0f, 1.0f, 0.0f };   // alpha at each grid line
+        const float ay[4] = { 0.0f, 1.0f, 1.0f, 0.0f };
+        for (int gy = 0; gy < 3; ++gy) {
+            if (ys[gy + 1] <= ys[gy]) continue;
+            for (int gx = 0; gx < 3; ++gx) {
+                if (xs[gx + 1] <= xs[gx]) continue;
+                const float a00 = ax[gx] * ay[gy],       a10 = ax[gx + 1] * ay[gy];
+                const float a01 = ax[gx] * ay[gy + 1],   a11 = ax[gx + 1] * ay[gy + 1];
+                if (a00 <= 0.0f && a10 <= 0.0f && a01 <= 0.0f && a11 <= 0.0f) continue;
+                impl::EmitQuad(tex, xs[gx], ys[gy], xs[gx + 1], ys[gy + 1],
+                               xs[gx] / kVirtualWidth,     ys[gy] / kVirtualHeight,
+                               xs[gx + 1] / kVirtualWidth, ys[gy + 1] / kVirtualHeight,
+                               tint.Scaled(a00), tint.Scaled(a10),
+                               tint.Scaled(a01), tint.Scaled(a11));
+            }
+        }
+    }
+
     // Take the pad away from the game for as long as this keeps being called:
     // call it every frame a menu is up, and the player's buttons, sticks and
     // touches stop reaching the game while the GUI carries on reading them.
@@ -450,14 +490,32 @@ public:
                                 Metrics::kMessageTextWidth, Metrics::kMessageTextHeight};
         TextBox(textBox, text, FitToBox(text, Styles::Message().Alpha(alpha), textBox.w), true);
         if (name && name[0]) {
-            // The game backs the name with P_Sh_00, which is a BLURRED CAPTURE
-            // of the framebuffer (FBLayout_00^r) at alpha 180 - not a shadow
-            // sprite. There is no blur here, and the stand-in that was used
-            // instead (DialogShadow_00, which is one quarter of a radial
-            // gradient and so drew as a hard dark box) looked far worse than
-            // nothing. The name's own hard black text shadow carries it.
-            TextBox(GUI::Rect{Metrics::kMessageNameX, Metrics::kMessageNameCenterY - 13.0f, 176.0f, 26.0f}, name,
-                    Styles::Name().Alpha(alpha), false);
+            // The game backs the name with P_Sh_00: a BLURRED CAPTURE of the
+            // framebuffer (FBLayout_00^r) at alpha 180, not a shadow sprite.
+            // That is exactly what BlurBehind provides, so this is the real
+            // thing rather than a stand-in - the earlier stand-in
+            // (DialogShadow_00, one quarter of a radial gradient) drew as a
+            // hard dark box and was worse than nothing.
+            //
+            // Sized to the text rather than to the pane, so a short name gets a
+            // short backing, and faded at the ends because a hard-edged
+            // rectangle of blurred scene is the failure the stand-in had. When
+            // blur is off or not yet ready this draws nothing and the name's
+            // own hard black shadow carries it, exactly as before.
+            const GUI::Rect nameBox{Metrics::kMessageNameX, Metrics::kMessageNameCenterY - 13.0f, 176.0f, 26.0f};
+            float nameW = 0.0f, nameH = 0.0f;
+            MeasureText(name, Styles::Name(), nameW, nameH);
+            if (nameW > 0.0f) {
+                // DARKENED, not the scene at face value. `P_Sh_00` is a shadow
+                // pane - white text has to read against it - and over a bright
+                // sky an untinted capture came out as a pale slab that made the
+                // name harder to read than no backing at all. The tint
+                // multiplies the sample, so this is blurred scene pulled well
+                // down towards black. Alpha 180 is the game's own figure.
+                BlurBehindFaded(GUI::Rect{nameBox.x - 18.0f, nameBox.y - 7.0f, nameW + 36.0f, nameBox.h + 14.0f},
+                                Color{60, 60, 62, 180}.Scaled(alpha), 26.0f, 12.0f);
+            }
+            TextBox(nameBox, name, Styles::Name().Alpha(alpha), false);
         }
         if (showArrow) {
             // Nt_ArrowMsg_00: the "more" arrow at the bottom-right, bobbing.
@@ -1290,6 +1348,7 @@ public:
     float Phase(float) const { return 0.0f; }
     float Wave(float) const { return 0.0f; }
     void BlurBehind(const GUI::Rect&, Color = Colors::White) {}
+    void BlurBehindFaded(const GUI::Rect&, Color = Colors::White, float = 20.0f, float = 10.0f) {}
     void FrostedBox(const GUI::Rect&, Color, float = Metrics::kRoundedCorner) {}
     int Focus() const { return 0; }
     void SetFocus(int) {}

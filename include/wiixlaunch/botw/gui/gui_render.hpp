@@ -12,6 +12,7 @@
 #include "gui_types.hpp"
 #include "../game/display.hpp"
 #include "gui_backend.hpp"
+#include "../platform/heap.hpp"
 #include "../graphics/bffnt.hpp"
 
 // GUI renderer core (GX2): the sprite/font tables the loader fills in, and
@@ -438,7 +439,7 @@ inline bool g_Recording = false;
 
 inline bool EnsureRecord() {
     if (g_Record) return true;
-    g_Record = reinterpret_cast<RecordedQuad*>(Backend::AllocMEM1(sizeof(RecordedQuad) * kMaxRecordedQuads, 64));
+    g_Record = reinterpret_cast<RecordedQuad*>(Heap::Alloc(sizeof(RecordedQuad) * kMaxRecordedQuads, 64));
     return g_Record != nullptr;
 }
 

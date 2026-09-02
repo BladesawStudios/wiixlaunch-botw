@@ -58,10 +58,12 @@
 //                              A mod's own art arrives this way.
 //   GetTextureSize(handle, &w, &h)  Native pixel size, false if unknown.
 //
-// Memory
-//   AllocMEM1(size, align)     Graphics-visible memory. Never freed by the
-//                              GUI. On Cemu this is the payload heap or a game
-//                              heap; see wiixlaunch/mem.hpp.
+// NOT here: general allocation. The GUI's own buffers - decompression
+// scratch, parse tables, the quad record - are plain memory with no graphics
+// requirement, and they go through BotW::Heap::Alloc (platform/heap.hpp). Only
+// TEXTURE storage is the backend's business, and that is allocated inside
+// AllocTextureSurface where the backend can apply its own pool and alignment
+// rules. A backend therefore never sees a general allocation request.
 //
 // Backdrop blur - optional; a backend may return false/0 forever and the GUI
 // degrades to no frosting with no other change.
@@ -111,12 +113,9 @@ using GX2::BackdropTexture;
 using GX2::BlurBackdrop;
 
 #if WIIXL_CEMU || WIIXL_WIIU
-// Graphics-visible allocation and the descriptors for the game's own art.
-// Guarded because only the drawing targets have them: the Switch stub in
-// gx2.hpp has no AllocMEM1, and every GUI file that needs these is itself
-// behind the same guard.
-using GX2::AllocMEM1;
-
+// The descriptors for the game's own art. Guarded because only the drawing
+// targets define them, and every GUI file that needs them is behind the same
+// guard. Every other name in this file has a Switch stub already.
 constexpr uint32_t kCompMapShapeFromG           = GX2Types::kCompMapShapeFromG;
 constexpr uint32_t kTileModeTiled2DThin1        = GX2Types::kTileModeTiled2DThin1;
 constexpr uint32_t kSurfaceFormatUnormR8G8B8A8  = GX2Types::kSurfaceFormatUnormR8G8B8A8;

@@ -17,6 +17,7 @@
 #include "../platform/yaz0.hpp"
 #include "../platform/sarc.hpp"
 #include "../platform/log.hpp"
+#include "../platform/heap.hpp"
 
 // GUI asset loader: borrows the game's own fonts and UI art at runtime.
 //
@@ -193,7 +194,7 @@ inline bool TryResolveRanges() {
     // exactly big enough. Deliberately after the loop: before it, nothing knows
     // how large the biggest sprite is.
     if (L.phase != LoadPhase::FontStream && L.stagingBytes > 0 && !L.staging) {
-        L.staging = reinterpret_cast<uint8_t*>(Backend::AllocMEM1(L.stagingBytes, 64));
+        L.staging = reinterpret_cast<uint8_t*>(Heap::Alloc(L.stagingBytes, 64));
         if (!L.staging) {
             OSLog("WiiXLaunch GUI: sprite staging buffer of %u bytes would not allocate\n", L.stagingBytes);
         }
@@ -303,7 +304,7 @@ inline void ParseFontHeader(size_t index) {
         return;
     }
     f.tailLength = f.range.size - f.tailStart;
-    f.tail = reinterpret_cast<uint8_t*>(Backend::AllocMEM1(f.tailLength, 64));
+    f.tail = reinterpret_cast<uint8_t*>(Heap::Alloc(f.tailLength, 64));
     if (!f.tail) {
         OSLog("WiiXLaunch GUI: font '%s': tail allocation of %u bytes failed\n",
               g_Fonts[index].archivePath, f.tailLength);
@@ -377,10 +378,10 @@ inline void LoaderSink(void*, uint32_t offset, const uint8_t* data, uint32_t len
 
 inline bool LoaderAllocScratch() {
     LoaderState& L = g_Loader;
-    if (!L.chunk) L.chunk = reinterpret_cast<uint8_t*>(Backend::AllocMEM1(kChunkBytes, 64));
-    if (!L.head) L.head = reinterpret_cast<uint8_t*>(Backend::AllocMEM1(kHeadBytes, 64));
+    if (!L.chunk) L.chunk = reinterpret_cast<uint8_t*>(Heap::Alloc(kChunkBytes, 64));
+    if (!L.head) L.head = reinterpret_cast<uint8_t*>(Heap::Alloc(kHeadBytes, 64));
     for (size_t i = 0; i < static_cast<size_t>(FontId::Count); ++i) {
-        if (!L.fonts[i].header) L.fonts[i].header = reinterpret_cast<uint8_t*>(Backend::AllocMEM1(kFontHeaderBytes, 64));
+        if (!L.fonts[i].header) L.fonts[i].header = reinterpret_cast<uint8_t*>(Heap::Alloc(kFontHeaderBytes, 64));
         if (!L.fonts[i].header) return false;
     }
     return L.chunk && L.head;      // staging comes later, once its size is known

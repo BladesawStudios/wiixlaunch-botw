@@ -58,6 +58,39 @@ inline void* GameAllocMem1(size_t size, size_t align) {
 
 #endif
 
+// Plain persistent memory - a decompression buffer, a parse scratch, a table
+// that has to outlive the frame. NOT graphics memory: texture surfaces are
+// allocated inside the graphics backend, which knows its own alignment and
+// pool rules. Everything the GUI allocates directly goes through here.
+//
+// Nothing is ever freed, matching the rest of this module. Returns null when
+// the heap is exhausted, and says so once, because the alternative used to be
+// writing past the end of the code cave.
+inline void* Alloc(size_t size, size_t align = 256) {
+#if WIIXL_CEMU
+    void* p = WiiXLaunch::Backend::AllocCemuHeap(size, align);
+#elif WIIXL_WIIU
+    void* p = GameAllocMem1(size, align);
+#else
+    void* p = nullptr;
+    (void)size; (void)align;
+#endif
+#if WIIXL_CEMU
+    if (!p) {
+        static bool s_logged = false;
+        if (!s_logged) {
+            s_logged = true;
+            OSLog("WiiXLaunch: payload heap exhausted - %u bytes refused (%u of %u used). "
+                  "Load fewer fonts, or install a game allocator with Mem::UseCoreinitHeap.\n",
+                  static_cast<uint32_t>(size),
+                  static_cast<uint32_t>(WiiXLaunch::Backend::CemuHeapUsed()),
+                  static_cast<uint32_t>(WiiXLaunch::Backend::CemuHeapLimit()));
+        }
+    }
+#endif
+    return p;
+}
+
 #if WIIXL_CEMU
 
 // MEASURED, v208, from the title screen onwards: this DOES NOT WORK, and the
