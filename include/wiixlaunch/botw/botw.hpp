@@ -33,3 +33,10 @@
 #include "platform/heap.hpp"
 #include "graphics/gx2.hpp"
 #include "gui/gui.hpp"
+
+// Nominates BotW's load point to the host (see load_point.hpp) and declares
+// this module's export surfaces. Including botw.hpp is what makes a project a
+// BotW host; the project still calls Surfaces::Register() explicitly, because
+// the flat Cemu payload does not run static constructors.
+#include "load_point.hpp"
+#include "surfaces.hpp"
