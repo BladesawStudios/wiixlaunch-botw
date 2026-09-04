@@ -19,11 +19,22 @@
 //      surface call has to use, since neither a struct nor a std::string may
 //      cross.
 //
-// HANDLES ARE GENERATION-COUNTED. An actor can despawn between a mod taking a
-// handle and using it, and the naive design - handle IS the pointer - turns
-// that into a dereference of freed memory inside the host, blamed on the host.
-// A handle is (generation << 8) | (slot + 1); resolving checks the generation
-// still matches, so a stale handle fails cleanly instead. Zero is never valid.
+// HANDLES ARE GENERATION-COUNTED, and the reason is about diagnosis as much as
+// safety. An actor can despawn between a mod taking a handle and using it. With
+// the naive design - the handle IS the pointer - that use-after-despawn becomes
+// a dereference of freed memory INSIDE THE HOST. The crash lands in host code,
+// reads as a host bug, and gets reported as one.
+//
+// Once third parties ship compiled binaries this project cannot rebuild or
+// inspect, that distinction is the whole difference between a report that can
+// be acted on and a wild goose chase through framework code that was working
+// correctly. A handle is (generation << 8) | (slot + 1); resolving checks the
+// generation still matches, so a stale handle returns cleanly and the mod that
+// held it too long is the thing that gets named. Zero is never valid.
+//
+// The caller-owned name buffer and the uint32_t returns below are the same
+// argument applied to smaller things: each turns a silent misbehaviour at the
+// boundary into something a bug report can point at.
 
 #include <wiixlaunch/platform.hpp>
 #include <wiixlaunch/loader/surface.hpp>
