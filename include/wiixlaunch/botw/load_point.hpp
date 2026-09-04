@@ -79,11 +79,11 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
               WiiXLaunch::Core::kAbiVersion, WiiXLaunch::Wxlm::kFormatVersion);
     WiiXLaunch::Surface::LogRegistered();
 
-    // One module, by fixed name. Enumerating the directory and loading several
-    // is the next stage; this proves one end to end first.
-    const WiiXLaunch::Wxlm::Reject r =
-        WiiXLaunch::Loader::Load("WiiXLaunch/mods/sample.wxlm");
-    if (r == WiiXLaunch::Wxlm::Reject::None) {
+    // Every module in the directory, in lexical filename order - which is also
+    // hook priority, so it is a specification rather than an enumeration
+    // artefact. See docs/loader.md.
+    const uint32_t loaded = WiiXLaunch::Loader::LoadAll("WiiXLaunch/mods");
+    if (loaded != 0) {
         WiiXLaunch::Loader::RunPhase(WiiXLaunch::Wxlm::Phase::Load);
     } else {
         // A module that was found and REJECTED must not report as an absent
@@ -91,9 +91,9 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
         // module the loader had opened, read, and refused mid-parse - the
         // reason was three lines above in the log, and the summary contradicted
         // it. Only the loader knows which happened, so it says so by name.
-        WIIXL_LOG("[loader] sample.wxlm not loaded: %s. The game boots normally either "
-                  "way; if the module is simply absent that is the default state of a "
-                  "fresh host.", WiiXLaunch::Wxlm::RejectName(r));
+        WIIXL_LOG("[loader] no modules loaded. The game boots normally either way; "
+                  "if the directory is simply empty that is the default state of a "
+                  "fresh host, and the lines above say which it was.");
     }
 
     // Every hook in the process, and every address more than one owner touched.
