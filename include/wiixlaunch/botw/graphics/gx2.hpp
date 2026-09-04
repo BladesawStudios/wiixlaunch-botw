@@ -877,8 +877,14 @@ inline void Init() {
     // The heap this payload has to live in, stated once. It is the tail of our
     // code cave up to the end of Cemu's code-cave area, and it is small - a
     // couple of 1024x1024 font sheets and a render target will eat it.
-    // Cemu's OSReport does not understand width specifiers - "%08x" comes out
-    // literally and every argument after it is read against the wrong slot.
+    // No width specifiers below, and the reason recorded here used to be wrong.
+    // This blamed Cemu's OSReport, but OSLog never hands it a width specifier:
+    // it formats with WiiXLaunch::Debug::FormatText first and passes the
+    // finished string as osReport("%s\n", text). The limitation was FormatText's
+    // own - it parsed .precision but not width, so "%08x" fell through to its
+    // default branch, which echoed the characters and consumed no argument,
+    // leaving every later specifier reading the previous slot. Fixed in
+    // debug_log.hpp; width and zero-padding work now.
     BotW::OSLog("WiiXLaunch: payload code-cave heap %p..%p, %u KB\n",
                 reinterpret_cast<void*>(WiiXLaunch::Backend::CemuHeapBase()),
                 reinterpret_cast<void*>(WiiXLaunch::Backend::kCemuCodeCaveEnd),
