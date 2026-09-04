@@ -1224,7 +1224,7 @@ inline TextureHandle LoadTexture(const char* path, size_t maxFileSize = 1024 * 1
     }
 
     size_t readSize = 0;
-    if (!FS::ReadFile(path, s_stagingBuffer, maxFileSize, &readSize) || readSize < 16) {
+    if (!WiiXLaunch::FS::ReadFile(path, s_stagingBuffer, maxFileSize, &readSize) || readSize < 16) {
         BotW::OSLog("WiiXLaunch: GX2 LoadTexture '%s' failed: ReadFile\n", path);
         return 0;
     }
@@ -1257,7 +1257,7 @@ inline MeshData LoadMesh(const char* path, size_t maxFileSize = 64 * 1024) {
     }
 
     size_t readSize = 0;
-    if (!FS::ReadFile(path, buffer, maxFileSize, &readSize) || readSize < 16) {
+    if (!WiiXLaunch::FS::ReadFile(path, buffer, maxFileSize, &readSize) || readSize < 16) {
         BotW::OSLog("WiiXLaunch: GX2 LoadMesh '%s' failed: ReadFile\n", path);
         return result;
     }

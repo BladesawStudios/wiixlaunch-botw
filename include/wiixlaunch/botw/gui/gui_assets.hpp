@@ -96,7 +96,7 @@ struct LoaderState {
     const char* fontArchivePath = nullptr;
     const char* layoutArchivePath = nullptr;
 
-    FS::File file;
+    WiiXLaunch::FS::File file;
     uint32_t streamPos = 0;         // next compressed byte to read (absolute file offset)
     uint32_t streamEnd = 0;
     Yaz0::StreamDecoder decoder;

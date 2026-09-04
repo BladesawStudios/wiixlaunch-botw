@@ -70,7 +70,7 @@ public:
     //
     // esetlistPath is a content-relative path, e.g.
     // "Effect/SplPwr_Tooreroof_Ring.sesetlist", resolved the same way
-    // FS::ReadFile resolves any other content path.
+    // WiiXLaunch::FS::ReadFile resolves any other content path.
     //
     // scale is per-axis and multiplies the eset's own authored size; rotation
     // is degrees about the world X, Y and Z axes respectively, applied in
