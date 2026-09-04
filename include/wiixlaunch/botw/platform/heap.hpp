@@ -15,9 +15,11 @@
 // payload's own.
 //
 // The Cemu payload's built-in heap is the tail of the code cave it was loaded
-// into: it starts after the payload and ends at 0x02000000, where the game's
-// code begins (see wiixl_cemu_backend.hpp). That is a few megabytes, shared
-// with any other WiiXLaunch payload, and nothing frees. A mod that wants more
+// into: it starts after the payload and ends at 0x01C00000, the end of Cemu's
+// code-cave area (see wiixl_cemu_backend.hpp, which documents why it is NOT
+// 0x02000000 - the gap above 0x01C00000 is unmapped and allocating into it
+// dies silently on the first write). The whole area is 4 MB, shared with any
+// other WiiXLaunch payload, and nothing frees. A mod that wants more
 // than that - several font faces, large render targets, a mesh buffer - has to
 // get it from somewhere else, and the game is already holding a MEM1 heap.
 //

@@ -9,7 +9,7 @@
 // Why streaming: the assets the GUI borrows from the base game live inside
 // Yaz0-compressed SARCs that are far bigger than anything this module can
 // afford to hold in memory (Layout/Common.sblarc is 6 MB compressed and
-// 31 MB decompressed; the Cemu payload's whole heap is 6 MB). Yaz0 back-
+// 31 MB decompressed; the Cemu payload's whole heap is under 4 MB). Yaz0 back-
 // references reach at most 0x1000 bytes behind the output cursor, so a
 // 4 KB history window is all the decoder state there is - compressed bytes
 // can be fed in arbitrary chunks and the decompressed bytes are handed to a

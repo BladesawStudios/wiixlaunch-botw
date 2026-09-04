@@ -490,8 +490,9 @@ byte arrives. Everything else streams past. This matters because the Cemu
 payload's heap is small and this module never frees anything.
 
 How small, precisely, because the number that used to be written here was
-wrong. `deploy.py` emits `.origin = codecave + 0x600000` under a comment
-claiming to reserve 6 MB; it reserves nothing. Cemu gives a patch group only
+wrong. `deploy.py` used to emit `.origin = codecave + 0x600000` under a comment
+claiming to reserve 6 MB; it reserved nothing, and that line has since been
+removed. Cemu gives a patch group only
 the bytes it emits - the log line
 `Applying patch group 'BotW_GUITest_V208' (Codecave: 01804600-01846f60)` is
 272 KB, exactly the payload plus its relocation table. The heap then runs off
