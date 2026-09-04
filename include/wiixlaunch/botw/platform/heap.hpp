@@ -1,6 +1,7 @@
 #pragma once
 
 #include <wiixlaunch/platform.hpp>
+#include <wiixlaunch/loader/arena.hpp>
 
 #include <cstddef>
 #include <cstdint>
@@ -66,11 +67,16 @@ inline void* GameAllocMem1(size_t size, size_t align) {
 // pool rules. Everything the GUI allocates directly goes through here.
 //
 // Nothing is ever freed, matching the rest of this module. Returns null when
-// the heap is exhausted, and says so once, because the alternative used to be
+// the arena is exhausted, and says so once, because the alternative used to be
 // writing past the end of the code cave.
+//
+// This is a HOST allocation, not a mod one. wiixlaunch-botw is compiled INTO
+// the payload, so its GUI buffers and font sheets come out of the host end of
+// the arena and are bounded only by where module grants begin. A .wxlm mod does
+// not call this; it allocates through wiixl.core, inside its own grant.
 inline void* Alloc(size_t size, size_t align = 256) {
 #if WIIXL_CEMU
-    void* p = WiiXLaunch::Backend::AllocCemuHeap(size, align);
+    void* p = WiiXLaunch::Arena::AllocHost(size, align);
 #elif WIIXL_WIIU
     void* p = GameAllocMem1(size, align);
 #else
@@ -85,8 +91,7 @@ inline void* Alloc(size_t size, size_t align = 256) {
             OSLog("WiiXLaunch: payload heap exhausted - %u bytes refused (%u of %u used). "
                   "Load fewer fonts, or install a game allocator with Mem::UseCoreinitHeap.\n",
                   static_cast<uint32_t>(size),
-                  static_cast<uint32_t>(WiiXLaunch::Backend::CemuHeapUsed()),
-                  static_cast<uint32_t>(WiiXLaunch::Backend::CemuHeapLimit()));
+                  WiiXLaunch::Arena::HostUsed(), WiiXLaunch::Arena::Total());
         }
     }
 #endif
@@ -106,16 +111,20 @@ inline void* Alloc(size_t size, size_t align = 256) {
 // wrapper is correct and a different title or an earlier moment may still have
 // MEM1 room, but it is not the one to reach for.
 //
-// Route every later Backend::AllocCemuHeap - and so every GX2::AllocMEM1 -
-// through the game's MEM1 heap instead of the payload's code cave.
+// Route every later Arena::AllocHost - and so every GX2::AllocMEM1 - through
+// the game MEM1 heap instead of the payload code cave.
+//
+// HOST allocations only. A loaded mod grant is never redirected: it holds
+// relocated code that gets executed, and the code cave is the only region this
+// project has established is executable.
 //
 // WHEN: after the game's heaps exist. From a GX2::OnInitialized callback or
 // later is safe; from a module entry point it is not - the payload's entry hook
 // runs long before coreinit has set the base heaps up, and the probe below will
 // simply fail there.
 //
-// Allocations already handed out by the code-cave heap stay valid; nothing is
-// freed or moved. Backend::CemuHeapUsed() keeps reporting the code cave only.
+// Allocations already handed out by the arena stay valid; nothing is freed or
+// moved. Arena::HostUsed() keeps reporting the arena own share only.
 //
 // Probes with a small allocation first and refuses to install if it comes back
 // null, so a bad address or an early call fails here rather than at the first
@@ -128,29 +137,31 @@ inline bool UseGameHeap() {
         OSLog("WiiXLaunch: game MEM1 heap not available (probe failed) - staying on the code cave\n");
         return false;
     }
-    WiiXLaunch::Backend::SetHeapProvider(&GameAllocMem1);
-    OSLog("WiiXLaunch: allocating from the game's MEM1 heap (probe at %p); code cave had %u of %u bytes used\n",
-          probe, static_cast<uint32_t>(WiiXLaunch::Backend::CemuHeapUsed()),
-          static_cast<uint32_t>(WiiXLaunch::Backend::CemuHeapLimit()));
+    WiiXLaunch::Arena::SetHostProvider(&GameAllocMem1);
+    OSLog("WiiXLaunch: allocating from the game MEM1 heap (probe at %p); the arena had %u of %u host bytes used\n",
+          probe, WiiXLaunch::Arena::HostUsed(), WiiXLaunch::Arena::Total());
     return true;
 }
 
-// Back to the payload's own code-cave heap. Anything already allocated from the
-// game stays where it is.
+// Back to the arena own memory. Anything already allocated from the game stays
+// where it is.
 inline void UseCodeCaveHeap() {
-    WiiXLaunch::Backend::SetHeapProvider(nullptr);
-    OSLog("WiiXLaunch: allocating from the payload code cave (%u of %u bytes used)\n",
-          static_cast<uint32_t>(WiiXLaunch::Backend::CemuHeapUsed()),
-          static_cast<uint32_t>(WiiXLaunch::Backend::CemuHeapLimit()));
+    WiiXLaunch::Arena::SetHostProvider(nullptr);
+    OSLog("WiiXLaunch: allocating from the arena (%u of %u host bytes used)\n",
+          WiiXLaunch::Arena::HostUsed(), WiiXLaunch::Arena::Total());
 }
 
 inline bool UsingGameHeap() {
-    return WiiXLaunch::Backend::GetHeapProvider() == &GameAllocMem1;
+    return WiiXLaunch::Arena::GetHostProvider() == &GameAllocMem1;
 }
 
-// What is left of the payload's own heap, whether or not the game's is in use.
-inline size_t CodeCaveUsed() { return WiiXLaunch::Backend::CemuHeapUsed(); }
-inline size_t CodeCaveLimit() { return WiiXLaunch::Backend::CemuHeapLimit(); }
+// The arena figures, whether or not the game heap is in use. Total() is the
+// whole reservation; what the host can still take is smaller by whatever has
+// been granted to loaded modules, which is why RemainingForHost is separate and
+// is the one to check before a large allocation.
+inline size_t CodeCaveUsed() { return WiiXLaunch::Arena::HostUsed(); }
+inline size_t CodeCaveLimit() { return WiiXLaunch::Arena::Total(); }
+inline size_t RemainingForHost() { return WiiXLaunch::Arena::Free(); }
 
 #else
 

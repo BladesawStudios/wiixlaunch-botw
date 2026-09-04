@@ -508,8 +508,11 @@ and is not mapped: a payload allocating past it dies silently on the first
 write. With one font the heap peaked around 2.4 MB and never reached the
 boundary; loading four walked straight through it, which is what the
 "font-related" crash actually was. Unclaimed address space is not memory.
-`Backend::AllocCemuHeap` enforces 0x01C00000 and returns null past it, and
-`AllocMEM1` logs the first refusal.
+`Arena::AllocHost` enforces 0x01C00000 and returns null past it, and `AllocMEM1`
+logs the first refusal. (This was `Backend::AllocCemuHeap` until the arena
+became the single memory owner; the backend heap API was deleted rather than
+wrapped, because every caller of it did its own bookkeeping against the same
+distance-to-the-wall and each believed it had all of it.)
 
 That leaves the payload about **3.7 MB**, which four faces plus a vertex ring,
 blur targets and loader scratch do not fit in - measured at 3807/3807 KB with
@@ -520,10 +523,15 @@ address. `WiiXLaunch::Mem::UseCoreinitHeap()` (base framework,
 `wiixlaunch/mem.hpp`) reaches `MEMGetBaseHeapHandle` and
 `MEMAllocFromExpHeapEx` through `import.coreinit.<Name>` shims - the same
 mechanism `OSGetTime` and the FS calls already used - takes the MEM2 base heap
-(**~68 MB free on v208**) and installs it with `Backend::SetHeapProvider`. Call
-it from a `GX2::OnInitialized` callback, before anything large is allocated;
-the base heaps do not exist at module entry. With it, all six faces fit and the
-cave stays at ~176 KB.
+(**~68 MB free on v208**) and installs it with `Arena::SetHostProvider`. Call it
+from a `GX2::OnInitialized` callback, before anything large is allocated; the
+base heaps do not exist at module entry. With it, all six faces fit and the cave
+stays at ~176 KB.
+
+That provider moves **host** allocations only - this module is compiled into the
+payload, so its font sheets are the host's memory. A loaded `.wxlm` mod's grant
+is never redirected: it holds relocated code that gets executed, and the code
+cave is the only region established as executable.
 
 Two things that do NOT work, both measured rather than assumed: the game's own
 MEM1 wrapper at 0x0309BB68 (`BotW::Heap::UseGameHeap`) returns null, because

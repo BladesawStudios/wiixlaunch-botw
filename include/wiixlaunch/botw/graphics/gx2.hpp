@@ -1,6 +1,7 @@
 #pragma once
 
 #include <wiixlaunch/platform.hpp>
+#include <wiixlaunch/loader/arena.hpp>
 #include <wiixlaunch/hook.hpp>
 #include <wiixlaunch/debug_log.hpp>
 
@@ -323,22 +324,28 @@ inline FnClearDepthStencilEx ClearDepthStencilEx() { return reinterpret_cast<FnC
 
 inline void* AllocMEM1(uint32_t size, uint32_t align = 256) {
 #if WIIXL_CEMU
-    // Backend::AllocCemuHeap is bounded and can now refuse: the code-cave heap
-    // runs from the end of the payload to 0x02000000, where the game's own code
-    // begins, and it used to hand out pointers past that. Nothing here can
-    // recover from running out, but silence was the worst of the options - a
-    // mod that over-allocates should see it in the log rather than as
-    // corruption somewhere else entirely. Once is enough; DrawMesh retries its
-    // ring buffer every call.
-    void* p = WiiXLaunch::Backend::AllocCemuHeap(size, align);
+    // Arena::AllocHost is bounded and can refuse: the arena runs from the end
+    // of the payload to 0x01C00000, the end of Cemu code-cave AREA, and the
+    // allocator this replaced used to hand out pointers past that. Nothing here
+    // can recover from running out, but silence was the worst of the options -
+    // over-allocating should show up in the log rather than as corruption
+    // somewhere else entirely. Once is enough; DrawMesh retries its ring buffer
+    // every call.
+    //
+    // AllocHost, not the mod allocator: this module is compiled INTO the
+    // payload, so its surfaces are the host memory. It is additionally bounded
+    // by where module grants begin, so a font sheet cannot eat memory a loaded
+    // .wxlm was promised.
+    void* p = WiiXLaunch::Arena::AllocHost(size, align);
     if (!p) {
         static bool s_loggedOom = false;
         if (!s_loggedOom) {
             s_loggedOom = true;
-            BotW::OSLog("WiiXLaunch: payload heap exhausted - %u bytes refused (%u of %u used). "
-                        "Load fewer fonts, or install a game allocator with Backend::SetHeapProvider.\n",
-                        size, static_cast<uint32_t>(WiiXLaunch::Backend::CemuHeapUsed()),
-                        static_cast<uint32_t>(WiiXLaunch::Backend::CemuHeapLimit()));
+            BotW::OSLog("WiiXLaunch: arena exhausted for the host - %u bytes refused "
+                        "(%u of %u used, %u free, %u granted to modules). Load fewer "
+                        "fonts, or move host allocation with Mem::UseCoreinitHeap.\n",
+                        size, WiiXLaunch::Arena::HostUsed(), WiiXLaunch::Arena::Total(),
+                        WiiXLaunch::Arena::Free(), WiiXLaunch::Arena::ModuleCarved());
         }
     }
     return p;
@@ -885,10 +892,10 @@ inline void Init() {
     // default branch, which echoed the characters and consumed no argument,
     // leaving every later specifier reading the previous slot. Fixed in
     // debug_log.hpp; width and zero-padding work now.
-    BotW::OSLog("WiiXLaunch: payload code-cave heap %p..%p, %u KB\n",
-                reinterpret_cast<void*>(WiiXLaunch::Backend::CemuHeapBase()),
+    BotW::OSLog("WiiXLaunch: arena %p..%p, %u KB\n",
+                reinterpret_cast<void*>(WiiXLaunch::Arena::Base()),
                 reinterpret_cast<void*>(WiiXLaunch::Backend::kCemuCodeCaveEnd),
-                static_cast<uint32_t>(WiiXLaunch::Backend::CemuHeapLimit() / 1024));
+                WiiXLaunch::Arena::Total() / 1024u);
 #endif
 }
 
