@@ -84,10 +84,15 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
         WiiXLaunch::Loader::Load("WiiXLaunch/mods/sample.wxlm");
     if (r == WiiXLaunch::Wxlm::Reject::None) {
         WiiXLaunch::Loader::RunPhase(WiiXLaunch::Wxlm::Phase::Load);
-    } else if (r == WiiXLaunch::Wxlm::Reject::ReadFailed) {
-        // No modules present is the default state of a fresh host, not a fault.
-        WIIXL_LOG("[loader] no module at WiiXLaunch/mods/sample.wxlm - nothing to load, "
-                  "the game boots normally");
+    } else {
+        // A module that was found and REJECTED must not report as an absent
+        // one. The first boot printed "no module ... nothing to load" for a
+        // module the loader had opened, read, and refused mid-parse - the
+        // reason was three lines above in the log, and the summary contradicted
+        // it. Only the loader knows which happened, so it says so by name.
+        WIIXL_LOG("[loader] sample.wxlm not loaded: %s. The game boots normally either "
+                  "way; if the module is simply absent that is the default state of a "
+                  "fresh host.", WiiXLaunch::Wxlm::RejectName(r));
     }
 }
 
