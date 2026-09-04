@@ -40,3 +40,9 @@
 // the flat Cemu payload does not run static constructors.
 #include "load_point.hpp"
 #include "surfaces.hpp"
+
+// Tells scripts/deploy.py this module is compiled into the build, not merely
+// vendored on disk. It uses that to tell "module unused, skip its shim table"
+// apart from "module used but its shim symbol got dropped", which is an error.
+// The name must match the vendor directory suffix: vendor/wiixlaunch-botw.
+WIIXL_DECLARE_MODULE(botw);

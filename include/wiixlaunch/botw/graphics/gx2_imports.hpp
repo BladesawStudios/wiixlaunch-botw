@@ -48,7 +48,14 @@
 extern "C" {
     // Patched by scripts/deploy.py at deploy time - left at 0 in the actual
     // compiled ELF, never meant to be read before that patch has happened.
-    __attribute__((section(".data"))) inline uint32_t g_Gx2ShimTableOffset = 0;
+    // `used` for the reason in base docs/modules.md: the only writer is
+    // scripts/deploy.py and the only reader is the shim table in
+    // src/cemu/gx2_imports.asm, neither of which the compiler can see. Without
+    // it, a project that includes botw.hpp but never calls a GX2 function drops
+    // the symbol, and deploy.py then cannot tell that from a genuine mistake -
+    // it fails the build reporting a dropped symbol, which for that project is
+    // a legitimate configuration rather than an error.
+    __attribute__((section(".data"), used)) inline uint32_t g_Gx2ShimTableOffset = 0;
 }
 
 namespace WiiXLaunch::Backend {
