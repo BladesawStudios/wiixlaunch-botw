@@ -49,6 +49,7 @@
 #include <wiixlaunch/platform.hpp>
 #include <wiixlaunch/loader/load_point.hpp>
 #include <wiixlaunch/loader/loader.hpp>
+#include <wiixlaunch/hook_manager.hpp>
 #include <wiixlaunch/loader/core_surface.hpp>
 
 #if WIIXL_CEMU
@@ -94,6 +95,12 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
                   "way; if the module is simply absent that is the default state of a "
                   "fresh host.", WiiXLaunch::Wxlm::RejectName(r));
     }
+
+    // Every hook in the process, and every address more than one owner touched.
+    // Printed AFTER modules load, because a mod installing a hook is exactly
+    // the case this summary exists for - the short list of shared addresses is
+    // the first thing worth reading when two mods together misbehave.
+    WiiXLaunch::Hooks::LogState();
 }
 
 // Register-preserving stub. The frame layout matches WiiXLaunch_Cemu_Init
