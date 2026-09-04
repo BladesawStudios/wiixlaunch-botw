@@ -50,6 +50,7 @@
 #include <wiixlaunch/loader/load_point.hpp>
 #include <wiixlaunch/loader/loader.hpp>
 #include <wiixlaunch/hook_manager.hpp>
+#include <wiixlaunch/hook_probe.hpp>
 #include <wiixlaunch/loader/core_surface.hpp>
 
 #if WIIXL_CEMU
@@ -94,6 +95,23 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
         WIIXL_LOG("[loader] no modules loaded. The game boots normally either way; "
                   "if the directory is simply empty that is the default state of a "
                   "fresh host, and the lines above say which it was.");
+    }
+
+    // Run the hook probe and let the HOST check the sequence.
+    //
+    // The five log lines the demonstration mods print are readable, but reading
+    // them is not a test - a missing line reads as a shorter log. So the host
+    // calls the probe, and hook_probe.hpp checks length, nesting and order
+    // against the hook registry, with tags it bound itself. It prints PASS or
+    // FAIL; nothing here is left to the eye.
+    {
+        const uintptr_t probe = WiiXLaunch::Core::impl::CoreHookProbeTarget();
+        if (probe) {
+            auto fn = reinterpret_cast<void (*)()>(probe);
+            WIIXL_LOG("HookProbe: calling the probe at %p", reinterpret_cast<void*>(probe));
+            fn();
+            WiiXLaunch::HookProbe::Verify(probe);
+        }
     }
 
     // Every hook in the process, and every address more than one owner touched.
