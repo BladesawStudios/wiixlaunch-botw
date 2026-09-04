@@ -676,6 +676,43 @@ wnd1 W_SelectFrame_00 size=530x186 frameSize=71 tex=SelectFrameGlow_00^s mat bac
 wnd1 W_SelectFrame_01 size=530x186 frameSize=68 tex=SelectFrame_04^t
 ```
 
+## Sound
+
+The menu plays the game's own sound events: `mc_Key_On` when the cursor moves,
+`mc_Key_Decide` on A. `GUI::SetUiSounds(false)` turns them off,
+`GUI::SetUiSoundEvents(cursor, decide)` swaps them for any other event, and
+they can only fire when focusable widgets exist - a HUD-only mod stays silent
+without asking.
+
+`Sound::Play("name")` (`game/sound.hpp`) is the general form. It goes through
+`0x0359BD24`, the single entry point everything from the menus to the keyboard
+uses, and the argument is a sead string whose **character pointer comes first
+and vtable second** - `0x0359A950` reads the text as `*param` and calls a
+virtual through `param[1]`, so it cannot be the other way round.
+
+**Do not guess event names from strings in the binary.** That cost five rounds
+of testing here. The `.rodata` is full of plausible ones - `mc_CursorMove`,
+`mc_Decide`, `mc_List_FocusMove` - that do not resolve, and even `mc_CallHorse`
+fails despite the game passing that exact string to that exact function from
+`0x02D11534`. The lookup at `0x03BA1E08` is a binary search over ONE loaded
+resource, and the manager at `*(0x1047C390)+0x20` holds a small system-scoped
+set of **51 events** (the same on the title screen and in game): Amiibo, map
+markers, the title cursor, the software keyboard, heart and stamina upgrades,
+priest voices, screen changes. Nothing else is findable through it.
+
+`Sound::DumpEvents()` walks that table and prints what is actually there,
+which is how the working names were found. Use it rather than reading strings:
+
+```
+container 0x663d0b68 selector=0 (only this slot is searched)
+  slot 0: entry 0x663d0b9c ready=1, 51 events
+    AmiiboError
+    ...
+```
+
+There is no general menu-cursor event in that set, which is why the keyboard's
+sounds are the default - they are the only crisp UI sounds in it.
+
 ## Layout
 
 Widget rectangles come out of a `Stack` rather than a running `y` the caller
