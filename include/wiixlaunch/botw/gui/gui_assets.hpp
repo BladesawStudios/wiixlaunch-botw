@@ -13,7 +13,7 @@
 #include "gui_backend.hpp"
 #include "../graphics/bflim.hpp"
 #include "../graphics/bffnt.hpp"
-#include "../platform/fs.hpp"
+#include <wiixlaunch/fs.hpp>
 #include "../platform/yaz0.hpp"
 #include "../platform/sarc.hpp"
 #include "../platform/log.hpp"

@@ -34,8 +34,10 @@
 // elsewhere in the same payload.
 //
 // Logging (OSReport) used to live in this same table - it's been split out
-// to cemu_logging.hpp/cemu_logging.asm, its own separate shim table, since
-// it's a coreinit concern rather than a gx2 one.
+// to its own shim table, and that table has since moved to base WiiXLaunch
+// (include/wiixlaunch/cemu/cemu_logging.hpp, src/cemu/cemu_logging.asm),
+// since it's a coreinit concern rather than a gx2 one. GX2 stays here: a
+// game-agnostic framework has no business assuming a graphics API.
 
 #include <wiixlaunch/platform.hpp>
 

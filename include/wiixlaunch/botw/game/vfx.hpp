@@ -8,7 +8,7 @@
 #include <wiixlaunch/call.hpp>
 #include <wiixlaunch/debug_log.hpp>
 #include <wiixlaunch/botw/game/memory.hpp>
-#include <wiixlaunch/botw/platform/fs.hpp>
+#include <wiixlaunch/fs.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -282,7 +282,7 @@ private:
                 return -1;
             }
             size_t readBytes = 0;
-            bool ok = WiiXLaunch::BotW::FS::ReadFile(res.path, res.buffer, kVfxBufSize, &readBytes);
+            bool ok = WiiXLaunch::FS::ReadFile(res.path, res.buffer, kVfxBufSize, &readBytes);
             if (!ok || readBytes == 0) {
                 WIIXL_LOG("WiiXLaunch::Vfx: failed to load %s", res.path);
                 return -1;

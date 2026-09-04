@@ -24,7 +24,7 @@ is a no-op. The renderer is split so that an NVN backend only has to provide
 | `graphics/bflim.hpp` | BFLIM footer parser -> GX2 surface description. |
 | `platform/yaz0.hpp` | Streaming Yaz0 decoder with a 4 KB window. |
 | `platform/sarc.hpp` | SARC header / node-table lookup by name hash. |
-| `platform/fs.hpp` | `FS::File` - open + positioned reads (`FSReadFileWithPos`), added for the loader. |
+| `<wiixlaunch/fs.hpp>` (base) | `FS::File` - open + positioned reads (`FSReadFileWithPos`), added for the loader. Lives in base WiiXLaunch, not this module. |
 | `tools/preview_ui_assets.py` | Offline de-tiler/decoder: `.bflim` to PNG, `.bffnt` header + sheets, `.bflyt` pane tree. Every number in this file came out of it. |
 | `tools/preview_ui_compose.py` | The same drawing rules as the renderer, in Python, so a composite can be built and looked at as a PNG without launching the game. |
 | `graphics/gx2.hpp` | Added: `SurfaceDesc` / `AllocTextureSurface` / `CreateTextureFromSurface` (upload pre-tiled surfaces as-is) and `BeginBatch` / `BatchQuad` / `EndBatch` (many quads per draw call, no per-quad `GX2DrawDone`). |
