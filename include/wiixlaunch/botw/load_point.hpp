@@ -48,6 +48,8 @@
 
 #include <wiixlaunch/platform.hpp>
 #include <wiixlaunch/loader/load_point.hpp>
+#include <wiixlaunch/loader/loader.hpp>
+#include <wiixlaunch/loader/core_surface.hpp>
 
 #if WIIXL_CEMU
 
@@ -55,9 +57,12 @@ WIIXL_DECLARE_LOAD_POINT(0x030989CC);
 
 extern "C" void WiiXLaunch_LoadPointStub();
 
-// Runs at the load point. Stage 4 replaces this body with the module loader;
-// for now it reports that the site was reached and re-probes the filesystem
-// there, which is what validated the site in the first place.
+// Runs at the load point: this is where modules are read and started.
+//
+// The probe stays first. It costs one FSOpenFile and confirms the filesystem is
+// actually usable at this site before the loader assumes it, which is the thing
+// the whole stage-1 measurement established and the one assumption most likely
+// to change if the game version or the emulator moves.
 //
 // `used` because the ONLY caller is the asm stub below, which the compiler
 // cannot see - an inline function no C++ expression odr-uses is never emitted,
@@ -66,6 +71,24 @@ extern "C" void WiiXLaunch_LoadPointStub();
 // outside the compiler's view has to be pinned. See docs/modules.md.
 extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
     WiiXLaunch::LoadPoint::Probe("post-fsaddclient");
+
+    // What this host is and what it offers, logged before any module is read,
+    // so a rejection further down can be read against it.
+    WIIXL_LOG("[loader] host ABI v%u, format v%u",
+              WiiXLaunch::Core::kAbiVersion, WiiXLaunch::Wxlm::kFormatVersion);
+    WiiXLaunch::Surface::LogRegistered();
+
+    // One module, by fixed name. Enumerating the directory and loading several
+    // is the next stage; this proves one end to end first.
+    const WiiXLaunch::Wxlm::Reject r =
+        WiiXLaunch::Loader::Load("WiiXLaunch/mods/sample.wxlm");
+    if (r == WiiXLaunch::Wxlm::Reject::None) {
+        WiiXLaunch::Loader::RunPhase(WiiXLaunch::Wxlm::Phase::Load);
+    } else if (r == WiiXLaunch::Wxlm::Reject::ReadFailed) {
+        // No modules present is the default state of a fresh host, not a fault.
+        WIIXL_LOG("[loader] no module at WiiXLaunch/mods/sample.wxlm - nothing to load, "
+                  "the game boots normally");
+    }
 }
 
 // Register-preserving stub. The frame layout matches WiiXLaunch_Cemu_Init
