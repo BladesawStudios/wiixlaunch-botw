@@ -85,6 +85,29 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
     // hook priority, so it is a specification rather than an enumeration
     // artefact. See docs/loader.md.
     const uint32_t loaded = WiiXLaunch::Loader::LoadAll("WiiXLaunch/mods");
+
+    // --- declared patches, settled before a single entry runs ---------------
+    //
+    // Applied during the loads above; verified and put back HERE, between
+    // LoadAll and RunPhase, so no module code executes while the game is
+    // modified. That ordering is the whole reason the demonstration is safe
+    // whatever address it picks - see examples/patch_mod/mod.cpp.
+    //
+    // This was WRONG in the first version and the boot log said so: these three
+    // calls sat after RunPhase, so the patch was live across every module entry
+    // - about 5ms rather than the microseconds the comment claimed. The comment
+    // was right about the intent and the code did something else, which is
+    // exactly the kind of disagreement a log is for.
+    //
+    // The host READS each target back rather than believing the applier. A
+    // refusal is self-evidencing because nothing changed; a success is not.
+    //
+    // A host shipping REAL patch mods must delete the RestoreAll call - a patch
+    // is meant to persist. This build ships only demonstration modules.
+    WiiXLaunch::Patches::VerifyApplied();
+    WiiXLaunch::Patches::RestoreAll();
+    WiiXLaunch::Patches::LogState();
+
     if (loaded != 0) {
         WiiXLaunch::Loader::RunPhase(WiiXLaunch::Wxlm::Phase::Load);
     } else {
@@ -97,23 +120,6 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
                   "if the directory is simply empty that is the default state of a "
                   "fresh host, and the lines above say which it was.");
     }
-
-    // Declared patches were applied during the loads above, before any entry
-    // ran. The host goes back and READS each target rather than believing the
-    // applier - a refusal is self-evidencing because nothing changed, but a
-    // success is not.
-    //
-    // Then they are PUT BACK, here, still before RunPhase calls a single entry.
-    // The demonstration needs to prove the applier writes to game memory; it
-    // does not need the write to outlive the load sequence, and not needing that
-    // is what makes the choice of address safe even if its inertness analysis
-    // were wrong. See examples/patch_mod/mod.cpp.
-    //
-    // A host shipping REAL patch mods must delete the RestoreAll call - a patch
-    // is meant to persist. This build ships only demonstration modules.
-    WiiXLaunch::Patches::VerifyApplied();
-    WiiXLaunch::Patches::RestoreAll();
-    WiiXLaunch::Patches::LogState();
 
     // Run the hook probe and let the HOST check the sequence.
     //
