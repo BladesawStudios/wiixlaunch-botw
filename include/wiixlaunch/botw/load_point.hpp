@@ -102,7 +102,17 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
     // ran. The host goes back and READS each target rather than believing the
     // applier - a refusal is self-evidencing because nothing changed, but a
     // success is not.
+    //
+    // Then they are PUT BACK, here, still before RunPhase calls a single entry.
+    // The demonstration needs to prove the applier writes to game memory; it
+    // does not need the write to outlive the load sequence, and not needing that
+    // is what makes the choice of address safe even if its inertness analysis
+    // were wrong. See examples/patch_mod/mod.cpp.
+    //
+    // A host shipping REAL patch mods must delete the RestoreAll call - a patch
+    // is meant to persist. This build ships only demonstration modules.
     WiiXLaunch::Patches::VerifyApplied();
+    WiiXLaunch::Patches::RestoreAll();
     WiiXLaunch::Patches::LogState();
 
     // Run the hook probe and let the HOST check the sequence.
