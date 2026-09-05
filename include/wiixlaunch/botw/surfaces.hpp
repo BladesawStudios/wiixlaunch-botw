@@ -43,6 +43,17 @@
 #include <wiixlaunch/botw/game/player.hpp>
 #include <wiixlaunch/botw/game/actor.hpp>
 
+// One surface per concern, each in its own header. botw.player was the first
+// and proved the mechanism; these are the rest of the module made reachable.
+// A mod sees ONLY what a surface exports, so an unregistered header may as well
+// not exist as far as compiled binaries are concerned.
+#include <wiixlaunch/botw/surfaces/gamedata_surface.hpp>
+#include <wiixlaunch/botw/surfaces/world_surface.hpp>
+#include <wiixlaunch/botw/surfaces/input_surface.hpp>
+#include <wiixlaunch/botw/surfaces/map_surface.hpp>
+#include <wiixlaunch/botw/surfaces/pouch_surface.hpp>
+#include <wiixlaunch/botw/surfaces/armour_surface.hpp>
+
 #include <cstdint>
 
 namespace WiiXLaunch::BotW::Surfaces {
@@ -370,6 +381,16 @@ inline void Register() {
     player.symbolCount =
         static_cast<uint32_t>(sizeof(impl::kPlayerSymbols) / sizeof(impl::kPlayerSymbols[0]));
     Surface::Register(player);
+
+    // The rest of the module. Each registers itself and says so; a surface that
+    // fails to register is reported by Surface::Register rather than leaving a
+    // mod to discover the gap at resolve time.
+    GameDataSurface::Register();
+    WorldSurface::Register();
+    InputSurface::Register();
+    MapSurface::Register();
+    PouchSurface::Register();
+    ArmourSurface::Register();
 }
 
 } // namespace WiiXLaunch::BotW::Surfaces
