@@ -38,7 +38,9 @@ namespace WiiXLaunch::BotW::Surfaces::GameDataSurface {
 
 constexpr const char* kName = "botw.gamedata";
 constexpr uint16_t kVersionMajor = 1;
-constexpr uint16_t kVersionMinor = 0;
+// 1.1 appends GetFlagDebug. Appending bumps the MINOR, so every mod built
+// against v1.0 still resolves.
+constexpr uint16_t kVersionMinor = 1;
 
 namespace impl {
 
@@ -400,6 +402,39 @@ extern "C" inline uint32_t GdSetDisplayedPercent(float percent, uint32_t forceVi
     return Completion::SetDisplayedPercent(percent, forceVisible != 0) ? 1u : 0u;
 }
 
+// --- the manager's own state ------------------------------------------------
+//
+// FlagDebug is a struct of eight words and two four-word arrays, so it cannot
+// cross as itself. Flattened into out-pointers, with the arrays as pointers to
+// four elements the caller owns.
+//
+// This is for diagnosing a REFUSED WRITE: status bit 0x12 blocks writes
+// outright, and the gates decide whether a typed call reaches the store at all.
+// Without it, "the write was refused" is the whole answer a mod can give.
+extern "C" inline uint32_t GdGetFlagDebug(uint32_t* manager, uint32_t* status,
+                                          uint32_t* flagByte, uint32_t* mirrorGate,
+                                          uint32_t* writeGate,
+                                          uint32_t* slotsOut4, uint32_t* coresOut4) {
+#if WIIXL_SWITCH
+    (void)manager; (void)status; (void)flagByte; (void)mirrorGate; (void)writeGate;
+    (void)slotsOut4; (void)coresOut4;
+    return 0;
+#else
+    GameData::FlagDebug info{};
+    if (!GameData::GetFlagDebug(info)) return 0;
+    if (manager) *manager = static_cast<uint32_t>(info.manager);
+    if (status) *status = info.status;
+    if (flagByte) *flagByte = info.flagByte;
+    if (mirrorGate) *mirrorGate = info.mirrorGate;
+    if (writeGate) *writeGate = info.writeGate;
+    for (int i = 0; i < 4; ++i) {
+        if (slotsOut4) slotsOut4[i] = static_cast<uint32_t>(info.slot[i]);
+        if (coresOut4) coresOut4[i] = static_cast<uint32_t>(info.core[i]);
+    }
+    return 1;
+#endif
+}
+
 // --- the table -------------------------------------------------------------
 //
 // APPEND ONLY. Adding an entry bumps the minor; changing or removing one bumps
@@ -417,6 +452,8 @@ inline const Surface::Symbol kSymbols[] = {
 
     WIIXL_SURFACE_SYMBOL("GetMaxLife",         &GdGetMaxLife),
     WIIXL_SURFACE_SYMBOL("SetMaxLife",         &GdSetMaxLife),
+    // v1.1. Appended, never inserted.
+    WIIXL_SURFACE_SYMBOL("GetFlagDebug",       &GdGetFlagDebug),
 
     WIIXL_SURFACE_SYMBOL("GetStamina",         &GdGetStamina),
     WIIXL_SURFACE_SYMBOL("GetMaxStamina",      &GdGetMaxStamina),

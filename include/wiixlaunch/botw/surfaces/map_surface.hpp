@@ -24,7 +24,13 @@ namespace WiiXLaunch::BotW::Surfaces::MapSurface {
 
 constexpr const char* kName = "botw.map";
 constexpr uint16_t kVersionMajor = 1;
-constexpr uint16_t kVersionMinor = 0;
+// 1.1 appends the five ...Level symbols. The module's writers have always
+// taken TWO permission flags - force, which clears a latch, and
+// bypassPermission, which writes flags the game marks event-system-only - and
+// this surface passed only the first, so the second was unreachable through it.
+// Appending rather than widening the existing symbols: a mod built against v1.0
+// still resolves, and still gets exactly what it asked for.
+constexpr uint16_t kVersionMinor = 1;
 
 namespace impl {
 
@@ -103,6 +109,39 @@ extern "C" inline uint32_t MSetRegionMarker(int32_t region, int32_t id) {
 extern "C" inline uint32_t MSetRegionActivated(int32_t region, uint32_t activated, uint32_t force) {
     return Map::SetMapRegionActivated(static_cast<int>(region), activated != 0, force != 0)
                ? 1u : 0u;
+}
+
+// --- the two-level permission forms ----------------------------------------
+//
+// level 0 writes normally, 1 clears a latch, 2 also writes flags the game marks
+// event-system-only. The single-flag symbols above are level 0 and level 1
+// only; these reach the third case.
+extern "C" inline uint32_t MSetRegionUnlockLevel(int32_t region, uint32_t unlocked,
+                                                 int32_t level) {
+    return Map::SetMapRegionUnlock(static_cast<int>(region), unlocked != 0,
+                                   level >= 1, level >= 2) ? 1u : 0u;
+}
+
+extern "C" inline int32_t MSetRegionUnlockAllLevel(uint32_t unlocked, int32_t level) {
+    return static_cast<int32_t>(
+        Map::SetMapRegionUnlockAll(unlocked != 0, level >= 1, level >= 2));
+}
+
+extern "C" inline uint32_t MSetRegionActivatedLevel(int32_t region, uint32_t activated,
+                                                    int32_t level) {
+    return Map::SetMapRegionActivated(static_cast<int>(region), activated != 0,
+                                      level >= 1, level >= 2) ? 1u : 0u;
+}
+
+extern "C" inline uint32_t MSetShrineUnlockLevel(int32_t shrine, uint32_t unlocked,
+                                                 int32_t level) {
+    return Map::SetMapUnlock(static_cast<int>(shrine), unlocked != 0,
+                             level >= 1, level >= 2) ? 1u : 0u;
+}
+
+extern "C" inline int32_t MSetShrineUnlockAllLevel(uint32_t unlocked, int32_t level) {
+    return static_cast<int32_t>(
+        Map::SetMapUnlockAll(unlocked != 0, level >= 1, level >= 2));
 }
 
 extern "C" inline int32_t MCountUnlockedRegions() {
@@ -214,6 +253,13 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("GetBeastMarker",          &MGetBeastMarker),
     WIIXL_SURFACE_SYMBOL("ForgetBeastMarkers",      &MForgetBeastMarkers),
     WIIXL_SURFACE_SYMBOL("BeastMarkerCount",        &MBeastMarkerCount),
+
+    // v1.1. Appended, never inserted.
+    WIIXL_SURFACE_SYMBOL("SetRegionUnlockLevel",    &MSetRegionUnlockLevel),
+    WIIXL_SURFACE_SYMBOL("SetRegionUnlockAllLevel", &MSetRegionUnlockAllLevel),
+    WIIXL_SURFACE_SYMBOL("SetRegionActivatedLevel", &MSetRegionActivatedLevel),
+    WIIXL_SURFACE_SYMBOL("SetShrineUnlockLevel",    &MSetShrineUnlockLevel),
+    WIIXL_SURFACE_SYMBOL("SetShrineUnlockAllLevel", &MSetShrineUnlockAllLevel),
 };
 
 } // namespace impl
