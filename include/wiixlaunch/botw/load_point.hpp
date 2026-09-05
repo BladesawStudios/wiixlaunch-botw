@@ -55,6 +55,7 @@
 #include <wiixlaunch/tick.hpp>
 #include <wiixlaunch/net.hpp>
 #include <wiixlaunch/botw/game/player.hpp>
+#include <wiixlaunch/botw/surfaces.hpp>
 #include <wiixlaunch/loader/core_surface.hpp>
 
 #if WIIXL_CEMU
@@ -159,6 +160,12 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
     // other. A mod registered in one and expecting the other would otherwise
     // look identical to a mod that is simply not running.
     WiiXLaunch::BotW::Player::LogTickState();
+
+    // The two drawing registries. A mod that registered to draw and never
+    // appears has one of two problems - it did not register, or nothing drives
+    // the frame - and these lines tell those apart.
+    WiiXLaunch::BotW::Surfaces::GfxSurface::LogState();
+    WiiXLaunch::BotW::Surfaces::GuiSurface::LogState();
 
     WiiXLaunch::Hooks::LogState();
 }

@@ -49,6 +49,9 @@
 // not exist as far as compiled binaries are concerned.
 #include <wiixlaunch/botw/surfaces/actor_handles.hpp>
 #include <wiixlaunch/botw/surfaces/actor_surface.hpp>
+#include <wiixlaunch/botw/surfaces/gfx_surface.hpp>
+#include <wiixlaunch/botw/surfaces/gui_surface.hpp>
+#include <wiixlaunch/botw/surfaces/effects_surfaces.hpp>
 #include <wiixlaunch/botw/surfaces/misc_surfaces.hpp>
 #include <wiixlaunch/botw/surfaces/gamedata_surface.hpp>
 #include <wiixlaunch/botw/surfaces/world_surface.hpp>
@@ -359,6 +362,10 @@ inline void Register() {
     // fails to register is reported by Surface::Register rather than leaving a
     // mod to discover the gap at resolve time.
     ActorSurface::Register();
+    GfxSurface::Register();
+    GuiSurface::Register();
+    VfxSurface::Register();
+    FlytSurface::Register();
     CameraSurface::Register();
     DisplaySurface::Register();
     EventsSurface::Register();
