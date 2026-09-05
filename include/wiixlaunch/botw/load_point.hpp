@@ -53,6 +53,7 @@
 #include <wiixlaunch/hook_probe.hpp>
 #include <wiixlaunch/patches.hpp>
 #include <wiixlaunch/tick.hpp>
+#include <wiixlaunch/net.hpp>
 #include <wiixlaunch/loader/core_surface.hpp>
 
 #if WIIXL_CEMU
@@ -145,6 +146,11 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
     // the first thing worth reading when two mods together misbehave.
     // Registered ticks, and whether anything will ever drive them.
     WiiXLaunch::Tick::LogState();
+
+    // Who holds a socket, printed next to who holds a tick. A freeze report
+    // that says "module X was in flight" AND "module X holds 8 sockets" is a
+    // much narrower starting point than either line alone.
+    WiiXLaunch::Net::LogState();
 
     WiiXLaunch::Hooks::LogState();
 }
