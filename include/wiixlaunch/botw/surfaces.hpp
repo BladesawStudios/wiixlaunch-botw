@@ -47,6 +47,9 @@
 // and proved the mechanism; these are the rest of the module made reachable.
 // A mod sees ONLY what a surface exports, so an unregistered header may as well
 // not exist as far as compiled binaries are concerned.
+#include <wiixlaunch/botw/surfaces/actor_handles.hpp>
+#include <wiixlaunch/botw/surfaces/actor_surface.hpp>
+#include <wiixlaunch/botw/surfaces/misc_surfaces.hpp>
 #include <wiixlaunch/botw/surfaces/gamedata_surface.hpp>
 #include <wiixlaunch/botw/surfaces/world_surface.hpp>
 #include <wiixlaunch/botw/surfaces/input_surface.hpp>
@@ -66,56 +69,26 @@ constexpr uint16_t kPlayerVersionMajor = 1;
 constexpr uint16_t kPlayerVersionMinor = 1;
 
 // Opaque to a mod. Never a pointer, never a struct.
-using ActorHandle = uint32_t;
+using ActorHandle = ActorHandles::Handle;
 
 namespace impl {
 
-// A small ring. Handles are meant to be taken and used within a frame; a mod
-// holding one across many frames is holding a reference to an actor that may
-// well be gone, which is what the generation check exists to catch.
-constexpr uint32_t kHandleSlots = 32;
-
-struct Slot {
-    void* ptr = nullptr;
-    uint8_t kind = 0;       // mirrors Actor::Kind
-    uint32_t generation = 1; // never 0, so a zeroed handle is never valid
-    bool used = false;
-};
-
-inline Slot g_Slots[kHandleSlots];
-inline uint32_t g_NextSlot = 0;
-
-inline ActorHandle Store(const Actor& a) {
-    if (!a.IsValid()) return 0;
-
-    const uint32_t slot = g_NextSlot % kHandleSlots;
-    g_NextSlot++;
-
-    Slot& s = g_Slots[slot];
-    // Reusing an occupied slot invalidates whatever handle pointed at it, which
-    // is the intended behaviour: the oldest handle is the one most likely to be
-    // stale anyway. Bumping first means the old handle can never resolve again.
-    s.generation++;
-    if (s.generation == 0) s.generation = 1;
-    s.ptr = a.GetRaw();
-    s.kind = static_cast<uint8_t>(a.GetKind());
-    s.used = true;
-
-    return (s.generation << 8) | (slot + 1);
-}
-
-// Returns false for 0, an out-of-range slot, an unused slot, or a generation
-// that has moved on.
-inline bool Load(ActorHandle h, Actor& out) {
-    if (h == 0) return false;
-    const uint32_t slot = (h & 0xFF);
-    if (slot == 0 || slot > kHandleSlots) return false;
-    const Slot& s = g_Slots[slot - 1];
-    if (!s.used || !s.ptr) return false;
-    if (s.generation != (h >> 8)) return false;
-    out = Actor(s.ptr, static_cast<Actor::Kind>(s.kind));
-    return true;
-}
+// THE TABLE MOVED OUT, and this is the interesting part of the change.
+//
+// It used to live here, 32 slots, private to botw.player - which was correct
+// while botw.player was the only surface that produced an actor handle. It
+// stopped being correct the moment botw.actor existed: GetPlayerActor() hands
+// back a handle and the obvious next thing to do with it is pass it to
+// botw.actor's WarpTo. Two tables would have made that handle mean a different
+// actor in the other surface, or nothing at all, and neither failure would have
+// looked like the mistake it was.
+//
+// So there is one table, in surfaces/actor_handles.hpp, and a handle means the
+// same thing to every surface that takes one. It also grew: 32 slots was enough
+// for "the sword, the shield, the bow" and is not enough for a query returning
+// every actor in an area.
+inline ActorHandle Store(const Actor& a) { return ActorHandles::Store(a); }
+inline bool Load(ActorHandle h, Actor& out) { return ActorHandles::Load(h, out); }
 
 // --- botw.player v1 entry points -------------------------------------------
 //
@@ -385,6 +358,12 @@ inline void Register() {
     // The rest of the module. Each registers itself and says so; a surface that
     // fails to register is reported by Surface::Register rather than leaving a
     // mod to discover the gap at resolve time.
+    ActorSurface::Register();
+    CameraSurface::Register();
+    DisplaySurface::Register();
+    EventsSurface::Register();
+    SoundSurface::Register();
+    MemorySurface::Register();
     GameDataSurface::Register();
     WorldSurface::Register();
     InputSurface::Register();
