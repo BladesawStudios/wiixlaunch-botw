@@ -38,6 +38,8 @@
 
 #include <wiixlaunch/platform.hpp>
 #include <wiixlaunch/loader/surface.hpp>
+#include <wiixlaunch/debug_log.hpp>
+#include <wiixlaunch/mod_context.hpp>
 #include <wiixlaunch/botw/game/player.hpp>
 #include <wiixlaunch/botw/game/actor.hpp>
 
@@ -47,7 +49,10 @@ namespace WiiXLaunch::BotW::Surfaces {
 
 constexpr const char* kPlayerSurface = "botw.player";
 constexpr uint16_t kPlayerVersionMajor = 1;
-constexpr uint16_t kPlayerVersionMinor = 0;
+// 1.1 appends Init, RegisterTick, ConsumeAttackEvent, SupportsAttackTracking,
+// GetPlayerActor, the life accessors and the raw-pointer escape hatches.
+// Appending bumps the MINOR, so every mod built against v1.0 still resolves.
+constexpr uint16_t kPlayerVersionMinor = 1;
 
 // Opaque to a mod. Never a pointer, never a struct.
 using ActorHandle = uint32_t;
@@ -160,6 +165,166 @@ extern "C" inline uint32_t PlayerSupportsPosition() {
     return Player::SupportsPosition ? 1u : 0u;
 }
 
+// --- appended in v1.1 ------------------------------------------------------
+
+// Installs Player's per-frame tick hook, which every cached accessor here needs
+// - position, the attack counter, and the player pointer itself.
+//
+// Idempotent in the module, and it has to be: several mods may each call this
+// because each needs the cached state, and none can see that another already
+// did. Returns 1 if THIS call installed it, 0 if it was already up. Both are
+// success; the distinction is there so a boot log can show which module paid
+// for it rather than leaving "already installed" indistinguishable from
+// "failed".
+extern "C" inline uint32_t PlayerInit() {
+    return Player::Init() ? 1u : 0u;
+}
+
+// A per-frame callback fired right after Player's own cached state has been
+// refreshed for this frame.
+//
+// NOT Player::OnTick. That is a single slot documented as "call again to
+// replace it", which is workable for a source mod that can see the whole tree
+// and chain by hand, and unworkable for compiled binaries: two .wxlm mods
+// cannot see each other, so the second would silently evict the first and the
+// mod that stops working is the one that did nothing wrong. This registers into
+// a slot of its own, attributed to the calling module.
+//
+// Distinct from wiixl.core's RegisterTick, which fires at the GX2 swap after
+// the frame is drawn. This one is the only place a mod can read THIS frame's
+// position or consume THIS frame's attack event. A mod that needs one does not
+// want the other.
+//
+// Returns 1 on success, 0 if refused - the log names which refusal.
+extern "C" inline uint32_t PlayerRegisterTick(void (*fn)()) {
+    return Player::AddTick(fn) == Player::TickRegister::Ok ? 1u : 0u;
+}
+
+// 1 if the player swung since the last call, and CLEARS the flag.
+//
+// Consuming is the point: two mods both polling would otherwise each see the
+// same swing, or race for it. One consumer per swing, first tick to ask.
+extern "C" inline uint32_t PlayerConsumeAttackEvent() {
+    return Player::ConsumeAttackEvent() ? 1u : 0u;
+}
+
+extern "C" inline uint32_t PlayerSupportsAttackTracking() {
+    return Player::SupportsAttackTracking ? 1u : 0u;
+}
+
+// A handle to Link himself, so the life accessors below need no player-specific
+// duplicates - and so the escape hatch has exactly one shape.
+//
+// Needs PlayerInit to have run and at least one frame to have passed; returns 0
+// until then, which is the same answer a despawned actor gives.
+extern "C" inline ActorHandle GetPlayerActor() {
+    void* raw = Player::GetRaw();
+    if (!raw) return 0;
+    return Store(Actor(raw));
+}
+
+// --- life ------------------------------------------------------------------
+//
+// REAL SYMBOLS, not offsets a mod reads for itself. The vtable slots these go
+// through (+0x2bc for the life pointer, +0xf4 for max) live in actor.hpp, in
+// the versioned game module - so correcting one fixes every compiled mod that
+// ever shipped, without rebuilding any of them. A mod that had read the offset
+// itself would keep reading the wrong place forever.
+//
+// Quarter-hearts: 4 per heart, so 3 hearts is 12.
+
+extern "C" inline uint32_t ActorSupportsLife() {
+    return Actor::SupportsLife ? 1u : 0u;
+}
+
+// Current life, or 0 for a stale handle, an unsupported platform, or a pointer
+// that failed validation. 0 is also a legitimate value (a dead actor), so a mod
+// that needs to tell those apart checks ActorIsValid first.
+extern "C" inline int32_t ActorGetLife(ActorHandle h) {
+    Actor a;
+    if (!Load(h, a)) return 0;
+    return a.GetCurrentLife();
+}
+
+extern "C" inline int32_t ActorGetMaxLife(ActorHandle h) {
+    Actor a;
+    if (!Load(h, a)) return 0;
+    return a.GetMaxLife();
+}
+
+// Returns 1 if the write happened, 0 if the handle was stale or the platform
+// does not support it. NOT void: "I set it and nothing changed" and "I never
+// set it" are different problems, and a void return makes them identical.
+extern "C" inline uint32_t ActorSetLife(ActorHandle h, int32_t life) {
+    Actor a;
+    if (!Load(h, a)) return 0;
+    if constexpr (!Actor::SupportsLife) return 0;
+    a.SetCurrentLife(static_cast<int>(life));
+    return 1;
+}
+
+// --- the escape hatch ------------------------------------------------------
+//
+// THIS IS OPTING OUT OF VERSIONING, and the name says so at every call site.
+//
+// Everything else in this surface is a promise: the signature is frozen for the
+// life of v1, and when an offset turns out to be wrong it is fixed HERE and
+// every compiled mod that ever shipped gets the fix. A raw pointer is the
+// opposite. A mod that takes one and reads +0x4d8 out of it has hard-coded a
+// layout into a binary nobody can rebuild, and the day that offset is wrong -
+// a different game version, a different region, a corrected piece of RE - it
+// reads someone else's memory and there is nothing anyone can do about it from
+// this side.
+//
+// It stays available because there is real work that needs it and being unable
+// to do that work is worse. But it is a VISIBLE choice: the name is Unsafe, and
+// the host logs the module that used it, once, so a boot log shows who opted
+// out rather than leaving it discoverable only by reading a mod's source - which
+// for a compiled binary means not at all.
+//
+// If you need this, say so and it probably belongs in the surface as a real
+// symbol instead.
+namespace escape {
+
+constexpr uint32_t kMaxNoted = 8;
+inline char g_Noted[kMaxNoted][17];
+inline uint32_t g_NotedCount = 0;
+
+inline void NoteOnce() {
+    const char* owner = WiiXLaunch::ModContext::Current();
+    if (!owner || owner[0] == '\0') owner = "<host>";
+
+    for (uint32_t i = 0; i < g_NotedCount; ++i) {
+        bool same = true;
+        for (uint32_t c = 0; c < 17; ++c) {
+            if (g_Noted[i][c] != owner[c]) { same = false; break; }
+            if (owner[c] == '\0') break;
+        }
+        if (same) return;
+    }
+
+    if (g_NotedCount < kMaxNoted) {
+        uint32_t i = 0;
+        for (; i + 1 < 17 && owner[i]; ++i) g_Noted[g_NotedCount][i] = owner[i];
+        g_Noted[g_NotedCount][i] = '\0';
+        ++g_NotedCount;
+    }
+
+    WIIXL_LOG("botw.player: %s took a RAW POINTER - it has opted out of this "
+              "surface's versioning and will not get offset fixes", owner);
+}
+
+inline uint32_t Count() { return g_NotedCount; }
+
+} // namespace escape
+
+extern "C" inline uintptr_t ActorUnsafeRawPointer(ActorHandle h) {
+    Actor a;
+    if (!Load(h, a)) return 0;
+    escape::NoteOnce();
+    return reinterpret_cast<uintptr_t>(a.GetRaw());
+}
+
 // APPEND ONLY. Adding an entry bumps kPlayerVersionMinor; changing or removing
 // one bumps kPlayerVersionMajor.
 inline const Surface::Symbol kPlayerSymbols[] = {
@@ -170,6 +335,20 @@ inline const Surface::Symbol kPlayerSymbols[] = {
     WIIXL_SURFACE_SYMBOL("ActorGetName",       &ActorGetName),
     WIIXL_SURFACE_SYMBOL("GetPosition",        &PlayerGetPosition),
     WIIXL_SURFACE_SYMBOL("SupportsPosition",   &PlayerSupportsPosition),
+    // v1.1. APPENDED, never inserted: a mod built against v1.0 hashes the same
+    // seven names and finds them at the same version, so it keeps working.
+    WIIXL_SURFACE_SYMBOL("Init",                    &PlayerInit),
+    WIIXL_SURFACE_SYMBOL("RegisterTick",            &PlayerRegisterTick),
+    WIIXL_SURFACE_SYMBOL("ConsumeAttackEvent",      &PlayerConsumeAttackEvent),
+    WIIXL_SURFACE_SYMBOL("SupportsAttackTracking",  &PlayerSupportsAttackTracking),
+    WIIXL_SURFACE_SYMBOL("GetPlayerActor",          &GetPlayerActor),
+    WIIXL_SURFACE_SYMBOL("ActorGetLife",            &ActorGetLife),
+    WIIXL_SURFACE_SYMBOL("ActorGetMaxLife",         &ActorGetMaxLife),
+    WIIXL_SURFACE_SYMBOL("ActorSetLife",            &ActorSetLife),
+    WIIXL_SURFACE_SYMBOL("SupportsLife",            &ActorSupportsLife),
+    // The escape hatch. Named Unsafe at every call site on purpose, and the
+    // host logs whoever uses it - see the comment above ActorUnsafeRawPointer.
+    WIIXL_SURFACE_SYMBOL("ActorUnsafeRawPointer",   &ActorUnsafeRawPointer),
 };
 
 } // namespace impl

@@ -54,6 +54,7 @@
 #include <wiixlaunch/patches.hpp>
 #include <wiixlaunch/tick.hpp>
 #include <wiixlaunch/net.hpp>
+#include <wiixlaunch/botw/game/player.hpp>
 #include <wiixlaunch/loader/core_surface.hpp>
 
 #if WIIXL_CEMU
@@ -151,6 +152,13 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
     // that says "module X was in flight" AND "module X holds 8 sockets" is a
     // much narrower starting point than either line alone.
     WiiXLaunch::Net::LogState();
+
+    // The OTHER per-frame registry. botw.player's tick fires after Player's own
+    // state refresh, which is a different point in the frame from the host's
+    // GX2-swap tick - so both are reported, and neither is inferable from the
+    // other. A mod registered in one and expecting the other would otherwise
+    // look identical to a mod that is simply not running.
+    WiiXLaunch::BotW::Player::LogTickState();
 
     WiiXLaunch::Hooks::LogState();
 }

@@ -768,6 +768,16 @@ public:
     // Indexing vtable[byteOffset / 4] as a void** still lands on the right word
     // - that is the function pointer's own address - so the code below is
     // correct as written; only the stated indices were wrong.
+    // Capability flag, per the module convention - a mod asks rather than
+    // discovering by getting zeroes back. The vtable slots above are Wii U/Cemu
+    // confirmed; no Switch equivalent was ever RE'd, so the accessors return 0
+    // there instead of reading an unconfirmed offset.
+    //
+    // It matters more here than for most flags, because 0 life is a LEGITIMATE
+    // value. Without the flag, "this platform cannot read life" and "this actor
+    // is dead" are the same answer.
+    static constexpr bool SupportsLife = !WIIXL_SWITCH;
+
     int GetCurrentLife() const {
 #if !WIIXL_SWITCH
         if (!m_Ptr) return 0;
