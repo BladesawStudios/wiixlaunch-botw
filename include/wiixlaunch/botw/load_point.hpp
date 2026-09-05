@@ -52,6 +52,7 @@
 #include <wiixlaunch/hook_manager.hpp>
 #include <wiixlaunch/hook_probe.hpp>
 #include <wiixlaunch/patches.hpp>
+#include <wiixlaunch/tick.hpp>
 #include <wiixlaunch/loader/core_surface.hpp>
 
 #if WIIXL_CEMU
@@ -142,6 +143,9 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
     // Printed AFTER modules load, because a mod installing a hook is exactly
     // the case this summary exists for - the short list of shared addresses is
     // the first thing worth reading when two mods together misbehave.
+    // Registered ticks, and whether anything will ever drive them.
+    WiiXLaunch::Tick::LogState();
+
     WiiXLaunch::Hooks::LogState();
 }
 

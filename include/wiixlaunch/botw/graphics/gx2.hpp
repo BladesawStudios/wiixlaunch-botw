@@ -2,6 +2,7 @@
 
 #include <wiixlaunch/platform.hpp>
 #include <wiixlaunch/loader/arena.hpp>
+#include <wiixlaunch/tick.hpp>
 #include <wiixlaunch/hook.hpp>
 #include <wiixlaunch/debug_log.hpp>
 
@@ -858,6 +859,14 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(AglCopyToScanBufferHook) {
                             g_DrawCallbacks[i](nullptr, tvColorBuffer, static_cast<int>(width), static_cast<int>(height));
                         }
                     }
+
+                    // THE FRAME SOURCE base cannot have. Base does not know GX2
+                    // exists, so it owns the tick registry and this supplies the
+                    // frame - the same nomination pattern as the load point.
+                    //
+                    // After the host's own draw callbacks, so a mod's tick sees a
+                    // frame the host has already drawn into rather than racing it.
+                    WiiXLaunch::Tick::RunAll();
                 }
             }
         }
@@ -880,6 +889,13 @@ inline void Init() {
     BotW::OSLog("WiiXLaunch: GX2::Init() calling Install on 0x03a75d48\n");
     impl::AglCopyToScanBufferHook::Install(0, 0x03a75d48);
     BotW::OSLog("WiiXLaunch: GX2::Init() hook installed successfully\n");
+
+    // Tell base where a frame happens. It cannot know - a frame is a graphics
+    // idea and base does not know graphics exists - so a game module nominates
+    // one, exactly as it nominates the load point. A host with no game module
+    // nominates nothing, and Tick::LogState says so rather than leaving a mod
+    // that registered a callback to fail silently.
+    WiiXLaunch::Tick::NominateSource("botw GX2 swap, after the host draw callbacks");
 #if WIIXL_CEMU
     // The heap this payload has to live in, stated once. It is the tail of our
     // code cave up to the end of Cemu's code-cave area, and it is small - a
