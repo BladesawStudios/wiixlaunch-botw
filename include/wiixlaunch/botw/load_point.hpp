@@ -51,6 +51,7 @@
 #include <wiixlaunch/loader/loader.hpp>
 #include <wiixlaunch/hook_manager.hpp>
 #include <wiixlaunch/hook_probe.hpp>
+#include <wiixlaunch/patches.hpp>
 #include <wiixlaunch/loader/core_surface.hpp>
 
 #if WIIXL_CEMU
@@ -96,6 +97,13 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
                   "if the directory is simply empty that is the default state of a "
                   "fresh host, and the lines above say which it was.");
     }
+
+    // Declared patches were applied during the loads above, before any entry
+    // ran. The host goes back and READS each target rather than believing the
+    // applier - a refusal is self-evidencing because nothing changed, but a
+    // success is not.
+    WiiXLaunch::Patches::VerifyApplied();
+    WiiXLaunch::Patches::LogState();
 
     // Run the hook probe and let the HOST check the sequence.
     //
