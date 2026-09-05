@@ -59,6 +59,7 @@ constexpr bool kIsGX2 = true;
 
 constexpr uint32_t kMaxDrawCallbacks = 8;
 constexpr uint32_t kMaxTextures = 64;
+constexpr uint32_t kMaxMeshes = 32;
 constexpr uint32_t kOwnerLen = 17;
 
 namespace impl {
@@ -140,6 +141,19 @@ struct TexSlot {
 };
 
 inline TexSlot g_Textures[kMaxTextures];
+
+// Meshes, held the same way textures are. MeshData is a pointer and a count
+// into host memory; handing a mod either half would be handing it something the
+// host later dereferences on its say-so.
+struct MeshSlot {
+#if !WIIXL_SWITCH
+    Backend::MeshData data{};
+#endif
+    uint16_t generation = 1;
+    bool used = false;
+};
+
+inline MeshSlot g_Meshes[kMaxMeshes];
 
 inline uint32_t StoreTexture(Backend::TextureHandle native) {
     if (!native) return 0;
@@ -377,6 +391,76 @@ extern "C" inline uintptr_t GfxAllocMEM1(uint32_t size, uint32_t align) {
 #endif
 }
 
+// --- meshes ----------------------------------------------------------------
+
+// Loads a mesh off the title's filesystem. MeshData is {pointer, count} and
+// cannot cross, so the vertices stay in host memory and the mod gets a handle
+// plus the count - it draws with DrawMeshHandle rather than shipping the
+// vertices back across for every frame.
+extern "C" inline uint32_t GfxLoadMesh(const char* path, uint32_t maxFileSize,
+                                       uint32_t* outVertexCount) {
+#if WIIXL_SWITCH
+    (void)path; (void)maxFileSize;
+    if (outVertexCount) *outVertexCount = 0;
+    return 0;
+#else
+    if (!path) return 0;
+    const Backend::MeshData m = Backend::LoadMesh(path, maxFileSize ? maxFileSize : (64u * 1024u));
+    if (!m.vertices || m.vertexCount == 0) return 0;
+
+    for (uint32_t i = 0; i < kMaxMeshes; ++i) {
+        if (g_Meshes[i].used) continue;
+        MeshSlot& slot = g_Meshes[i];
+        slot.data = m;
+        slot.used = true;
+        slot.generation++;
+        if (slot.generation == 0) slot.generation = 1;
+        if (outVertexCount) *outVertexCount = static_cast<uint32_t>(m.vertexCount);
+        return (static_cast<uint32_t>(slot.generation) << 16) | (i + 1u);
+    }
+    WIIXL_LOG("botw.gfx: all %u mesh slots are held", kMaxMeshes);
+    return 0;
+#endif
+}
+
+extern "C" inline uint32_t GfxDrawMeshHandle(uintptr_t cmdBuf, uintptr_t dstTexture,
+                                             uint32_t mesh) {
+#if WIIXL_SWITCH
+    (void)cmdBuf; (void)dstTexture; (void)mesh;
+    return 0;
+#else
+    if (!cmdBuf || !dstTexture) return 0;
+    const uint32_t slot = mesh & 0xFFFFu;
+    if (slot == 0 || slot > kMaxMeshes) return 0;
+    MeshSlot& m = g_Meshes[slot - 1];
+    if (!m.used || m.generation != static_cast<uint16_t>(mesh >> 16)) return 0;
+
+    Backend::DrawMesh(reinterpret_cast<Backend::CommandBuffer*>(cmdBuf),
+                      reinterpret_cast<void*>(dstTexture),
+                      m.data.vertices, m.data.vertexCount);
+    return 1;
+#endif
+}
+
+// --- the backdrop blur -----------------------------------------------------
+//
+// Renders the frame so far into a blurred texture a mod can draw over. It costs
+// two render targets and several full-target draws EVERY FRAME IT IS USED, so
+// it is asked for rather than always on, and the handle it returns is the same
+// kind of texture handle everything else here uses.
+extern "C" inline uint32_t GfxBlurBackdrop(uintptr_t dstColorBuffer,
+                                           uint32_t downscale, uint32_t passes) {
+#if WIIXL_SWITCH
+    (void)dstColorBuffer; (void)downscale; (void)passes;
+    return 0;
+#else
+    if (!dstColorBuffer) return 0;
+    return StoreTexture(Backend::BlurBackdrop(reinterpret_cast<void*>(dstColorBuffer),
+                                              downscale ? downscale : 4,
+                                              passes ? passes : 2));
+#endif
+}
+
 // --- the table -------------------------------------------------------------
 inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("IsGX2",              &GfxIsGX2),
@@ -394,6 +478,9 @@ inline const Surface::Symbol kSymbols[] = {
 
     WIIXL_SURFACE_SYMBOL("DrawSprite",         &GfxDrawSprite),
     WIIXL_SURFACE_SYMBOL("DrawMesh",           &GfxDrawMesh),
+    WIIXL_SURFACE_SYMBOL("LoadMesh",           &GfxLoadMesh),
+    WIIXL_SURFACE_SYMBOL("DrawMeshHandle",     &GfxDrawMeshHandle),
+    WIIXL_SURFACE_SYMBOL("BlurBackdrop",       &GfxBlurBackdrop),
 
     WIIXL_SURFACE_SYMBOL("BeginBatch",         &GfxBeginBatch),
     WIIXL_SURFACE_SYMBOL("BatchQuad",          &GfxBatchQuad),
