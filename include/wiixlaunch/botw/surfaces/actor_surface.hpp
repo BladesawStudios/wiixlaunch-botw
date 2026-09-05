@@ -331,6 +331,47 @@ extern "C" inline uint32_t AcSetMaxLife(uint32_t handle, int32_t maxLife) {
 
 extern "C" inline uint32_t AcSupportsLife() { return Actor::SupportsLife ? 1u : 0u; }
 
+// Hearts rather than quarter-hearts. Both are offered because both are the
+// natural unit somewhere: the game stores quarters, and a UI shows hearts. A
+// mod converting between them itself is a mod that will one day round the wrong
+// way on a half-heart.
+extern "C" inline uint32_t AcGetHearts(uint32_t handle, float* out) {
+    Actor a;
+    if (!out || !H::Load(handle, a)) return 0;
+    *out = a.GetCurrentHearts();
+    return 1;
+}
+
+extern "C" inline uint32_t AcSetHearts(uint32_t handle, float hearts) {
+    Actor a;
+    if (!H::Load(handle, a)) return 0;
+    a.SetCurrentHearts(hearts);
+    return 1;
+}
+
+extern "C" inline uint32_t AcGetMaxHearts(uint32_t handle, float* out) {
+    Actor a;
+    if (!out || !H::Load(handle, a)) return 0;
+    *out = a.GetMaxHearts();
+    return 1;
+}
+
+extern "C" inline uint32_t AcSetMaxHearts(uint32_t handle, float hearts) {
+    Actor a;
+    return H::Load(handle, a) && a.SetMaxHearts(hearts) ? 1u : 0u;
+}
+
+// The matrix write that goes through the game's own setMtx, which is a
+// different act from SetMatrix: it tells the engine the actor moved rather than
+// editing the numbers behind its back. setActorMtx picks which of the two the
+// game is told about.
+extern "C" inline uint32_t AcSetMtx(uint32_t handle, const float* mtx12,
+                                    uint32_t setActorMtx) {
+    Actor a;
+    if (!mtx12 || !H::Load(handle, a)) return 0;
+    return a.SetMtx(mtx12, setActorMtx != 0) ? 1u : 0u;
+}
+
 // --- creating and destroying ----------------------------------------------
 
 // Spawned relative to an anchor actor, which is how the game's own spawn works:
@@ -404,6 +445,12 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("GetMaxLife",          &AcGetMaxLife),
     WIIXL_SURFACE_SYMBOL("SetLife",             &AcSetLife),
     WIIXL_SURFACE_SYMBOL("SetMaxLife",          &AcSetMaxLife),
+
+    WIIXL_SURFACE_SYMBOL("GetHearts",           &AcGetHearts),
+    WIIXL_SURFACE_SYMBOL("SetHearts",           &AcSetHearts),
+    WIIXL_SURFACE_SYMBOL("GetMaxHearts",        &AcGetMaxHearts),
+    WIIXL_SURFACE_SYMBOL("SetMaxHearts",        &AcSetMaxHearts),
+    WIIXL_SURFACE_SYMBOL("SetMtx",              &AcSetMtx),
 
     WIIXL_SURFACE_SYMBOL("Spawn",               &AcSpawn),
     WIIXL_SURFACE_SYMBOL("SpawnScaled",         &AcSpawnScaled),

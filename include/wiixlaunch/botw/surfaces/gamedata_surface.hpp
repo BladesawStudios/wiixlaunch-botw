@@ -134,6 +134,69 @@ extern "C" inline uint32_t GdStaminaPerWheel(float* out) {
     return 1;
 }
 
+// Hearts and wheels, the units a UI actually shows. The raw forms above stay
+// because the game stores those; offering only one of each pair would mean
+// every mod doing the conversion, and every mod getting the rounding subtly
+// different.
+extern "C" inline uint32_t GdGetMaxHearts(float* out) {
+    if (!out) return 0;
+    *out = GameData::GetMaxHearts();
+    return 1;
+}
+
+extern "C" inline uint32_t GdSetMaxHearts(float hearts) {
+    return GameData::SetMaxHearts(hearts) ? 1u : 0u;
+}
+
+extern "C" inline uint32_t GdGetStaminaWheels(float* out) {
+    if (!out) return 0;
+    *out = GameData::GetStaminaWheels();
+    return 1;
+}
+
+extern "C" inline uint32_t GdSetStaminaWheels(float wheels) {
+    return GameData::SetStaminaWheels(wheels) ? 1u : 0u;
+}
+
+extern "C" inline uint32_t GdGetMaxStaminaWheels(float* out) {
+    if (!out) return 0;
+    *out = GameData::GetMaxStaminaWheels();
+    return 1;
+}
+
+extern "C" inline uint32_t GdSetMaxStaminaWheels(float wheels) {
+    return GameData::SetMaxStaminaWheels(wheels) ? 1u : 0u;
+}
+
+// The actor's own maximum, which is not always the save's - a temporary buff
+// moves one and not the other, and a mod showing a stamina bar needs the one
+// the game is actually clamping against.
+extern "C" inline uint32_t GdGetActorMaxStamina(float* out) {
+    if (!out) return 0;
+    *out = GameData::GetActorMaxStamina();
+    return 1;
+}
+
+// Queues a delta for the next frame instead of applying it now. The game
+// recomputes some counters after a write, so an immediate add can be undone
+// within the same frame; this is the form that survives that.
+extern "C" inline uint32_t GdQueueFlagS32Delta(const char* name, int32_t delta) {
+    return name && GameData::QueueFlagS32Delta(name, static_cast<int>(delta)) ? 1u : 0u;
+}
+
+// How many entries a flag store holds, by store index rather than by type - for
+// a mod walking every store without knowing how many kinds there are.
+extern "C" inline uint32_t GdGetFlagStoreCount(int32_t storeIndex, uint32_t* offset,
+                                               int32_t* count) {
+    if (!offset || !count) return 0;
+    uint32_t off = 0;
+    int n = 0;
+    if (!GameData::GetFlagStoreCount(static_cast<int>(storeIndex), off, n)) return 0;
+    *offset = off;
+    *count = static_cast<int32_t>(n);
+    return 1;
+}
+
 // --- flags, by name --------------------------------------------------------
 //
 // Four types, each with its own pair, rather than one call taking a type tag.
@@ -303,6 +366,40 @@ extern "C" inline uint32_t GdIsDisplayOverridden() {
     return Completion::IsDisplayOverridden() ? 1u : 0u;
 }
 
+// The completion breakdown, field by field rather than as the module's
+// Breakdown struct. Twelve small calls would be worse; one call filling an
+// int32[8] in a fixed order is the same shape TimeSurface uses for the calendar:
+// collected, total, base, baseTotal, divineBeasts, divineBeastTotal, koroks,
+// korokTotal.
+extern "C" inline uint32_t GdGetCompletionBreakdown(int32_t* out8, float* outPercent) {
+    if (!out8) return 0;
+    Completion::Breakdown b{};
+    if (!Completion::GetCompletion(b)) return 0;
+    out8[0] = b.collected;        out8[1] = b.total;
+    out8[2] = b.base;             out8[3] = b.baseTotal;
+    out8[4] = b.divineBeasts;     out8[5] = b.divineBeastTotal;
+    out8[6] = b.koroks;           out8[7] = b.korokTotal;
+    if (outPercent) *outPercent = b.percent;
+    return 1;
+}
+
+extern "C" inline uint32_t GdGetCompletionPercent(float* out) {
+    if (!out) return 0;
+    return Completion::GetCompletionPercent(*out) ? 1u : 0u;
+}
+
+// The lowest and highest the percentage can currently reach - what is actually
+// attainable rather than what the counter says, which differs once DLC content
+// is or is not installed.
+extern "C" inline uint32_t GdGetReachableRange(float* lowest, float* highest) {
+    if (!lowest || !highest) return 0;
+    return Completion::GetReachableRange(*lowest, *highest) ? 1u : 0u;
+}
+
+extern "C" inline uint32_t GdSetDisplayedPercent(float percent, uint32_t forceVisible) {
+    return Completion::SetDisplayedPercent(percent, forceVisible != 0) ? 1u : 0u;
+}
+
 // --- the table -------------------------------------------------------------
 //
 // APPEND ONLY. Adding an entry bumps the minor; changing or removing one bumps
@@ -328,6 +425,16 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("RecoverStamina",     &GdRecoverStamina),
     WIIXL_SURFACE_SYMBOL("StaminaPerWheel",    &GdStaminaPerWheel),
 
+    WIIXL_SURFACE_SYMBOL("GetMaxHearts",       &GdGetMaxHearts),
+    WIIXL_SURFACE_SYMBOL("SetMaxHearts",       &GdSetMaxHearts),
+    WIIXL_SURFACE_SYMBOL("GetStaminaWheels",   &GdGetStaminaWheels),
+    WIIXL_SURFACE_SYMBOL("SetStaminaWheels",   &GdSetStaminaWheels),
+    WIIXL_SURFACE_SYMBOL("GetMaxStaminaWheels", &GdGetMaxStaminaWheels),
+    WIIXL_SURFACE_SYMBOL("SetMaxStaminaWheels", &GdSetMaxStaminaWheels),
+    WIIXL_SURFACE_SYMBOL("GetActorMaxStamina", &GdGetActorMaxStamina),
+    WIIXL_SURFACE_SYMBOL("QueueFlagS32Delta",  &GdQueueFlagS32Delta),
+    WIIXL_SURFACE_SYMBOL("GetFlagStoreCount",  &GdGetFlagStoreCount),
+
     WIIXL_SURFACE_SYMBOL("GetFlagS32",         &GdGetFlagS32),
     WIIXL_SURFACE_SYMBOL("SetFlagS32",         &GdSetFlagS32),
     WIIXL_SURFACE_SYMBOL("AddFlagS32",         &GdAddFlagS32),
@@ -348,6 +455,10 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("GetFlagF32ByIndex",  &GdGetFlagF32ByIndex),
     WIIXL_SURFACE_SYMBOL("GetFlagVec3ByIndex", &GdGetFlagVec3ByIndex),
 
+    WIIXL_SURFACE_SYMBOL("GetCompletionBreakdown", &GdGetCompletionBreakdown),
+    WIIXL_SURFACE_SYMBOL("GetCompletionPercent",   &GdGetCompletionPercent),
+    WIIXL_SURFACE_SYMBOL("GetReachableRange",      &GdGetReachableRange),
+    WIIXL_SURFACE_SYMBOL("SetDisplayedPercent",    &GdSetDisplayedPercent),
     WIIXL_SURFACE_SYMBOL("GetCompletionParts", &GdGetCompletionParts),
     WIIXL_SURFACE_SYMBOL("GetKorokCount",      &GdGetKorokCount),
     WIIXL_SURFACE_SYMBOL("GetKorokTotal",      &GdGetKorokTotal),

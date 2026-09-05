@@ -204,6 +204,93 @@ extern "C" inline int32_t PGetTypeForName(const char* name) {
     return name ? static_cast<int32_t>(Pouch::GetTypeForName(name)) : -1;
 }
 
+// --- writing an item's own data -------------------------------------------
+//
+// The module's writers take a POINTER to the item, which they get from
+// FindItem. A mod cannot hold that pointer safely - it is a pointer into the
+// pouch that the next inventory change may invalidate - so everything here is
+// addressed the way reads already are: by (slot, index), resolved on the spot.
+// One walk per call, the same cost the reads pay, and no way to hold a stale
+// item across a frame.
+
+extern "C" inline uint32_t PSetCookData(int32_t slot, int32_t index,
+                                        int32_t health, int32_t duration,
+                                        int32_t sellPrice,
+                                        float effectId, float effectLevel) {
+    Pouch::Entry e{};
+    if (!EntryAt(static_cast<Pouch::Slot>(slot), static_cast<int>(index), e)) return 0;
+    if (!e.isFood) return 0;   // these words are the modifier on a weapon
+
+    Pouch::CookData d;
+    d.setHealth = true;     d.health = health;
+    d.setDuration = true;   d.duration = duration;
+    d.setSellPrice = true;  d.sellPrice = sellPrice;
+    d.setEffectId = true;   d.effectId = effectId;
+    d.setEffectLevel = true; d.effectLevel = effectLevel;
+    return Pouch::SetCookData(e.node, d) ? 1u : 0u;
+}
+
+extern "C" inline uint32_t PSetItemModifier(int32_t slot, int32_t index,
+                                            uint32_t flags, int32_t value) {
+    Pouch::Entry e{};
+    if (!EntryAt(static_cast<Pouch::Slot>(slot), static_cast<int>(index), e)) return 0;
+    if (e.isFood) return 0;    // these words are cook data on food
+    return Pouch::SetModifierAt(e.node, flags, value) ? 1u : 0u;
+}
+
+// The by-name form the module offers, kept because it is what a mod usually
+// wants: "put a modifier on my Royal Broadsword" without first finding which
+// index it is.
+extern "C" inline uint32_t PSetModifierByName(const char* name, uint32_t flags,
+                                              int32_t value) {
+    return name && Pouch::SetModifier(name, flags, value) ? 1u : 0u;
+}
+
+// Does an item of this name exist, and at which index within its slot? -1 when
+// it is not there. The index is what every other call here takes.
+extern "C" inline int32_t PFindItemIndex(int32_t slot, const char* name) {
+    if (!name) return -1;
+    int found = -1;
+    int seen = 0;
+    Pouch::ForEachOfType(static_cast<Pouch::Slot>(slot), [&](const Pouch::Entry& e) {
+        if (e.name) {
+            const char* a = e.name;
+            const char* b = name;
+            while (*a && *a == *b) { ++a; ++b; }
+            if (*a == *b) { found = seen; return false; }
+        }
+        ++seen;
+        return true;
+    });
+    return static_cast<int32_t>(found);
+}
+
+extern "C" inline uint32_t PItemStacks(int32_t slot, int32_t index, uint32_t* out) {
+    if (!out) return 0;
+    Pouch::Entry e{};
+    if (!EntryAt(static_cast<Pouch::Slot>(slot), static_cast<int>(index), e)) return 0;
+    *out = Pouch::ItemStacks(e.node) ? 1u : 0u;
+    return 1;
+}
+
+// One of a cooked meal's ingredient names, by slot 0..4. Empty when that
+// ingredient slot is unused, which is ordinary rather than an error.
+extern "C" inline uint32_t PCookIngredient(int32_t slot, int32_t index,
+                                           int32_t ingredientSlot,
+                                           char* out, uint32_t cap) {
+    Pouch::Entry e{};
+    if (!EntryAt(static_cast<Pouch::Slot>(slot), static_cast<int>(index), e)) {
+        if (out && cap) out[0] = '\0';
+        return 0;
+    }
+    if (!e.isFood) { if (out && cap) out[0] = '\0'; return 0; }
+    return CopyOut(Pouch::CookIngredient(e.node, static_cast<int>(ingredientSlot)), out, cap);
+}
+
+extern "C" inline uint32_t PIsEquippableSlot(int32_t slot) {
+    return Pouch::IsEquippableSlot(static_cast<Pouch::Slot>(slot)) ? 1u : 0u;
+}
+
 // --- names for the numbers -------------------------------------------------
 
 extern "C" inline uint32_t PCookEffectName(int32_t id, char* out, uint32_t cap) {
@@ -242,6 +329,14 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("RemoveItem",         &PRemoveItem),
     WIIXL_SURFACE_SYMBOL("EquipItem",          &PEquipItem),
     WIIXL_SURFACE_SYMBOL("GetTypeForName",     &PGetTypeForName),
+
+    WIIXL_SURFACE_SYMBOL("SetCookData",        &PSetCookData),
+    WIIXL_SURFACE_SYMBOL("SetItemModifier",    &PSetItemModifier),
+    WIIXL_SURFACE_SYMBOL("SetModifierByName",  &PSetModifierByName),
+    WIIXL_SURFACE_SYMBOL("FindItemIndex",      &PFindItemIndex),
+    WIIXL_SURFACE_SYMBOL("ItemStacks",         &PItemStacks),
+    WIIXL_SURFACE_SYMBOL("CookIngredient",     &PCookIngredient),
+    WIIXL_SURFACE_SYMBOL("IsEquippableSlot",   &PIsEquippableSlot),
 
     WIIXL_SURFACE_SYMBOL("CookEffectName",     &PCookEffectName),
     WIIXL_SURFACE_SYMBOL("CookEffectFromName", &PCookEffectFromName),

@@ -127,14 +127,57 @@ extern "C" inline int32_t MCountUnlockedShrines() {
     return static_cast<int32_t>(Map::CountUnlockedShrines());
 }
 
+extern "C" inline uint32_t MGetShrineUnlock(int32_t shrine, uint32_t* out) {
+    if (!out) return 0;
+    bool v = false;
+    if (!Map::GetMapUnlock(static_cast<int>(shrine), v)) return 0;
+    *out = v ? 1u : 0u;
+    return 1;
+}
+
 // --- beast markers ---------------------------------------------------------
 //
 // Enumerated by index rather than handed over as a table: the struct behind
 // each one must not cross, and a count-plus-accessor pair is the same shape
 // every other enumeration in these surfaces uses.
 
+extern "C" inline uint32_t MInitBeastMarkers() {
+    Map::InitBeastMarkers();
+    return 1;
+}
+
 extern "C" inline int32_t MRefreshBeastMarkers() {
     return static_cast<int32_t>(Map::RefreshBeastMarkers());
+}
+
+// One marker's contents. TrackedBeastMarker is a struct and must not cross, so
+// the name is copied into the caller's buffer and the two flags come back as
+// out-parameters - the same shape every other read here uses.
+extern "C" inline uint32_t MGetBeastMarker(int32_t index, char* nameOut, uint32_t cap,
+                                           uint32_t* entered, uint32_t* cleared,
+                                           uint32_t* flags) {
+    Map::TrackedBeastMarker m{};
+    if (!Map::GetTrackedBeastMarker(static_cast<int>(index), m)) {
+        if (nameOut && cap) nameOut[0] = 0;
+        return 0;
+    }
+    if (nameOut && cap) {
+        uint32_t n = 0;
+        while (m.name && m.name[n] && n + 1 < cap) { nameOut[n] = m.name[n]; ++n; }
+        nameOut[n] = 0;
+    }
+    if (entered) *entered = m.entered ? 1u : 0u;
+    if (cleared) *cleared = m.cleared ? 1u : 0u;
+    if (flags) *flags = m.flags;
+    return 1;
+}
+
+// Drops what the tracker has learned, so the next refresh starts clean. For a
+// mod that has moved or removed beasts and does not want the stale positions
+// blended in.
+extern "C" inline uint32_t MForgetBeastMarkers() {
+    Map::ForgetBeastMarkers();
+    return 1;
 }
 
 extern "C" inline int32_t MBeastMarkerCount() {
@@ -165,7 +208,11 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("SetShrineUnlockAll",      &MSetShrineUnlockAll),
     WIIXL_SURFACE_SYMBOL("CountUnlockedShrines",    &MCountUnlockedShrines),
 
+    WIIXL_SURFACE_SYMBOL("GetShrineUnlock",         &MGetShrineUnlock),
+    WIIXL_SURFACE_SYMBOL("InitBeastMarkers",        &MInitBeastMarkers),
     WIIXL_SURFACE_SYMBOL("RefreshBeastMarkers",     &MRefreshBeastMarkers),
+    WIIXL_SURFACE_SYMBOL("GetBeastMarker",          &MGetBeastMarker),
+    WIIXL_SURFACE_SYMBOL("ForgetBeastMarkers",      &MForgetBeastMarkers),
     WIIXL_SURFACE_SYMBOL("BeastMarkerCount",        &MBeastMarkerCount),
 };
 

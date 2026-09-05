@@ -105,6 +105,18 @@ extern "C" inline uint32_t WHoldWeather(int32_t type, uint32_t lockOut) {
 extern "C" inline void WReleaseWeather() { Weather::ReleaseWeather(); }
 extern "C" inline int32_t WGetWeatherHold() { return static_cast<int32_t>(Weather::GetWeatherHold()); }
 
+// How many frames the hold has left. A hold that is about to lapse and one that
+// will run forever are different states, and a mod refreshing a hold needs to
+// know which it is looking at rather than re-applying every frame.
+extern "C" inline int32_t WGetWeatherHoldFrames() {
+    return static_cast<int32_t>(Weather::GetWeatherHoldFrames());
+}
+
+// Drives the hold. Called from a tick by whichever mod set it; without this the
+// hold is set and never re-applied, which looks exactly like the weather
+// override silently failing.
+extern "C" inline void WTickWeatherHold() { Weather::TickWeatherHold(); }
+
 extern "C" inline int32_t WGetWeatherClimate() { return static_cast<int32_t>(Weather::GetClimate()); }
 extern "C" inline uint32_t WClimateName(int32_t climate, char* out, uint32_t cap) {
     return CopyOut(Weather::ClimateName(static_cast<int>(climate)), out, cap);
@@ -215,6 +227,31 @@ extern "C" inline uint32_t WIsTemperatureOverridden() {
     return Climate::IsTemperatureOverridden() ? 1u : 0u;
 }
 
+// The two curves the game blends between over the day, and where in that blend
+// it currently is. A mod predicting how cold somewhere will be at night needs
+// all three - the current temperature alone cannot answer it.
+extern "C" inline uint32_t WGetDayTemperature(float altitude, float* out) {
+    if (!out) return 0;
+    return Climate::GetDayTemperature(altitude, *out) ? 1u : 0u;
+}
+
+extern "C" inline uint32_t WGetNightTemperature(float altitude, float* out) {
+    if (!out) return 0;
+    return Climate::GetNightTemperature(altitude, *out) ? 1u : 0u;
+}
+
+extern "C" inline uint32_t WGetNightBlend(float* out) {
+    if (!out) return 0;
+    return Climate::GetNightBlend(*out) ? 1u : 0u;
+}
+
+// The game forcing a temperature is a different state from a mod overriding
+// one, and a mod that cannot tell them apart will fight the game over a value
+// it was never going to win.
+extern "C" inline uint32_t WIsTemperatureForcedByGame() {
+    return Climate::IsTemperatureForcedByGame() ? 1u : 0u;
+}
+
 // --- the table -------------------------------------------------------------
 inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("SupportsWeather",    &WSupportsWeather),
@@ -240,6 +277,8 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("HoldWeather",        &WHoldWeather),
     WIIXL_SURFACE_SYMBOL("ReleaseWeather",     &WReleaseWeather),
     WIIXL_SURFACE_SYMBOL("GetWeatherHold",     &WGetWeatherHold),
+    WIIXL_SURFACE_SYMBOL("GetWeatherHoldFrames", &WGetWeatherHoldFrames),
+    WIIXL_SURFACE_SYMBOL("TickWeatherHold",    &WTickWeatherHold),
     WIIXL_SURFACE_SYMBOL("GetWeatherClimate",  &WGetWeatherClimate),
     WIIXL_SURFACE_SYMBOL("ClimateName",        &WClimateName),
 
@@ -259,6 +298,10 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("GetTimeScale",       &WGetTimeScale),
     WIIXL_SURFACE_SYMBOL("SetTimeScale",       &WSetTimeScale),
 
+    WIIXL_SURFACE_SYMBOL("GetDayTemperature",  &WGetDayTemperature),
+    WIIXL_SURFACE_SYMBOL("GetNightTemperature", &WGetNightTemperature),
+    WIIXL_SURFACE_SYMBOL("GetNightBlend",      &WGetNightBlend),
+    WIIXL_SURFACE_SYMBOL("IsTemperatureForcedByGame", &WIsTemperatureForcedByGame),
     WIIXL_SURFACE_SYMBOL("GetTemperature",     &WGetTemperature),
     WIIXL_SURFACE_SYMBOL("GetTemperatureAt",   &WGetTemperatureAt),
     WIIXL_SURFACE_SYMBOL("SetTemperature",     &WSetTemperature),

@@ -525,6 +525,246 @@ extern "C" inline uint32_t GuiFontReady(int32_t fontId) {
     return g_Canvas && g_Canvas->FontReady(static_cast<GUI::FontId>(fontId)) ? 1u : 0u;
 }
 
+// --- widgets ---------------------------------------------------------------
+//
+// The interactive ones take a POINTER to the value they edit, where the module
+// takes a reference. Same contract - the widget reads it, draws it, and writes
+// it back when the user changes it - expressed as something that can cross.
+// Each returns 1 when the value changed this frame, which is the whole point:
+// a menu redraws every frame and only acts on the frames where something moved.
+
+extern "C" inline uint32_t GuiButton(float x, float y, float w, float h,
+                                     const char* label, uint32_t boxRgba) {
+    if (!g_Canvas || !label) return 0;
+    return g_Canvas->Button(MakeRect(x, y, w, h), label, FromRGBA(boxRgba)) ? 1u : 0u;
+}
+
+extern "C" inline uint32_t GuiPlateButton(float x, float y, float w, float h,
+                                          const char* label) {
+    if (!g_Canvas || !label) return 0;
+    return g_Canvas->PlateButton(MakeRect(x, y, w, h), label) ? 1u : 0u;
+}
+
+extern "C" inline uint32_t GuiToggle(float x, float y, float w, float h,
+                                     const char* label, uint32_t* value,
+                                     const char* onText, const char* offText) {
+    if (!g_Canvas || !label || !value) return 0;
+    bool v = (*value != 0);
+    const bool changed = g_Canvas->Toggle(MakeRect(x, y, w, h), label, v,
+                                          onText ? onText : "ON",
+                                          offText ? offText : "OFF");
+    *value = v ? 1u : 0u;
+    return changed ? 1u : 0u;
+}
+
+extern "C" inline uint32_t GuiSlider(float x, float y, float w, float h,
+                                     const char* label, float* value,
+                                     float minValue, float maxValue, float step) {
+    if (!g_Canvas || !label || !value) return 0;
+    return g_Canvas->Slider(MakeRect(x, y, w, h), label, *value,
+                            minValue, maxValue, step) ? 1u : 0u;
+}
+
+// options is an array of C strings the MOD owns and which must outlive the
+// call - it is read during the draw and not retained.
+extern "C" inline uint32_t GuiSelector(float x, float y, float w, float h,
+                                       const char* label, int32_t* index,
+                                       const char* const* options, int32_t count) {
+    if (!g_Canvas || !label || !index || !options || count <= 0) return 0;
+    int i = static_cast<int>(*index);
+    const bool changed = g_Canvas->Selector(MakeRect(x, y, w, h), label, i, options, count);
+    *index = static_cast<int32_t>(i);
+    return changed ? 1u : 0u;
+}
+
+extern "C" inline uint32_t GuiList(float x, float y, float w, float h,
+                                   const char* const* items, int32_t count,
+                                   int32_t* index) {
+    if (!g_Canvas || !items || count <= 0 || !index) return 0;
+    int i = static_cast<int>(*index);
+    const bool changed = g_Canvas->List(MakeRect(x, y, w, h), items, count, i);
+    *index = static_cast<int32_t>(i);
+    return changed ? 1u : 0u;
+}
+
+extern "C" inline uint32_t GuiLabel(float x, float y, float w, float h,
+                                    const char* text, uint32_t styleId) {
+    if (!g_Canvas || !text) return 0;
+    const GUI::TextStyle* st = StyleAt(styleId);
+    if (st) g_Canvas->Label(MakeRect(x, y, w, h), text, *st);
+    else g_Canvas->Label(MakeRect(x, y, w, h), text);
+    return 1;
+}
+
+extern "C" inline uint32_t GuiPlate(float x, float y, float w, float h, uint32_t rgba) {
+    if (!g_Canvas) return 0;
+    g_Canvas->Plate(MakeRect(x, y, w, h), FromRGBA(rgba));
+    return 1;
+}
+
+extern "C" inline uint32_t GuiMessageBox(const char* text, const char* name,
+                                         float alpha, uint32_t showArrow) {
+    if (!g_Canvas || !text) return 0;
+    g_Canvas->MessageBox(text, name, alpha, showArrow != 0);
+    return 1;
+}
+
+extern "C" inline uint32_t GuiButtonIcon(int32_t sprite, float x, float y,
+                                         float size, uint32_t rgba) {
+    if (!g_Canvas) return 0;
+    g_Canvas->ButtonIcon(static_cast<GUI::Sprite>(sprite), x, y, size, FromRGBA(rgba));
+    return 1;
+}
+
+// Returns the width it drew, so a row of hints can be laid out left to right
+// without the mod measuring each one first.
+extern "C" inline uint32_t GuiKeyHint(int32_t sprite, const char* label,
+                                      float x, float y, uint32_t rgba, float* outWidth) {
+    if (!g_Canvas || !label) return 0;
+    const float w = g_Canvas->KeyHint(static_cast<GUI::Sprite>(sprite), label, x, y,
+                                      FromRGBA(rgba));
+    if (outWidth) *outWidth = w;
+    return 1;
+}
+
+extern "C" inline uint32_t GuiCursorCorners(float x, float y, float w, float h,
+                                            uint32_t rgba, float size) {
+    if (!g_Canvas) return 0;
+    g_Canvas->CursorCorners(MakeRect(x, y, w, h), FromRGBA(rgba), size);
+    return 1;
+}
+
+extern "C" inline uint32_t GuiCursorBrackets(float x, float y, float w, float h,
+                                             uint32_t rgba, float size) {
+    if (!g_Canvas) return 0;
+    g_Canvas->CursorBrackets(MakeRect(x, y, w, h), FromRGBA(rgba), size);
+    return 1;
+}
+
+extern "C" inline uint32_t GuiBoxedCursor(float x, float y, float w, float h, uint32_t rgba) {
+    if (!g_Canvas) return 0;
+    g_Canvas->BoxedCursor(MakeRect(x, y, w, h), FromRGBA(rgba));
+    return 1;
+}
+
+extern "C" inline uint32_t GuiImageUV(int32_t sprite, float x, float y, float w, float h,
+                                      float u0, float v0, float u1, float v1,
+                                      uint32_t tint) {
+    if (!g_Canvas) return 0;
+    g_Canvas->ImageUV(static_cast<GUI::Sprite>(sprite), MakeRect(x, y, w, h),
+                      u0, v0, u1, v1, FromRGBA(tint));
+    return 1;
+}
+
+extern "C" inline uint32_t GuiImageAt(int32_t sprite, float x, float y, uint32_t tint) {
+    if (!g_Canvas) return 0;
+    g_Canvas->ImageAt(static_cast<GUI::Sprite>(sprite), x, y, FromRGBA(tint));
+    return 1;
+}
+
+extern "C" inline uint32_t GuiBlurBehindFaded(float x, float y, float w, float h,
+                                              uint32_t tint) {
+    if (!g_Canvas) return 0;
+    g_Canvas->BlurBehindFaded(MakeRect(x, y, w, h), FromRGBA(tint));
+    return 1;
+}
+
+// --- canvas geometry and timing -------------------------------------------
+
+extern "C" inline uint32_t GuiDeviceSize(uint32_t* w, uint32_t* h) {
+    if (!g_Canvas || !w || !h) return 0;
+    *w = g_Canvas->DeviceWidth();
+    *h = g_Canvas->DeviceHeight();
+    return 1;
+}
+
+extern "C" inline uint32_t GuiPixelScale(float* out2) {
+    if (!g_Canvas || !out2) return 0;
+    out2[0] = g_Canvas->PixelScaleX();
+    out2[1] = g_Canvas->PixelScaleY();
+    return 1;
+}
+
+extern "C" inline uint32_t GuiViewportOffset(float* out2) {
+    if (!g_Canvas || !out2) return 0;
+    out2[0] = g_Canvas->ViewportOffsetX();
+    out2[1] = g_Canvas->ViewportOffsetY();
+    return 1;
+}
+
+extern "C" inline uint32_t GuiSnap(float x, float y, float* out2) {
+    if (!g_Canvas || !out2) return 0;
+    out2[0] = g_Canvas->SnapX(x);
+    out2[1] = g_Canvas->SnapY(y);
+    return 1;
+}
+
+// A 0..1 sawtooth and a -1..1 sine over the given period. Both come from the
+// canvas's own clock rather than a mod's frame counter, so animations stay in
+// step with the UI and with each other.
+extern "C" inline uint32_t GuiPhase(float periodSeconds, float* out) {
+    if (!g_Canvas || !out) return 0;
+    *out = g_Canvas->Phase(periodSeconds);
+    return 1;
+}
+
+extern "C" inline uint32_t GuiWave(float periodSeconds, float* out) {
+    if (!g_Canvas || !out) return 0;
+    *out = g_Canvas->Wave(periodSeconds);
+    return 1;
+}
+
+extern "C" inline uint32_t GuiFramesPerSecond(float* out) {
+    if (!g_Canvas || !out) return 0;
+    *out = g_Canvas->FramesPerSecond();
+    return 1;
+}
+
+extern "C" inline uint32_t GuiCurrentAlpha(float* out) {
+    if (!g_Canvas || !out) return 0;
+    *out = g_Canvas->CurrentAlpha();
+    return 1;
+}
+
+// --- more GUI-level settings ----------------------------------------------
+
+extern "C" inline uint32_t GuiSetScalingMode(int32_t mode) {
+    GUI::SetScalingMode(static_cast<GUI::ScalingMode>(mode));
+    return 1;
+}
+
+extern "C" inline int32_t GuiGetScalingMode() {
+    return static_cast<int32_t>(GUI::GetScalingMode());
+}
+
+extern "C" inline uint32_t GuiGetOutputAspect(float* out) {
+    if (!out) return 0;
+    *out = GUI::GetOutputAspect();
+    return 1;
+}
+
+extern "C" inline uint32_t GuiIsBackdropBlurEnabled() {
+    return GUI::IsBackdropBlurEnabled() ? 1u : 0u;
+}
+
+extern "C" inline uint32_t GuiSetUiSoundEvents(const char* cursorMove, const char* decide) {
+    GUI::SetUiSoundEvents(cursorMove, decide);
+    return 1;
+}
+
+extern "C" inline uint32_t GuiAreUiSoundsEnabled() {
+    return GUI::AreUiSoundsEnabled() ? 1u : 0u;
+}
+
+extern "C" inline uint32_t GuiSetLoadBudget(uint32_t bytesPerFrame) {
+    GUI::SetLoadBudget(bytesPerFrame);
+    return 1;
+}
+
+extern "C" inline uint32_t GuiFontSheetBytes(int32_t fontId) {
+    return GUI::FontSheetBytes(static_cast<GUI::FontId>(fontId));
+}
+
 // --- focus -----------------------------------------------------------------
 
 extern "C" inline uint32_t GuiSetFocus(int32_t index) {
@@ -597,6 +837,42 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("SpriteReady",         &GuiSpriteReady),
     WIIXL_SURFACE_SYMBOL("SpriteSize",          &GuiSpriteSize),
     WIIXL_SURFACE_SYMBOL("FontReady",           &GuiFontReady),
+
+    WIIXL_SURFACE_SYMBOL("Button",              &GuiButton),
+    WIIXL_SURFACE_SYMBOL("PlateButton",         &GuiPlateButton),
+    WIIXL_SURFACE_SYMBOL("Toggle",              &GuiToggle),
+    WIIXL_SURFACE_SYMBOL("Slider",              &GuiSlider),
+    WIIXL_SURFACE_SYMBOL("Selector",            &GuiSelector),
+    WIIXL_SURFACE_SYMBOL("List",                &GuiList),
+    WIIXL_SURFACE_SYMBOL("Label",               &GuiLabel),
+    WIIXL_SURFACE_SYMBOL("Plate",               &GuiPlate),
+    WIIXL_SURFACE_SYMBOL("MessageBox",          &GuiMessageBox),
+    WIIXL_SURFACE_SYMBOL("ButtonIcon",          &GuiButtonIcon),
+    WIIXL_SURFACE_SYMBOL("KeyHint",             &GuiKeyHint),
+    WIIXL_SURFACE_SYMBOL("CursorCorners",       &GuiCursorCorners),
+    WIIXL_SURFACE_SYMBOL("CursorBrackets",      &GuiCursorBrackets),
+    WIIXL_SURFACE_SYMBOL("BoxedCursor",         &GuiBoxedCursor),
+    WIIXL_SURFACE_SYMBOL("ImageUV",             &GuiImageUV),
+    WIIXL_SURFACE_SYMBOL("ImageAt",             &GuiImageAt),
+    WIIXL_SURFACE_SYMBOL("BlurBehindFaded",     &GuiBlurBehindFaded),
+
+    WIIXL_SURFACE_SYMBOL("DeviceSize",          &GuiDeviceSize),
+    WIIXL_SURFACE_SYMBOL("PixelScale",          &GuiPixelScale),
+    WIIXL_SURFACE_SYMBOL("ViewportOffset",      &GuiViewportOffset),
+    WIIXL_SURFACE_SYMBOL("Snap",                &GuiSnap),
+    WIIXL_SURFACE_SYMBOL("Phase",               &GuiPhase),
+    WIIXL_SURFACE_SYMBOL("Wave",                &GuiWave),
+    WIIXL_SURFACE_SYMBOL("FramesPerSecond",     &GuiFramesPerSecond),
+    WIIXL_SURFACE_SYMBOL("CurrentAlpha",        &GuiCurrentAlpha),
+
+    WIIXL_SURFACE_SYMBOL("SetScalingMode",      &GuiSetScalingMode),
+    WIIXL_SURFACE_SYMBOL("GetScalingMode",      &GuiGetScalingMode),
+    WIIXL_SURFACE_SYMBOL("GetOutputAspect",     &GuiGetOutputAspect),
+    WIIXL_SURFACE_SYMBOL("IsBackdropBlurEnabled", &GuiIsBackdropBlurEnabled),
+    WIIXL_SURFACE_SYMBOL("SetUiSoundEvents",    &GuiSetUiSoundEvents),
+    WIIXL_SURFACE_SYMBOL("AreUiSoundsEnabled",  &GuiAreUiSoundsEnabled),
+    WIIXL_SURFACE_SYMBOL("SetLoadBudget",       &GuiSetLoadBudget),
+    WIIXL_SURFACE_SYMBOL("FontSheetBytes",      &GuiFontSheetBytes),
 
     WIIXL_SURFACE_SYMBOL("SetFocus",            &GuiSetFocus),
     WIIXL_SURFACE_SYMBOL("ClaimFocus",          &GuiClaimFocus),

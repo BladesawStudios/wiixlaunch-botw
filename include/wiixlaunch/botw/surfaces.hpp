@@ -52,6 +52,7 @@
 #include <wiixlaunch/botw/surfaces/gfx_surface.hpp>
 #include <wiixlaunch/botw/surfaces/gui_surface.hpp>
 #include <wiixlaunch/botw/surfaces/effects_surfaces.hpp>
+#include <wiixlaunch/botw/surfaces/region_surface.hpp>
 #include <wiixlaunch/botw/surfaces/misc_surfaces.hpp>
 #include <wiixlaunch/botw/surfaces/gamedata_surface.hpp>
 #include <wiixlaunch/botw/surfaces/world_surface.hpp>
@@ -366,6 +367,7 @@ inline void Register() {
     GuiSurface::Register();
     VfxSurface::Register();
     FlytSurface::Register();
+    RegionSurface::Register();
     CameraSurface::Register();
     DisplaySurface::Register();
     EventsSurface::Register();

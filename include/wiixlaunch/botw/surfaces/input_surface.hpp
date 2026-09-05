@@ -219,6 +219,27 @@ extern "C" inline uint32_t IInjectedButtons() {
 // that wants to know it is not alone.
 extern "C" inline uint32_t IInjectorCount() { return g_NotedCount; }
 
+// Input capture stops the GAME seeing the controller while a mod owns it - a
+// menu being driven with the same stick that would otherwise move Link.
+//
+// The held form is the one to use. SetInputCapture latches until something
+// clears it, so a mod that crashes with capture on leaves the player unable to
+// move; HoldInputCapture expires on its own after a few frames, so a mod that
+// stops calling it simply gives control back.
+extern "C" inline uint32_t IHoldInputCapture(uint32_t frames) {
+    Controller::HoldInputCapture(frames ? frames : 8u);
+    return 1;
+}
+
+extern "C" inline uint32_t ISetInputCapture(uint32_t on) {
+    Controller::SetInputCapture(on != 0);
+    return 1;
+}
+
+extern "C" inline uint32_t IIsInputCaptured() {
+    return Controller::IsInputCaptured() ? 1u : 0u;
+}
+
 // --- the table -------------------------------------------------------------
 inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("SupportsInjection", &ISupportsInjection),
@@ -228,6 +249,9 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("IsPressed",         &IIsPressed),
     WIIXL_SURFACE_SYMBOL("GetLeftStick",      &IGetLeftStick),
     WIIXL_SURFACE_SYMBOL("GetRightStick",     &IGetRightStick),
+    WIIXL_SURFACE_SYMBOL("HoldInputCapture",  &IHoldInputCapture),
+    WIIXL_SURFACE_SYMBOL("SetInputCapture",   &ISetInputCapture),
+    WIIXL_SURFACE_SYMBOL("IsInputCaptured",   &IIsInputCaptured),
     WIIXL_SURFACE_SYMBOL("Hold",              &IHold),
     WIIXL_SURFACE_SYMBOL("HoldIndefinitely",  &IHoldIndefinitely),
     WIIXL_SURFACE_SYMBOL("Send",              &ISend),

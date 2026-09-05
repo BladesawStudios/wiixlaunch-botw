@@ -412,6 +412,118 @@ extern "C" inline uint32_t FlytSetVisible(uint32_t paneHandle, uint32_t visible)
     return 1;
 }
 
+// --- reading a pane back ---------------------------------------------------
+//
+// The setters were there from the start; without the getters a mod could move a
+// pane and never find out where the game had put it, which makes anything
+// relative - nudging, animating, restoring - impossible.
+
+extern "C" inline uint32_t FlytGetTranslate(uint32_t paneHandle, float* out3) {
+    void* p = g_Panes.Load(paneHandle);
+    if (!p || !out3) return 0;
+    FLYT::Pane(p).GetTranslate(out3[0], out3[1], out3[2]);
+    return 1;
+}
+
+extern "C" inline uint32_t FlytGetParentGlobalTranslate(uint32_t paneHandle, float* out3) {
+    void* p = g_Panes.Load(paneHandle);
+    if (!p || !out3) return 0;
+    FLYT::Pane(p).GetParentGlobalTranslate(out3[0], out3[1], out3[2]);
+    return 1;
+}
+
+extern "C" inline uint32_t FlytGetRotate(uint32_t paneHandle, float* out3) {
+    void* p = g_Panes.Load(paneHandle);
+    if (!p || !out3) return 0;
+    FLYT::Pane(p).GetRotate(out3[0], out3[1], out3[2]);
+    return 1;
+}
+
+extern "C" inline uint32_t FlytGetScale(uint32_t paneHandle, float* out2) {
+    void* p = g_Panes.Load(paneHandle);
+    if (!p || !out2) return 0;
+    FLYT::Pane(p).GetScale(out2[0], out2[1]);
+    return 1;
+}
+
+extern "C" inline uint32_t FlytGetSize(uint32_t paneHandle, float* out2) {
+    void* p = g_Panes.Load(paneHandle);
+    if (!p || !out2) return 0;
+    FLYT::Pane(p).GetSize(out2[0], out2[1]);
+    return 1;
+}
+
+extern "C" inline uint32_t FlytIsVisible(uint32_t paneHandle) {
+    void* p = g_Panes.Load(paneHandle);
+    return p && FLYT::Pane(p).IsVisible() ? 1u : 0u;
+}
+
+// A pane's own alpha, 0-255. The EFFECTIVE alpha is that multiplied down the
+// parent chain, which is what actually reaches the screen - a mod fading
+// something in needs the first, and one asking "can this be seen" needs the
+// second, so both are here.
+extern "C" inline uint32_t FlytGetAlpha(uint32_t paneHandle, uint32_t* out) {
+    void* p = g_Panes.Load(paneHandle);
+    if (!p || !out) return 0;
+    *out = FLYT::Pane(p).GetAlpha();
+    return 1;
+}
+
+extern "C" inline uint32_t FlytSetAlpha(uint32_t paneHandle, uint32_t alpha) {
+    void* p = g_Panes.Load(paneHandle);
+    if (!p) return 0;
+    FLYT::Pane(p).SetAlpha(static_cast<uint8_t>(alpha & 0xFF));
+    return 1;
+}
+
+extern "C" inline uint32_t FlytGetEffectiveAlpha(uint32_t paneHandle, float* out) {
+    void* p = g_Panes.Load(paneHandle);
+    if (!p || !out) return 0;
+    *out = FLYT::Pane(p).GetEffectiveAlpha();
+    return 1;
+}
+
+// --- picture panes ---------------------------------------------------------
+//
+// Only a PicturePane has vertex colours. The handle is the same one - a pane is
+// a pane - and these refuse rather than reinterpreting a pane that has no
+// colour to set, since writing four bytes into whatever happens to be at that
+// offset on a plain pane is exactly the kind of quiet corruption this whole
+// boundary exists to prevent.
+
+extern "C" inline uint32_t FlytSetColor(uint32_t paneHandle, uint32_t rgba) {
+    void* p = g_Panes.Load(paneHandle);
+    if (!p) return 0;
+    FLYT::PicturePane(p).SetColor(static_cast<uint8_t>((rgba >> 24) & 0xFF),
+                                  static_cast<uint8_t>((rgba >> 16) & 0xFF),
+                                  static_cast<uint8_t>((rgba >> 8) & 0xFF),
+                                  static_cast<uint8_t>(rgba & 0xFF));
+    return 1;
+}
+
+extern "C" inline uint32_t FlytGetCornerColor(uint32_t paneHandle, int32_t corner,
+                                              uint32_t* rgba) {
+    void* p = g_Panes.Load(paneHandle);
+    if (!p || !rgba) return 0;
+    uint8_t r = 0, g = 0, b = 0, a = 0;
+    FLYT::PicturePane(p).GetCornerColor(static_cast<int>(corner), r, g, b, a);
+    *rgba = (static_cast<uint32_t>(r) << 24) | (static_cast<uint32_t>(g) << 16) |
+            (static_cast<uint32_t>(b) << 8) | a;
+    return 1;
+}
+
+extern "C" inline uint32_t FlytSetCornerColor(uint32_t paneHandle, int32_t corner,
+                                              uint32_t rgba) {
+    void* p = g_Panes.Load(paneHandle);
+    if (!p) return 0;
+    FLYT::PicturePane(p).SetCornerColor(static_cast<int>(corner),
+                                        static_cast<uint8_t>((rgba >> 24) & 0xFF),
+                                        static_cast<uint8_t>((rgba >> 16) & 0xFF),
+                                        static_cast<uint8_t>((rgba >> 8) & 0xFF),
+                                        static_cast<uint8_t>(rgba & 0xFF));
+    return 1;
+}
+
 inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("Init",               &FlytInit),
     WIIXL_SURFACE_SYMBOL("OnLayoutLoaded",     &FlytOnLayoutLoaded),
@@ -428,6 +540,18 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("SetScale",           &FlytSetScale),
     WIIXL_SURFACE_SYMBOL("SetSize",            &FlytSetSize),
     WIIXL_SURFACE_SYMBOL("SetVisible",         &FlytSetVisible),
+    WIIXL_SURFACE_SYMBOL("GetTranslate",       &FlytGetTranslate),
+    WIIXL_SURFACE_SYMBOL("GetParentGlobalTranslate", &FlytGetParentGlobalTranslate),
+    WIIXL_SURFACE_SYMBOL("GetRotate",          &FlytGetRotate),
+    WIIXL_SURFACE_SYMBOL("GetScale",           &FlytGetScale),
+    WIIXL_SURFACE_SYMBOL("GetSize",            &FlytGetSize),
+    WIIXL_SURFACE_SYMBOL("IsVisible",          &FlytIsVisible),
+    WIIXL_SURFACE_SYMBOL("GetAlpha",           &FlytGetAlpha),
+    WIIXL_SURFACE_SYMBOL("SetAlpha",           &FlytSetAlpha),
+    WIIXL_SURFACE_SYMBOL("GetEffectiveAlpha",  &FlytGetEffectiveAlpha),
+    WIIXL_SURFACE_SYMBOL("SetColor",           &FlytSetColor),
+    WIIXL_SURFACE_SYMBOL("GetCornerColor",     &FlytGetCornerColor),
+    WIIXL_SURFACE_SYMBOL("SetCornerColor",     &FlytSetCornerColor),
 };
 
 } // namespace impl
