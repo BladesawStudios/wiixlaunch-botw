@@ -38,9 +38,9 @@ namespace WiiXLaunch::BotW::Surfaces::GameDataSurface {
 
 constexpr const char* kName = "botw.gamedata";
 constexpr uint16_t kVersionMajor = 1;
-// 1.1 appends GetFlagDebug. Appending bumps the MINOR, so every mod built
-// against v1.0 still resolves.
-constexpr uint16_t kVersionMinor = 1;
+// 1.1 appends GetFlagDebug, 1.2 appends InitCompletion. Appending bumps the
+// MINOR, so every mod built against v1.0 still resolves.
+constexpr uint16_t kVersionMinor = 2;
 
 namespace impl {
 
@@ -402,6 +402,17 @@ extern "C" inline uint32_t GdSetDisplayedPercent(float percent, uint32_t forceVi
     return Completion::SetDisplayedPercent(percent, forceVisible != 0) ? 1u : 0u;
 }
 
+// Arms the completion display override. SetDisplayedPercent has nowhere to land
+// until this hook is in place; with no override set it runs the original and
+// tests one bool, so arming it costs nothing until something uses it.
+extern "C" inline uint32_t GdInitCompletion() {
+#if WIIXL_SWITCH
+    return 0;
+#else
+    return Completion::Init() ? 1u : 0u;
+#endif
+}
+
 // --- the manager's own state ------------------------------------------------
 //
 // FlagDebug is a struct of eight words and two four-word arrays, so it cannot
@@ -454,6 +465,8 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("SetMaxLife",         &GdSetMaxLife),
     // v1.1. Appended, never inserted.
     WIIXL_SURFACE_SYMBOL("GetFlagDebug",       &GdGetFlagDebug),
+    // v1.2.
+    WIIXL_SURFACE_SYMBOL("InitCompletion",     &GdInitCompletion),
 
     WIIXL_SURFACE_SYMBOL("GetStamina",         &GdGetStamina),
     WIIXL_SURFACE_SYMBOL("GetMaxStamina",      &GdGetMaxStamina),

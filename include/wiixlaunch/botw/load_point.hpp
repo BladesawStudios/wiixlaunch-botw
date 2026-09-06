@@ -164,6 +164,9 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
     // The two drawing registries. A mod that registered to draw and never
     // appears has one of two problems - it did not register, or nothing drives
     // the frame - and these lines tell those apart.
+    // The frame dispatcher, which is the sturdier of the two per-frame sources:
+    // it survives the title screen where the player tick does not.
+    WiiXLaunch::BotW::Surfaces::InputSurface::LogState();
     WiiXLaunch::BotW::Surfaces::GfxSurface::LogState();
     WiiXLaunch::BotW::Surfaces::GuiSurface::LogState();
 

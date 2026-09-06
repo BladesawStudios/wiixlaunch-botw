@@ -30,7 +30,9 @@ namespace WiiXLaunch::BotW::Surfaces::ArmourSurface {
 
 constexpr const char* kName = "botw.armour";
 constexpr uint16_t kVersionMajor = 1;
-constexpr uint16_t kVersionMinor = 0;
+// 1.1 appends InitExtraEffects. Appending bumps the MINOR, so every mod built
+// against v1.0 still resolves.
+constexpr uint16_t kVersionMinor = 1;
 
 namespace impl {
 
@@ -127,6 +129,18 @@ extern "C" inline uint32_t ASetArmourEffects(int32_t effect, int32_t level) {
 // "lie to the game about this armour" are different acts and a mod should have
 // had to choose.
 
+// Arms the extras table. SetExtraEffect REFUSES until this has run - it checks
+// ExtraHookInstalled and returns false - so a mod that never calls it gets a
+// silent no-op. The coverage gate said this was "installed by SetExtraEffect on
+// first use", which was a sentence about code that does the opposite.
+extern "C" inline uint32_t AInitExtraEffects() {
+#if WIIXL_SWITCH
+    return 0;
+#else
+    return Armour::InitExtraEffects() ? 1u : 0u;
+#endif
+}
+
 extern "C" inline uint32_t ASetExtraEffect(int32_t piece, int32_t effect, int32_t level) {
     return Armour::SetExtraEffect(static_cast<Armour::Piece>(piece),
                                   static_cast<Armour::Effect>(effect),
@@ -162,6 +176,8 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("SetExtraEffect",   &ASetExtraEffect),
     WIIXL_SURFACE_SYMBOL("GetExtraEffect",   &AGetExtraEffect),
     WIIXL_SURFACE_SYMBOL("ClearExtraEffects", &AClearExtraEffects),
+    // v1.1. Appended, never inserted.
+    WIIXL_SURFACE_SYMBOL("InitExtraEffects", &AInitExtraEffects),
 };
 
 } // namespace impl

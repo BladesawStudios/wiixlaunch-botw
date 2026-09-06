@@ -37,7 +37,9 @@ namespace WiiXLaunch::BotW::Surfaces::PouchSurface {
 
 constexpr const char* kName = "botw.pouch";
 constexpr uint16_t kVersionMajor = 1;
-constexpr uint16_t kVersionMinor = 0;
+// 1.1 appends TickEquipRefresh. Appending bumps the MINOR, so every mod built
+// against v1.0 still resolves.
+constexpr uint16_t kVersionMinor = 1;
 
 namespace impl {
 
@@ -306,6 +308,18 @@ extern "C" inline uint32_t PModifierFromName(const char* name) {
     return name ? Pouch::ModifierFromName(name) : 0u;
 }
 
+// An equip does not take effect the moment it is asked for: the game re-reads
+// the pouch a frame or two later, and the module holds the request until then.
+// SOMETHING HAS TO PUMP IT. The coverage gate called this "internal, driven by
+// the module's own tick" - the module has no tick of its own, and the API
+// server was what drove it. A mod that equips or repairs and never calls this
+// gets a write that quietly never lands.
+extern "C" inline void PTickEquipRefresh() {
+#if !WIIXL_SWITCH
+    Pouch::TickEquipRefresh();
+#endif
+}
+
 // --- the table -------------------------------------------------------------
 inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("SupportsPouch",      &PSupportsPouch),
@@ -341,6 +355,8 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("CookEffectName",     &PCookEffectName),
     WIIXL_SURFACE_SYMBOL("CookEffectFromName", &PCookEffectFromName),
     WIIXL_SURFACE_SYMBOL("ModifierFromName",   &PModifierFromName),
+    // v1.1. Appended, never inserted.
+    WIIXL_SURFACE_SYMBOL("TickEquipRefresh",   &PTickEquipRefresh),
 };
 
 } // namespace impl
