@@ -30,9 +30,9 @@ namespace WiiXLaunch::BotW::Surfaces::ArmourSurface {
 
 constexpr const char* kName = "botw.armour";
 constexpr uint16_t kVersionMajor = 1;
-// 1.1 appends InitExtraEffects. Appending bumps the MINOR, so every mod built
-// against v1.0 still resolves.
-constexpr uint16_t kVersionMinor = 1;
+// 1.1 appends InitExtraEffects, 1.2 appends ClearPieceExtraEffects. Appending
+// bumps the MINOR, so every mod built against v1.0 still resolves.
+constexpr uint16_t kVersionMinor = 2;
 
 namespace impl {
 
@@ -152,6 +152,13 @@ extern "C" inline int32_t AGetExtraEffect(int32_t piece, int32_t effect) {
                                                        static_cast<Armour::Effect>(effect)));
 }
 
+// Per piece, which is what a caller naming a piece means. The all-pieces clear
+// below stays, under its own name, so the two cannot be confused for each
+// other by a caller that passes an argument the callee never reads.
+extern "C" inline uint32_t AClearPieceExtraEffects(int32_t piece) {
+    return Armour::ClearPieceExtraEffects(static_cast<Armour::Piece>(piece)) ? 1u : 0u;
+}
+
 extern "C" inline void AClearExtraEffects() {
     Armour::ClearExtraEffects();
 }
@@ -176,6 +183,7 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("SetExtraEffect",   &ASetExtraEffect),
     WIIXL_SURFACE_SYMBOL("GetExtraEffect",   &AGetExtraEffect),
     WIIXL_SURFACE_SYMBOL("ClearExtraEffects", &AClearExtraEffects),
+    WIIXL_SURFACE_SYMBOL("ClearPieceExtraEffects", &AClearPieceExtraEffects),
     // v1.1. Appended, never inserted.
     WIIXL_SURFACE_SYMBOL("InitExtraEffects", &AInitExtraEffects),
 };
