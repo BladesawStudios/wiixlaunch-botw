@@ -38,9 +38,10 @@ namespace WiiXLaunch::BotW::Surfaces::GameDataSurface {
 
 constexpr const char* kName = "botw.gamedata";
 constexpr uint16_t kVersionMajor = 1;
-// 1.1 appends GetFlagDebug, 1.2 appends InitCompletion. Appending bumps the
-// MINOR, so every mod built against v1.0 still resolves.
-constexpr uint16_t kVersionMinor = 2;
+// 1.1 appends GetFlagDebug, 1.2 appends InitCompletion, 1.3 appends
+// SetFlagF32Forced and SetFlagVec3Forced. Appending bumps the MINOR, so every
+// mod built against v1.0 still resolves.
+constexpr uint16_t kVersionMinor = 3;
 
 namespace impl {
 
@@ -251,6 +252,24 @@ extern "C" inline uint32_t GdSetFlagF32(const char* name, float value) {
     return name && GameData::SetFlagF32(name, value) ? 1u : 0u;
 }
 
+// TWO bypasses here, where the bool setter above has one, and that is the game
+// rather than an inconsistency: GameData::SetFlagF32 reaches both guards
+// through the typed setter, so a caller can unlock the one-trigger latch and
+// the program-writable permission independently.
+//
+// Separate from GdSetFlagF32 for the same reason GdSetFlagBoolForced is
+// separate from GdSetFlagBool - latching is the game's own rule about its own
+// save data, so the default path respects it and stepping outside has to be
+// asked for. The warning there applies here too: forcing a flag to a value the
+// event flow never produces can leave a quest somewhere it cannot recover
+// from. Back up the save.
+extern "C" inline uint32_t GdSetFlagF32Forced(const char* name, float value,
+                                              uint32_t bypassLatch,
+                                              uint32_t bypassPermission) {
+    return name && GameData::SetFlagF32(name, value, bypassLatch != 0,
+                                        bypassPermission != 0) ? 1u : 0u;
+}
+
 // Vec3 through a float[3], never as a struct - see the ABI rules in
 // loader/surface.hpp for why a struct must not cross.
 extern "C" inline uint32_t GdGetFlagVec3(const char* name, float* out3) {
@@ -266,6 +285,18 @@ extern "C" inline uint32_t GdSetFlagVec3(const char* name, const float* in3) {
     GameData::Vec3 v{};
     v.x = in3[0]; v.y = in3[1]; v.z = in3[2];
     return GameData::SetFlagVec3(name, v) ? 1u : 0u;
+}
+
+// See GdSetFlagF32Forced. Same two bypasses, same reason for being its own
+// symbol, same warning about where it can leave a save.
+extern "C" inline uint32_t GdSetFlagVec3Forced(const char* name, const float* in3,
+                                               uint32_t bypassLatch,
+                                               uint32_t bypassPermission) {
+    if (!name || !in3) return 0;
+    GameData::Vec3 v{};
+    v.x = in3[0]; v.y = in3[1]; v.z = in3[2];
+    return GameData::SetFlagVec3(name, v, bypassLatch != 0,
+                                 bypassPermission != 0) ? 1u : 0u;
 }
 
 // --- flags, by index -------------------------------------------------------
@@ -493,8 +524,10 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("SetFlagBoolForced",  &GdSetFlagBoolForced),
     WIIXL_SURFACE_SYMBOL("GetFlagF32",         &GdGetFlagF32),
     WIIXL_SURFACE_SYMBOL("SetFlagF32",         &GdSetFlagF32),
+    WIIXL_SURFACE_SYMBOL("SetFlagF32Forced",   &GdSetFlagF32Forced),
     WIIXL_SURFACE_SYMBOL("GetFlagVec3",        &GdGetFlagVec3),
     WIIXL_SURFACE_SYMBOL("SetFlagVec3",        &GdSetFlagVec3),
+    WIIXL_SURFACE_SYMBOL("SetFlagVec3Forced",  &GdSetFlagVec3Forced),
 
     WIIXL_SURFACE_SYMBOL("FlagS32Count",       &GdFlagS32Count),
     WIIXL_SURFACE_SYMBOL("FlagBoolCount",      &GdFlagBoolCount),
