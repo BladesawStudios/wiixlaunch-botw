@@ -44,7 +44,10 @@ namespace WiiXLaunch::BotW::Surfaces::GuiSurface {
 
 constexpr const char* kName = "botw.gui";
 constexpr uint16_t kVersionMajor = 1;
-constexpr uint16_t kVersionMinor = 0;
+// 1.1 appends ImageEx, which is the first way a mod can reach orientation,
+// blending or rotation on a sprite. Appending bumps the MINOR, so every mod
+// built against v1.0 still resolves.
+constexpr uint16_t kVersionMinor = 1;
 
 constexpr uint32_t kMaxFrameCallbacks = 8;
 constexpr uint32_t kMaxStyles = 32;
@@ -511,6 +514,62 @@ extern "C" inline uint32_t GuiImage(int32_t sprite, float x, float y, float w, f
     return 1;
 }
 
+// Everything Image drops.
+//
+// Canvas::Image takes orientation, a BlendState and a rotation, and the wrapper
+// above passes none of them - so until now a mod could draw a sprite and could
+// not flip it, rotate it, or blend it additively. Nothing reported that: the
+// coverage gate counts ENTRY POINTS, and Image was covered. A parameter that
+// never crosses the boundary is invisible to a check that measures functions.
+//
+// BLEND IS A PRESET ID, not the struct. BlendState is six enum words, and the
+// surface's own rule at the top of this file is that a large options struct
+// goes in a host-side table rather than being flattened - but blends do not
+// need a table either, because the interesting ones are already named. These
+// eight are the presets in graphics/gx2.hpp, in the order declared there, and
+// they cover what BotW's own materials use: 1557 of them are Additive alone.
+//
+// Out-of-range falls back to Alpha rather than refusing. A blend is a visual
+// choice, and failing a draw over one would turn a cosmetic mistake into a
+// missing element the mod author then has to go looking for.
+enum GuiBlendPreset : int32_t {
+    kBlendAlpha = 0,
+    kBlendPremultiplied,
+    kBlendAdditive,
+    kBlendAdditivePremultiplied,
+    kBlendOverlay,
+    kBlendMultiply,
+    kBlendOpaque,
+    kBlendSubtract,
+    kBlendPresetCount,
+};
+
+inline const GX2::BlendState& BlendFromId(int32_t id) {
+    switch (id) {
+        case kBlendPremultiplied:          return GX2::Blend::Premultiplied;
+        case kBlendAdditive:               return GX2::Blend::Additive;
+        case kBlendAdditivePremultiplied:  return GX2::Blend::AdditivePremultiplied;
+        case kBlendOverlay:                return GX2::Blend::Overlay;
+        case kBlendMultiply:               return GX2::Blend::Multiply;
+        case kBlendOpaque:                 return GX2::Blend::Opaque;
+        case kBlendSubtract:               return GX2::Blend::Subtract;
+        default:                           return GX2::Blend::Alpha;
+    }
+}
+
+// orient is the GUI::Orient bitmask: 0 none, 1 flip H, 2 flip V, 4 rotate 90,
+// 8 rotate 180, 12 rotate 270. rotation is degrees, applied about the rect's
+// centre, and is independent of the orient flags.
+extern "C" inline uint32_t GuiImageEx(int32_t sprite, float x, float y, float w, float h,
+                                      uint32_t tint, uint32_t orient, int32_t blend,
+                                      float rotation) {
+    if (!g_Canvas) return 0;
+    g_Canvas->Image(static_cast<GUI::Sprite>(sprite), MakeRect(x, y, w, h),
+                    FromRGBA(tint), static_cast<uint8_t>(orient),
+                    BlendFromId(blend), rotation);
+    return 1;
+}
+
 extern "C" inline uint32_t GuiSpriteReady(int32_t sprite) {
     return g_Canvas && g_Canvas->SpriteReady(static_cast<GUI::Sprite>(sprite)) ? 1u : 0u;
 }
@@ -834,6 +893,7 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("TextBox",             &GuiTextBox),
     WIIXL_SURFACE_SYMBOL("MeasureText",         &GuiMeasureText),
     WIIXL_SURFACE_SYMBOL("Image",               &GuiImage),
+    WIIXL_SURFACE_SYMBOL("ImageEx",             &GuiImageEx),
     WIIXL_SURFACE_SYMBOL("SpriteReady",         &GuiSpriteReady),
     WIIXL_SURFACE_SYMBOL("SpriteSize",          &GuiSpriteSize),
     WIIXL_SURFACE_SYMBOL("FontReady",           &GuiFontReady),
