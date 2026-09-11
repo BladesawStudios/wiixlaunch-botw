@@ -349,6 +349,31 @@ inline int& NextSamplerId() {
 
 // Fixed pool of static storage for created textures so no heap 'new' is needed
 constexpr size_t kMaxStaticTextures = 16;
+
+// WHERE A RAW TEXTURE GOES.
+//
+// NVN does not take pixels, it takes a MEMORY POOL, and the texture lives at
+// an offset inside it - which is why CreateTexture below wants a "packaged"
+// buffer: a 0x200 header followed by the pixels, the whole thing handed to
+// nvnMemoryPoolBuilderSetStorage. The caller's own static array becomes the
+// pool.
+//
+// That is fine for a texture compiled into the host, and useless for a module
+// handing over plain RGBA - which is what botw.gfx's CreateTexture promises,
+// because GX2 takes exactly that. So raw pixels are staged here: the header is
+// zeroed, the pixels copied in behind it, and the result goes down the same
+// path.
+//
+// Sized rather than allocated, because there is no allocator in this module
+// and a pool must outlive the texture. 512 KB is four 256x256 RGBA textures or
+// thirty-two 64x64 ones; past that CreateTexture refuses and says so, which is
+// better than a half-drawn texture nobody can explain.
+//
+// 4096-aligned: nvnMemoryPoolBuilderSetStorage requires page alignment and
+// fails the pool init otherwise.
+constexpr size_t kRawStageBytes = 512 * 1024;
+alignas(4096) inline uint8_t g_RawStage[kRawStageBytes];
+inline size_t g_RawStageUsed = 0;
 inline NVNmemoryPool g_StaticTexturePools[kMaxStaticTextures]{};
 inline NVNtexture    g_StaticTextures[kMaxStaticTextures]{};
 inline NVNsampler    g_StaticSamplers[kMaxStaticTextures]{};
@@ -958,7 +983,17 @@ inline void* GetGraphicsNvn() {
     return impl::GetGraphicsNvn();
 }
 
-inline TextureHandle CreateTexture(
+// Raw RGBA, the same shape GX2::CreateTexture takes, so botw.gfx can offer one
+// signature that means one thing on both backends.
+//
+// Stages the pixels behind a zeroed 0x200 header and hands that to the
+// packaged path. The header's width/height/format words are filled in from the
+// arguments, so the packaged reader downstream finds what it expects rather
+// than reading zeroes out of the padding.
+inline TextureHandle CreateTextureRaw(const void* rgba, size_t size,
+                                      int width, int height, int format);
+
+inline TextureHandle CreateTexturePackaged(
     const void* packagedData,
     size_t packagedSize,
     int minFilter = Filter::Linear,
@@ -1054,6 +1089,45 @@ inline TextureHandle CreateTexture(
     WIIXL_LOG("WiiXLaunch: CreateTexture OK (%ux%u, fmt=0x%x, handle=%p, texId=%d, smpId=%d)",
         width, height, format, reinterpret_cast<void*>(handle), texId, smpId);
     return handle;
+}
+
+// Raw pixels, staged into a pool-shaped buffer this module owns.
+//
+// The 0x200 header is not decoration: nvnMemoryPoolBuilderSetStorage takes the
+// whole buffer as the pool and the texture sits at offset 0x200 inside it, so
+// something has to occupy those bytes. CreateTexturePackaged reads width,
+// height and format back out of them, so they are written rather than left
+// zero - the two halves have to agree about the same sixteen bytes.
+inline TextureHandle CreateTextureRaw(const void* rgba, size_t size,
+                                      int width, int height, int format) {
+    constexpr size_t kHeaderSize = 0x200;
+    if (!rgba || size == 0 || width <= 0 || height <= 0) return 0;
+
+    // Each staged texture starts a new pool, and a pool must be page-aligned.
+    const size_t base = (impl::g_RawStageUsed + 4095u) & ~static_cast<size_t>(4095u);
+    const size_t need = kHeaderSize + size;
+    if (base + need > impl::kRawStageBytes) {
+        WIIXL_LOG("WiiXLaunch: CreateTextureRaw refused - %ux%u needs %u B and the "
+                  "staging arena has %u of %u left. Raise kRawStageBytes.",
+                  static_cast<uint32_t>(width), static_cast<uint32_t>(height),
+                  static_cast<uint32_t>(need),
+                  static_cast<uint32_t>(impl::kRawStageBytes - base),
+                  static_cast<uint32_t>(impl::kRawStageBytes));
+        return 0;
+    }
+
+    uint8_t* buf = impl::g_RawStage + base;
+    for (size_t i = 0; i < kHeaderSize; ++i) buf[i] = 0;
+    *reinterpret_cast<uint32_t*>(buf + 0x40) = static_cast<uint32_t>(width);
+    *reinterpret_cast<uint32_t*>(buf + 0x44) = static_cast<uint32_t>(height);
+    *reinterpret_cast<uint32_t*>(buf + 0x50) =
+        static_cast<uint32_t>(format ? format : Format::RGBA8);
+
+    const uint8_t* src = static_cast<const uint8_t*>(rgba);
+    for (size_t i = 0; i < size; ++i) buf[kHeaderSize + i] = src[i];
+
+    impl::g_RawStageUsed = base + need;
+    return CreateTexturePackaged(buf, need);
 }
 
 inline void DrawSprite(
@@ -1265,7 +1339,8 @@ inline void RegisterDrawCallback(void (*)(void*, void*, int, int)) {}
 inline void OnInitialized(void (*)()) {}
 inline Device* GetDevice() { return nullptr; }
 inline void* GetGraphicsNvn() { return nullptr; }
-inline TextureHandle CreateTexture(const void*, size_t, int = 0, int = 0, int = 0) { return 0; }
+inline TextureHandle CreateTexturePackaged(const void*, size_t, int = 0, int = 0, int = 0) { return 0; }
+inline TextureHandle CreateTextureRaw(const void*, size_t, int, int, int) { return 0; }
 inline void DrawSprite(void*, void*, TextureHandle, float, float, float, float, float = 1, float = 1, float = 1, float = 1) {}
 
 struct MeshVertex {

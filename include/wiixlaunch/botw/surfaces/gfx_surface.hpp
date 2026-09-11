@@ -345,7 +345,15 @@ extern "C" inline uint32_t GfxCreateTexture(const void* rgba, uint32_t size,
                                             int32_t width, int32_t height,
                                             int32_t format) {
     if (!rgba || size == 0 || width <= 0 || height <= 0) return 0;
+#if WIIXL_SWITCH
+    // NVN takes a memory pool, not pixels, so the backend stages these behind
+    // the 0x200 header it needs. GX2 takes pixels directly. Same arguments on
+    // both, which is the whole point of this surface - before this, width and
+    // height landed on NVN's minFilter and magFilter.
+    return StoreTexture(Backend::CreateTextureRaw(rgba, size, width, height, format));
+#else
     return StoreTexture(Backend::CreateTexture(rgba, size, width, height, format));
+#endif
 }
 
 // Loads from the title's filesystem. The path is whatever the module's loader
