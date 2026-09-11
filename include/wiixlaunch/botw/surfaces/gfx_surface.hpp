@@ -47,7 +47,9 @@ namespace WiiXLaunch::BotW::Surfaces::GfxSurface {
 
 constexpr const char* kName = "botw.gfx";
 constexpr uint16_t kVersionMajor = 1;
-constexpr uint16_t kVersionMinor = 0;
+// 1.1 appends OnInitialized. Appending bumps the MINOR, so every mod built
+// against v1.0 still resolves.
+constexpr uint16_t kVersionMinor = 1;
 
 #if WIIXL_SWITCH
 namespace Backend = WiiXLaunch::BotW::NVN;
@@ -77,6 +79,32 @@ struct DrawEntry {
 
 inline DrawEntry g_Draws[kMaxDrawCallbacks];
 inline uint32_t g_DrawCount = 0;
+
+// Modules waiting for the graphics device to exist.
+//
+// A texture cannot be created before the backend has a device, and a module
+// has no way to know when that is - Init() returns long before it. Both
+// backends have had OnInitialized the whole time and neither exposed it, so a
+// mod that wanted a texture had to guess, or create it from inside its draw
+// callback on a flag.
+//
+// Same shape as the draw registry: one slot per module, attributed, and fired
+// through one backend registration rather than one per module.
+using ModInitFn = void (*)();
+
+struct InitEntry {
+    ModInitFn fn;
+    char owner[kOwnerLen];
+    bool inUse;
+};
+
+inline InitEntry g_Inits[kMaxDrawCallbacks];
+inline uint32_t g_InitCount = 0;
+inline bool g_InitHooked = false;
+// Set once the backend has fired. A module registering AFTER that point is
+// called immediately rather than never - the device it was waiting for is
+// already there, and silence would look identical to a missing callback.
+inline bool g_InitFired = false;
 inline bool g_Hooked = false;
 
 // Its own magic, so a dump can tell a hang in a DRAW callback from a hang in a
@@ -195,6 +223,18 @@ extern "C" inline uint32_t GfxIsGX2() { return kIsGX2 ? 1u : 0u; }
 extern "C" inline uint32_t GfxSupportsBatching() { return kIsGX2 ? 1u : 0u; }
 extern "C" inline uint32_t GfxSupportsBackdrop() { return kIsGX2 ? 1u : 0u; }
 
+inline void DispatchInit() {
+    g_InitFired = true;
+    for (uint32_t i = 0; i < g_InitCount; ++i) {
+        InitEntry& e = g_Inits[i];
+        if (!e.inUse || !e.fn) continue;
+        WiiXLaunch::ModContext::SetCurrent(e.owner);
+        e.fn();
+        WiiXLaunch::ModContext::SetCurrent(nullptr);
+    }
+    WIIXL_LOG("botw.gfx: graphics up, %u module callback(s) fired", g_InitCount);
+}
+
 extern "C" inline uint32_t GfxInit() {
     Backend::Init();
     if (!g_Hooked) {
@@ -207,6 +247,56 @@ extern "C" inline uint32_t GfxInit() {
 }
 
 // --- registering to draw ---------------------------------------------------
+
+// Called once when the graphics device exists, or immediately if it already
+// does. One per module, like a draw callback.
+extern "C" inline uint32_t GfxOnInitialized(ModInitFn fn) {
+    const char* owner = WiiXLaunch::ModContext::Current();
+    if (!owner || owner[0] == '\0') {
+        WIIXL_LOG("botw.gfx: refused - an init callback belongs to a module and "
+                  "none is running");
+        return 0;
+    }
+    if (!fn) {
+        WIIXL_LOG("botw.gfx: %s passed a null init callback", owner);
+        return 0;
+    }
+    for (uint32_t i = 0; i < g_InitCount; ++i) {
+        if (SameOwner(g_Inits[i].owner, owner)) {
+            WIIXL_LOG("botw.gfx: %s already has an init callback", owner);
+            return 0;
+        }
+    }
+    if (g_InitCount >= kMaxDrawCallbacks) {
+        WIIXL_LOG("botw.gfx: %s refused - all %u init slots are taken",
+                  owner, kMaxDrawCallbacks);
+        return 0;
+    }
+
+    GfxInit();
+
+    // Already up: call it now. A module that registered late still gets its
+    // one call, which is the whole contract.
+    if (g_InitFired) {
+        WIIXL_LOG("botw.gfx: %s registered after graphics came up - calling now",
+                  owner);
+        fn();
+        return 1;
+    }
+
+    if (!g_InitHooked) {
+        g_InitHooked = true;
+        Backend::OnInitialized(&DispatchInit);
+    }
+
+    InitEntry& e = g_Inits[g_InitCount++];
+    e.fn = fn;
+    e.inUse = true;
+    CopyOwner(e.owner, owner);
+    WIIXL_LOG("botw.gfx: %s waiting for graphics (%u of %u init slots)",
+              owner, g_InitCount, kMaxDrawCallbacks);
+    return 1;
+}
 
 extern "C" inline uint32_t GfxRegisterDraw(ModDrawFn fn) {
     const char* owner = WiiXLaunch::ModContext::Current();
@@ -469,6 +559,7 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("Init",               &GfxInit),
 
     WIIXL_SURFACE_SYMBOL("RegisterDraw",       &GfxRegisterDraw),
+    WIIXL_SURFACE_SYMBOL("OnInitialized",      &GfxOnInitialized),
     WIIXL_SURFACE_SYMBOL("DrawCallbackCount",  &GfxDrawCallbackCount),
 
     WIIXL_SURFACE_SYMBOL("CreateTexture",      &GfxCreateTexture),
