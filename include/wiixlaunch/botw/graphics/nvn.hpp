@@ -8,6 +8,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include "nvn_swizzle.hpp"
 #include "shaders/default_ui_shader.hpp"
 #include "shaders/normals_sead_bin.hpp"
 
@@ -1103,9 +1104,30 @@ inline TextureHandle CreateTextureRaw(const void* rgba, size_t size,
     constexpr size_t kHeaderSize = 0x200;
     if (!rgba || size == 0 || width <= 0 || height <= 0) return 0;
 
-    // Each staged texture starts a new pool, and a pool must be page-aligned.
+    const uint32_t w = static_cast<uint32_t>(width);
+    const uint32_t h = static_cast<uint32_t>(height);
+    if (size < static_cast<size_t>(w) * h * 4u) {
+        WIIXL_LOG("WiiXLaunch: CreateTextureRaw refused - %ux%u needs %u B of RGBA "
+                  "and only %u were given", w, h,
+                  static_cast<uint32_t>(w * h * 4u), static_cast<uint32_t>(size));
+        return 0;
+    }
+
+    // TILED, NOT COPIED. The packaged path below tells NVN the storage is
+    // already in the device's own layout, so pixels in rows draw as stripes.
+    // See nvn_swizzle.hpp: those rules are checked against a real packaged
+    // texture on every build rather than asserted.
+    const uint32_t blockH = NvnSwizzle::BlockHeightFor(h);
+    const size_t tiled = NvnSwizzle::StorageSize(w, h, 4u, blockH);
+
+    // A pool must be page-aligned AND A WHOLE NUMBER OF PAGES. Only the first
+    // half of that was true here, so nvnMemoryPoolInitialize refused every raw
+    // texture a module ever asked for - 0x200 + 128*128*4 is 66048, which is
+    // not a multiple of 4096. The packaged blobs compiled into the host always
+    // were (testpic is 266240, exactly 65 pages), so this failed only on the
+    // path nothing had used yet.
     const size_t base = (impl::g_RawStageUsed + 4095u) & ~static_cast<size_t>(4095u);
-    const size_t need = kHeaderSize + size;
+    const size_t need = (kHeaderSize + tiled + 4095u) & ~static_cast<size_t>(4095u);
     if (base + need > impl::kRawStageBytes) {
         WIIXL_LOG("WiiXLaunch: CreateTextureRaw refused - %ux%u needs %u B and the "
                   "staging arena has %u of %u left. Raise kRawStageBytes.",
@@ -1117,14 +1139,14 @@ inline TextureHandle CreateTextureRaw(const void* rgba, size_t size,
     }
 
     uint8_t* buf = impl::g_RawStage + base;
-    for (size_t i = 0; i < kHeaderSize; ++i) buf[i] = 0;
+    for (size_t i = 0; i < need; ++i) buf[i] = 0;
     *reinterpret_cast<uint32_t*>(buf + 0x40) = static_cast<uint32_t>(width);
     *reinterpret_cast<uint32_t*>(buf + 0x44) = static_cast<uint32_t>(height);
     *reinterpret_cast<uint32_t*>(buf + 0x50) =
         static_cast<uint32_t>(format ? format : Format::RGBA8);
 
-    const uint8_t* src = static_cast<const uint8_t*>(rgba);
-    for (size_t i = 0; i < size; ++i) buf[kHeaderSize + i] = src[i];
+    NvnSwizzle::SwizzleRgba8(buf + kHeaderSize,
+                             static_cast<const uint8_t*>(rgba), w, h);
 
     impl::g_RawStageUsed = base + need;
     return CreateTexturePackaged(buf, need);
