@@ -31,9 +31,10 @@ namespace WiiXLaunch::BotW::Surfaces::InputSurface {
 
 constexpr const char* kName = "botw.input";
 constexpr uint16_t kVersionMajor = 1;
+// 1.2 appends GetPhysicalRightStick.
 // 1.1 appends RegisterFrame and the two calls that report it. Appending bumps
 // the MINOR, so every mod built against v1.0 still resolves.
-constexpr uint16_t kVersionMinor = 1;
+constexpr uint16_t kVersionMinor = 2;
 
 namespace impl {
 
@@ -284,6 +285,18 @@ extern "C" inline uint32_t IGetRightStick(float* out2) {
     return 1;
 }
 
+// The right stick as the player is really holding it, before any injection,
+// in raw VPAD terms (no deadzone, X not flipped) - exactly what Send takes.
+// GetRightStick reports what the GAME saw, so a mod rewriting one axis from
+// it reads its own last write back and the axis freezes. GamePad only.
+extern "C" inline uint32_t IGetPhysicalRightStick(float* out2) {
+    if (!out2) return 0;
+    float x = 0.f, y = 0.f;
+    Controller::GetPhysicalRightStick(x, y);
+    out2[0] = x; out2[1] = y;
+    return 1;
+}
+
 // --- injection -------------------------------------------------------------
 
 // Holds a mask for a number of frames, then releases on its own. A frame count
@@ -411,6 +424,9 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("RegisterFrame",     &IRegisterFrame),
     WIIXL_SURFACE_SYMBOL("FrameCallbackCount", &IFrameCallbackCount),
     WIIXL_SURFACE_SYMBOL("LogFrameState",     &ILogFrameState),
+
+    // v1.2
+    WIIXL_SURFACE_SYMBOL("GetPhysicalRightStick", &IGetPhysicalRightStick),
 };
 
 } // namespace impl

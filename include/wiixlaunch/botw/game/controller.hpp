@@ -244,6 +244,17 @@ inline State& KpadStateRef() {
     return s;
 }
 
+// The GamePad as it really was this frame, before ApplyInjection, and RAW -
+// the VPADStatus values exactly, with no deadzone and X not flipped - so it
+// round-trips through Send unchanged. The stored state above is taken after
+// injection, which is right for "what did the game see" but useless to a mod
+// rewriting one axis of a stick from the real value: it would read its own
+// last write back and the axis would freeze.
+inline State& VpadPhysicalRef() {
+    static State s;
+    return s;
+}
+
 inline const State& StateRef() {
     static State merged;
     const State& vpad = VpadStateRef();
@@ -636,6 +647,14 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(VPADReadWrapperHook) {
     static void Callback(void* obj) {
         Orig(obj);
         uint8_t* vpad = static_cast<uint8_t*>(obj) + 0x14;
+        {
+            State& phys = VpadPhysicalRef();
+            phys.hold   = *reinterpret_cast<uint32_t*>(vpad + 0x00);
+            phys.leftX  = *reinterpret_cast<float*>(vpad + 0x0C);
+            phys.leftY  = *reinterpret_cast<float*>(vpad + 0x10);
+            phys.rightX = *reinterpret_cast<float*>(vpad + 0x14);
+            phys.rightY = *reinterpret_cast<float*>(vpad + 0x18);
+        }
         ApplyInjection(vpad, *reinterpret_cast<uint32_t*>(vpad + 0x00));
 
         uint32_t hold = *reinterpret_cast<uint32_t*>(vpad + 0x00);
@@ -756,6 +775,18 @@ public:
     static void GetRightStick(float& x, float& y) {
         const impl::State& s = impl::StateRef();
         x = s.rightX; y = s.rightY;
+    }
+
+    // The GamePad's right stick as it physically was, before any injection,
+    // in raw VPAD terms (no deadzone, X not flipped) - the form Send takes.
+    // Wii U/Cemu only; zero on Switch.
+    static void GetPhysicalRightStick(float& x, float& y) {
+#if !WIIXL_SWITCH
+        const impl::State& s = impl::VpadPhysicalRef();
+        x = s.rightX; y = s.rightY;
+#else
+        x = 0.0f; y = 0.0f;
+#endif
     }
 
     // ---- Input injection -------------------------------------------------
