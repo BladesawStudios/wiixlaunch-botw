@@ -1,0 +1,215 @@
+#pragma once
+
+// BotW's load point nomination.
+//
+// The load point is a per-game, per-platform fact, so base WiiXLaunch cannot
+// know it - it owns the mechanism and never the address. Including this header
+// is what nominates BotW's. A host with no game module installed nominates
+// nothing, deploy.py emits no `.origin`, and it says so rather than producing a
+// host that boots and silently loads no mods.
+//
+// WHY THIS ADDRESS (v208 Wii U RPX, read in Ghidra):
+//
+//   FUN_03098928 is the game's FS bring-up, and is also the function the Cemu
+//   entry hook already sits on. It runs exactly once - FUN_03098a64 wraps it in
+//   an `if (singleton == 0)` guard - and internally does:
+//
+//     030989bc  bl 0x04004ed0     FSInit()
+//     030989c0  addi r3,r31,0x24  client = this + 0x24
+//     030989c4  li   r4,0
+//     030989c8  bl 0x04004e78     FSAddClient(client, 0)
+//     030989cc  lis  r11,0x30a    <- LOAD POINT
+//
+// There is no cleaner site: the instruction after FUN_03098a64 returns is a
+// vtable dispatch (0309f284 bctrl), so any post-FS-init point is necessarily
+// mid-function.
+//
+// WHY NOMINATE AT ALL, given the Cemu probe found FS already usable at the
+// entry hook itself: that result is emulator-specific. Cemu HLEs coreinit, so
+// the filesystem is live from process start and the game's own FSInit concerns
+// the game's client rather than the subsystem. Aroma runs against real IOSU and
+// Switch has its own romfs mount timing; neither has been probed. Nomination is
+// the only mechanism validated for the case where FS is genuinely not ready
+// early, which is exactly what those two may turn out to be. See
+// docs/loader.md in base WiiXLaunch.
+//
+// THE BRANCH IS EMITTED BY THE PACK, NOT WRITTEN AT RUNTIME. deploy.py puts
+// `.origin = 0x030989CC / b wiixlaunch_loadpoint_stub` in patch_*.asm next to
+// the entry hook. Writing it from WiiXLaunch_Init would mean modifying code
+// inside a function Cemu may already have recompiled on entry at 0x03098928,
+// and it would break the rule that only the host pack writes into game memory.
+//
+// SAFETY OF THE SITE, checked rather than assumed: nothing xrefs 0x030989CC, so
+// the branch cannot be landed on from elsewhere, and the displaced instruction
+// is position-independent (`lis r11,0x30a` - no relative branch, no PC-relative
+// addressing), so it re-executes correctly from the codecave. Its pair, the
+// `subi r11,r11,0x7880` at 0x030989D4 that completes the address load, is one
+// instruction past the return address and is left untouched.
+
+#include <wiixlaunch/platform.hpp>
+#include <wiixlaunch/loader/load_point.hpp>
+#include <wiixlaunch/loader/loader.hpp>
+#include <wiixlaunch/hook_manager.hpp>
+#include <wiixlaunch/hook_probe.hpp>
+#include <wiixlaunch/patches.hpp>
+#include <wiixlaunch/tick.hpp>
+#include <wiixlaunch/net.hpp>
+#include <wiixlaunch/botw/game/player.hpp>
+#include <wiixlaunch/botw/surfaces.hpp>
+#include <wiixlaunch/loader/core_surface.hpp>
+
+#if WIIXL_CEMU
+
+WIIXL_DECLARE_LOAD_POINT(0x030989CC);
+
+extern "C" void WiiXLaunch_LoadPointStub();
+
+// Runs at the load point: this is where modules are read and started.
+//
+// The probe stays first. It costs one FSOpenFile and confirms the filesystem is
+// actually usable at this site before the loader assumes it, which is the thing
+// the whole stage-1 measurement established and the one assumption most likely
+// to change if the game version or the emulator moves.
+//
+// `used` because the ONLY caller is the asm stub below, which the compiler
+// cannot see - an inline function no C++ expression odr-uses is never emitted,
+// and the link fails with an undefined reference from the asm block. Same rule
+// as the deploy.py-patched globals: a symbol written or called by something
+// outside the compiler's view has to be pinned. See docs/modules.md.
+extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
+    WiiXLaunch::LoadPoint::Probe("post-fsaddclient");
+
+    // What this host is and what it offers, logged before any module is read,
+    // so a rejection further down can be read against it.
+    WIIXL_LOG("[loader] host ABI v%u, format v%u",
+              WiiXLaunch::Core::kAbiVersion, WiiXLaunch::Wxlm::kFormatVersion);
+    WiiXLaunch::Surface::LogRegistered();
+
+    // Every module in the directory, in lexical filename order - which is also
+    // hook priority, so it is a specification rather than an enumeration
+    // artefact. See docs/loader.md.
+    const uint32_t loaded = WiiXLaunch::Loader::LoadAll("WiiXLaunch/mods");
+
+    // --- declared patches, settled before a single entry runs ---------------
+    //
+    // Applied during the loads above; verified and put back HERE, between
+    // LoadAll and RunPhase, so no module code executes while the game is
+    // modified. That ordering is the whole reason the demonstration is safe
+    // whatever address it picks - see examples/patch_mod/mod.cpp.
+    //
+    // This was WRONG in the first version and the boot log said so: these three
+    // calls sat after RunPhase, so the patch was live across every module entry
+    // - about 5ms rather than the microseconds the comment claimed. The comment
+    // was right about the intent and the code did something else, which is
+    // exactly the kind of disagreement a log is for.
+    //
+    // The host READS each target back rather than believing the applier. A
+    // refusal is self-evidencing because nothing changed; a success is not.
+    //
+    // A host shipping REAL patch mods must delete the RestoreAll call - a patch
+    // is meant to persist. This build ships only demonstration modules.
+    WiiXLaunch::Patches::VerifyApplied();
+    WiiXLaunch::Patches::RestoreAll();
+    WiiXLaunch::Patches::LogState();
+
+    if (loaded != 0) {
+        WiiXLaunch::Loader::RunPhase(WiiXLaunch::Wxlm::Phase::Load);
+    } else {
+        // A module that was found and REJECTED must not report as an absent
+        // one. The first boot printed "no module ... nothing to load" for a
+        // module the loader had opened, read, and refused mid-parse - the
+        // reason was three lines above in the log, and the summary contradicted
+        // it. Only the loader knows which happened, so it says so by name.
+        WIIXL_LOG("[loader] no modules loaded. The game boots normally either way; "
+                  "if the directory is simply empty that is the default state of a "
+                  "fresh host, and the lines above say which it was.");
+    }
+
+    // Run the hook probe and let the HOST check the sequence.
+    //
+    // The five log lines the demonstration mods print are readable, but reading
+    // them is not a test - a missing line reads as a shorter log. So the host
+    // calls the probe, and hook_probe.hpp checks length, nesting and order
+    // against the hook registry, with tags it bound itself. It prints PASS or
+    // FAIL; nothing here is left to the eye.
+    {
+        const uintptr_t probe = WiiXLaunch::Core::impl::CoreHookProbeTarget();
+        if (probe) {
+            auto fn = reinterpret_cast<void (*)()>(probe);
+            WIIXL_LOG("HookProbe: calling the probe at %p", reinterpret_cast<void*>(probe));
+            fn();
+            WiiXLaunch::HookProbe::Verify(probe);
+        }
+    }
+
+    // Every hook in the process, and every address more than one owner touched.
+    // Printed AFTER modules load, because a mod installing a hook is exactly
+    // the case this summary exists for - the short list of shared addresses is
+    // the first thing worth reading when two mods together misbehave.
+    // Registered ticks, and whether anything will ever drive them.
+    WiiXLaunch::Tick::LogState();
+
+    // Who holds a socket, printed next to who holds a tick. A freeze report
+    // that says "module X was in flight" AND "module X holds 8 sockets" is a
+    // much narrower starting point than either line alone.
+    WiiXLaunch::Net::LogState();
+
+    // The OTHER per-frame registry. botw.player's tick fires after Player's own
+    // state refresh, which is a different point in the frame from the host's
+    // GX2-swap tick - so both are reported, and neither is inferable from the
+    // other. A mod registered in one and expecting the other would otherwise
+    // look identical to a mod that is simply not running.
+    WiiXLaunch::BotW::Player::LogTickState();
+
+    // The two drawing registries. A mod that registered to draw and never
+    // appears has one of two problems - it did not register, or nothing drives
+    // the frame - and these lines tell those apart.
+    // The frame dispatcher, which is the sturdier of the two per-frame sources:
+    // it survives the title screen where the player tick does not.
+    WiiXLaunch::BotW::Surfaces::InputSurface::LogState();
+    WiiXLaunch::BotW::Surfaces::GfxSurface::LogState();
+    WiiXLaunch::BotW::Surfaces::GuiSurface::LogState();
+
+    WiiXLaunch::Hooks::LogState();
+}
+
+// Register-preserving stub. The frame layout matches WiiXLaunch_Cemu_Init
+// exactly (0x2000 bytes, r2-r31 at 0x1F80, LR at 0x2004, CR at 0x2008) because
+// that one is known to work; this is not the place to invent a new one.
+//
+// Only ONE instruction is displaced, not four: the pack emits a single `b`, the
+// same shape as the entry hook, rather than a 16-byte long jump. It has to run
+// AFTER the restore, because r11 is inside the r2-r31 range lmw rewrites.
+asm(
+    ".section .text.WiiXLaunch_LoadPointStub\n"
+    ".global WiiXLaunch_LoadPointStub\n"
+    "WiiXLaunch_LoadPointStub:\n"
+    "mflr 0\n"
+    "stwu 1, -0x2000(1)\n"
+    "stw 0, 0x2004(1)\n"
+    "mfcr 0\n"
+    "stw 0, 0x2008(1)\n"
+    "stmw 2, 0x1F80(1)\n"
+
+    "bl WiiXLaunch_LoadPointProbe\n"
+
+    "lmw 2, 0x1F80(1)\n"
+    "lwz 0, 0x2008(1)\n"
+    "mtcr 0\n"
+    "lwz 0, 0x2004(1)\n"
+    "mtlr 0\n"
+    "addi 1, 1, 0x2000\n"
+
+    // The one instruction displaced from 0x030989CC by the pack's `b`.
+    "lis 11, 0x30a\n"
+
+    // Back to 0x030989D0. Literal immediates, so no relocation entry is
+    // emitted and deploy.py leaves them alone - correct for a game address
+    // that is already absolute.
+    "lis 12, 0x0309\n"
+    "ori 12, 12, 0x89d0\n"
+    "mtctr 12\n"
+    "bctr\n"
+);
+
+#endif // WIIXL_CEMU

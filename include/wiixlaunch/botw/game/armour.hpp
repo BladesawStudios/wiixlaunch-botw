@@ -881,6 +881,26 @@ inline int GetExtraEffect(Piece piece, Effect effect) {
 #endif
 }
 
+// Drops the extras on ONE slot, leaving the other two alone.
+//
+// RecomputeExtraAny rather than clearing the flag: the other pieces may still
+// carry extras, and ExtraAny() false while the table is non-empty would make
+// the read hook take its fast path and report the real effects.
+inline bool ClearPieceExtraEffects(Piece piece) {
+#if !WIIXL_SWITCH
+    const int slot = static_cast<int>(piece);
+    if (slot < 0 || slot >= impl::kPieceCount) return false;
+    auto& table = impl::ExtraTable();
+    for (int effect = 0; effect < kEffectSlots; ++effect) table[slot][effect] = 0;
+    impl::RecomputeExtraAny();
+    Refresh();
+    return true;
+#else
+    (void)piece;
+    return false;
+#endif
+}
+
 // Drops every extra on all three slots.
 inline void ClearExtraEffects() {
 #if !WIIXL_SWITCH

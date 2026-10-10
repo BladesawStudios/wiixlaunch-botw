@@ -13,7 +13,7 @@
 #include "gui_backend.hpp"
 #include "../graphics/bflim.hpp"
 #include "../graphics/bffnt.hpp"
-#include "../platform/fs.hpp"
+#include <wiixlaunch/fs.hpp>
 #include "../platform/yaz0.hpp"
 #include "../platform/sarc.hpp"
 #include "../platform/log.hpp"
@@ -29,7 +29,7 @@
 //                                          -> timg/*.bflim  (see gui_render.hpp's table)
 //
 // - and streams the pieces it wants straight into GPU memory. The layout
-// archive is 31 MB decompressed and the whole Cemu payload heap is 6 MB, so
+// archive is 31 MB decompressed and the whole Cemu payload heap is under 4 MB, so
 // the archives are never held in memory: a 4 KB-window Yaz0 decoder
 // (platform/yaz0.hpp) runs over 64 KB compressed chunks read at file
 // offsets (FS::File::ReadAt) and a sink copies out only the byte ranges the
@@ -96,7 +96,7 @@ struct LoaderState {
     const char* fontArchivePath = nullptr;
     const char* layoutArchivePath = nullptr;
 
-    FS::File file;
+    WiiXLaunch::FS::File file;
     uint32_t streamPos = 0;         // next compressed byte to read (absolute file offset)
     uint32_t streamEnd = 0;
     Yaz0::StreamDecoder decoder;

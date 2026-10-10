@@ -3,6 +3,8 @@
 #include <wiixlaunch/platform.hpp>
 #include <wiixlaunch/hook.hpp>
 #include <wiixlaunch/call.hpp>
+#include <wiixlaunch/debug_log.hpp>
+#include <wiixlaunch/mod_context.hpp>
 #include "actor.hpp"
 
 // WiiXLaunch::BotW::Player - ksys::act::Player state, ported from the
@@ -28,6 +30,101 @@ using TickCallback = void (*)();
 inline TickCallback& TickCallbackRef() {
     static TickCallback cb = nullptr;
     return cb;
+}
+
+// ---------------------------------------------------------------------------
+// THE PLAYER TICK, FOR MORE THAN ONE CALLER.
+//
+// TickCallbackRef above is ONE slot, and "call again to replace it" is fine for
+// a source mod that can see the whole tree and chain by hand - which is exactly
+// what events.hpp tells you to do.
+//
+// It is not fine for compiled binaries. Two .wxlm mods that both want the
+// player tick cannot see each other, so the second one silently evicts the
+// first, and the mod that stops working is the one that did nothing wrong.
+// That is the failure class this whole architecture exists to remove, so the
+// surface does not expose the single slot; it exposes this registry.
+//
+// Deliberately a mirror of base's WiiXLaunch::Tick rather than a use of it: the
+// two fire at DIFFERENT POINTS IN THE FRAME. Base's tick runs at the GX2 swap,
+// after the frame is drawn; this one runs immediately after Player's own cached
+// state has been refreshed, which is the only place a mod can read this frame's
+// position or consume this frame's attack event. A mod that needs one does not
+// want the other.
+//
+// The single slot still works and still runs, first, so nothing that used it
+// breaks.
+// ---------------------------------------------------------------------------
+
+constexpr uint32_t kMaxPlayerTicks = 8;
+constexpr uint32_t kPlayerTickOwnerLen = 17;
+constexpr uint32_t kPlayerTickAnnounceFirst = 3;
+
+struct PlayerTickEntry {
+    TickCallback fn;
+    char owner[kPlayerTickOwnerLen];
+    uint32_t calls;
+    bool inUse;
+};
+
+inline PlayerTickEntry g_PlayerTicks[kMaxPlayerTicks];
+inline uint32_t g_PlayerTickCount = 0;
+
+// The same hang-attribution marker base's Tick carries, for the same reason: a
+// mod that spins in a player tick freezes the game, and the report that arrives
+// is "it hangs with these mods installed". Its own magic, because it is its own
+// dispatcher and confusing the two records would be worse than having neither.
+struct PlayerTickInFlight {
+    uint32_t magic;       // 'WXPT'
+    uint32_t sequence;    // ++ per call; frozen means frozen
+    uint32_t depth;
+    char     owner[kPlayerTickOwnerLen];
+    char     pad[3];
+};
+
+constexpr uint32_t kPlayerTickMagic = 0x57585054u;   // 'WXPT'
+
+inline PlayerTickInFlight g_PlayerTickInFlight = { kPlayerTickMagic, 0, 0, {0}, {0} };
+
+inline void CopyTickOwner(char* dst, const char* src) {
+    uint32_t i = 0;
+    for (; i + 1 < kPlayerTickOwnerLen && src && src[i]; ++i) dst[i] = src[i];
+    dst[i] = '\0';
+}
+
+inline bool SameTickOwner(const char* a, const char* b) {
+    for (uint32_t i = 0; i < kPlayerTickOwnerLen; ++i) {
+        if (a[i] != b[i]) return false;
+        if (a[i] == '\0') return true;
+    }
+    return true;
+}
+
+inline void RunPlayerTicks() {
+    for (uint32_t i = 0; i < g_PlayerTickCount; ++i) {
+        PlayerTickEntry& e = g_PlayerTicks[i];
+        if (!e.inUse || !e.fn) continue;
+
+        // BEFORE the call, so a freeze leaves this behind naming the culprit.
+        g_PlayerTickInFlight.sequence++;
+        g_PlayerTickInFlight.depth++;
+        CopyTickOwner(g_PlayerTickInFlight.owner, e.owner);
+
+        // The callback is this module running, so its identity applies - a file
+        // read or an allocation from inside one is charged to the right mod
+        // rather than to whoever ran last.
+        WiiXLaunch::ModContext::SetCurrent(e.owner);
+        e.fn();
+        WiiXLaunch::ModContext::SetCurrent(nullptr);
+
+        g_PlayerTickInFlight.depth--;
+        g_PlayerTickInFlight.owner[0] = '\0';
+
+        e.calls++;
+        if (e.calls <= kPlayerTickAnnounceFirst) {
+            WIIXL_LOG("PlayerTick: %s ran (call %u)", e.owner, e.calls);
+        }
+    }
 }
 
 #if !WIIXL_SWITCH
@@ -171,7 +268,10 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(PlayerTickHook) {
         }
 #endif
 
+        // The legacy single slot first, then every registered module - so a
+        // source mod that took the slot keeps the position it had.
         if (TickCallback cb = TickCallbackRef()) cb();
+        RunPlayerTicks();
     }
 };
 
@@ -179,10 +279,102 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(PlayerTickHook) {
 
 class Player {
 public:
-    // Installs the per-frame tick hook. Call once from WiiXLaunch_Init(),
-    // before relying on any other Player method.
-    static void Init() {
+    // Installs the per-frame tick hook. Call once, before relying on any other
+    // Player method.
+    //
+    // IDEMPOTENT, and it has to be now that botw.player exposes it: several
+    // mods may each call Init because each of them needs the cached state, and
+    // none can see that another already did. Without the guard the second call
+    // CHAINS a second copy of the hook - InstallVia goes to the central hook
+    // manager - so the callback runs twice a frame and OrigRef is rewritten.
+    // Returns true if this call is the one that installed it.
+    static bool Init() {
+        static bool installed = false;
+        if (installed) return false;
+        installed = true;
         impl::PlayerTickHook::Install(0x873374, 0x02d67cf4);
+        WIIXL_LOG("Player: per-frame tick hook installed");
+        return true;
+    }
+
+    static bool IsInitialised() { return impl::RawPlayerRef() != nullptr; }
+
+    // --- the player tick, for compiled mods --------------------------------
+    //
+    // OnTick below is one slot and stays that way. This is the registry, and it
+    // is what botw.player exposes, because two .wxlm mods cannot see each other
+    // and the single slot would let one silently evict the other.
+    //
+    // The owner is NOT a parameter: it comes from ModContext, the module the
+    // host is running, so a hang in a player tick names the mod that really
+    // registered it rather than one that claims to have.
+    enum class TickRegister : uint32_t {
+        Ok = 0,
+        NoModule,
+        NullCallback,
+        NoSlots,
+        AlreadyRegistered,
+    };
+
+    static const char* TickRegisterName(TickRegister r) {
+        switch (r) {
+            case TickRegister::Ok:                return "OK";
+            case TickRegister::NoModule:          return "NO-MODULE";
+            case TickRegister::NullCallback:      return "NULL-CALLBACK";
+            case TickRegister::NoSlots:           return "NO-SLOTS";
+            case TickRegister::AlreadyRegistered: return "ALREADY-REGISTERED";
+        }
+        return "?";
+    }
+
+    static TickRegister AddTick(impl::TickCallback fn) {
+        const char* owner = WiiXLaunch::ModContext::Current();
+        if (!owner || owner[0] == '\0') {
+            WIIXL_LOG("PlayerTick: refused NO-MODULE - a player tick is registered "
+                      "by a module, and none is running");
+            return TickRegister::NoModule;
+        }
+        if (!fn) {
+            WIIXL_LOG("PlayerTick: %s refused NULL-CALLBACK", owner);
+            return TickRegister::NullCallback;
+        }
+        for (uint32_t i = 0; i < impl::g_PlayerTickCount; ++i) {
+            if (impl::SameTickOwner(impl::g_PlayerTicks[i].owner, owner)) {
+                WIIXL_LOG("PlayerTick: %s refused ALREADY-REGISTERED - one per "
+                          "module; call what you need from the one you have", owner);
+                return TickRegister::AlreadyRegistered;
+            }
+        }
+        if (impl::g_PlayerTickCount >= impl::kMaxPlayerTicks) {
+            WIIXL_LOG("PlayerTick: %s refused NO-SLOTS - all %u slots are taken",
+                      owner, impl::kMaxPlayerTicks);
+            return TickRegister::NoSlots;
+        }
+
+        impl::PlayerTickEntry& e = impl::g_PlayerTicks[impl::g_PlayerTickCount++];
+        e.fn = fn;
+        e.calls = 0;
+        e.inUse = true;
+        impl::CopyTickOwner(e.owner, owner);
+
+        WIIXL_LOG("PlayerTick: %s registered (%u of %u slots used)",
+                  e.owner, impl::g_PlayerTickCount, impl::kMaxPlayerTicks);
+        return TickRegister::Ok;
+    }
+
+    static uint32_t TickCount() { return impl::g_PlayerTickCount; }
+
+    // Reported at the load point, next to the host's own tick summary.
+    static void LogTickState() {
+        if (impl::g_PlayerTickCount == 0) {
+            WIIXL_LOG("PlayerTick: no module registered a player tick");
+            return;
+        }
+        WIIXL_LOG("PlayerTick: %u module(s) registered, driven by Player's own tick "
+                  "hook (after this frame's state refresh)", impl::g_PlayerTickCount);
+        for (uint32_t i = 0; i < impl::g_PlayerTickCount; ++i) {
+            WIIXL_LOG("PlayerTick:   %u. %s", i + 1, impl::g_PlayerTicks[i].owner);
+        }
     }
 
     // Escape hatch to the raw ksys::act::Player* (GameROMPlayer).
@@ -215,7 +407,13 @@ public:
     // cached state (weapon getters, position, attack tracking) has been
     // refreshed for that frame - the place to put per-frame mod logic
     // (e.g. checking ConsumeAttackEvent()) without installing your own tick
-    // hook. Only one callback slot; call again to replace it.
+    // hook. ONE callback slot; call again to replace it.
+    //
+    // For SOURCE mods, which can see the whole tree and chain by hand. A
+    // compiled .wxlm must use AddTick instead - it cannot know whether another
+    // module already holds this slot, and evicting one silently is exactly the
+    // failure the surface exists to prevent. Both run: this one first, then
+    // every registered module.
     static void OnTick(impl::TickCallback callback) { impl::TickCallbackRef() = callback; }
 
     static Actor GetEquippedSword() {

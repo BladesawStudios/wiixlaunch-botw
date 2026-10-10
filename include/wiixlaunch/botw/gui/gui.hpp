@@ -1405,7 +1405,7 @@ inline void SetLoadBudget(uint32_t chunksPerFrame) { impl::g_Loader.chunksPerSte
 // started, the archive has already gone past.
 //
 // Only Normal_00 is loaded by default: all six are 2.9 MB of glyph sheets and
-// the payload heap is 6 MB. FontSheetBytes(id) is what one costs. A style
+// the payload heap is under 4 MB. FontSheetBytes(id) is what one costs. A style
 // naming a font that was never requested falls back to Normal, so this changes
 // how text looks, never whether it appears.
 inline void RequestFont(FontId f, bool load = true) {

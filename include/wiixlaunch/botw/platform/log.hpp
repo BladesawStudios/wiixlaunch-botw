@@ -7,7 +7,9 @@
 #include <cstdarg>
 
 #if WIIXL_CEMU
-#include "cemu_logging.hpp"
+// The coreinit OSReport shim table lives in base WiiXLaunch - OSReport is
+// coreinit, not BotW. This header stays for the BotW-flavoured OSLog name.
+#include <wiixlaunch/cemu/cemu_logging.hpp>
 #endif
 
 namespace WiiXLaunch::BotW {

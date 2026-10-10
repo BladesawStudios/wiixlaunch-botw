@@ -8,7 +8,7 @@
 #include <wiixlaunch/call.hpp>
 #include <wiixlaunch/debug_log.hpp>
 #include <wiixlaunch/botw/game/memory.hpp>
-#include <wiixlaunch/botw/platform/fs.hpp>
+#include <wiixlaunch/fs.hpp>
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
@@ -70,7 +70,7 @@ public:
     //
     // esetlistPath is a content-relative path, e.g.
     // "Effect/SplPwr_Tooreroof_Ring.sesetlist", resolved the same way
-    // FS::ReadFile resolves any other content path.
+    // WiiXLaunch::FS::ReadFile resolves any other content path.
     //
     // scale is per-axis and multiplies the eset's own authored size; rotation
     // is degrees about the world X, Y and Z axes respectively, applied in
@@ -282,7 +282,7 @@ private:
                 return -1;
             }
             size_t readBytes = 0;
-            bool ok = WiiXLaunch::BotW::FS::ReadFile(res.path, res.buffer, kVfxBufSize, &readBytes);
+            bool ok = WiiXLaunch::FS::ReadFile(res.path, res.buffer, kVfxBufSize, &readBytes);
             if (!ok || readBytes == 0) {
                 WIIXL_LOG("WiiXLaunch::Vfx: failed to load %s", res.path);
                 return -1;
