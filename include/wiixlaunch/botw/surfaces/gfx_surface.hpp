@@ -48,9 +48,10 @@ namespace WiiXLaunch::BotW::Surfaces::GfxSurface {
 constexpr const char* kName = "botw.gfx";
 constexpr uint16_t kVersionMajor = 1;
 // 1.1 appends OnInitialized. Appending bumps the MINOR, so every mod built
-// against v1.0 still resolves. 1.2 appends the shader pass: CreateShaderPass,
-// DrawShaderPass and SupportsShaderPass. 1.3 appends SceneDepthReady, and DrawShaderPass then binds the scene's
-// depth as texture 1. 1.4 appends RegisterPreUiDraw and PreUiReady.
+// against v1.0 still resolves. 1.2 appends SupportsDrawBeforeHud and RegisterDrawBeforeHud (a callback under the HUD,
+// run from the HUD layer's own draw). 1.3 appends the shader pass - CreateShaderPass, DrawShaderPass and
+// SupportsShaderPass - and SceneDepthReady, after which DrawShaderPass binds the scene's depth as texture 1. 1.4 appends
+// RegisterPreUiDraw and PreUiReady: a callback run on every HUD composite, with a private context state, for passes.
 constexpr uint16_t kVersionMinor = 4;
 
 #if WIIXL_SWITCH
@@ -85,6 +86,11 @@ inline uint32_t g_DrawCount = 0;
 inline DrawEntry g_PreUiDraws[kMaxDrawCallbacks];
 inline uint32_t g_PreUiCount = 0;
 inline bool g_PreUiHooked = false;
+
+// The same, for callbacks drawn under the HUD (GX2 only).
+inline DrawEntry g_PreHudDraws[kMaxDrawCallbacks];
+inline uint32_t g_PreHudDrawCount = 0;
+inline bool g_PreHudHooked = false;
 
 // Modules waiting for the graphics device to exist.
 //
@@ -141,9 +147,9 @@ inline bool SameOwner(const char* a, const char* b) {
     return true;
 }
 
-// Runs one list of mod draw callbacks, each attributed. A frozen frame names the module that froze it.
-inline void RunDrawList(DrawEntry* list, uint32_t count, Backend::CommandBuffer* cmdBuf, void* dstTexture,
-                        int width, int height) {
+inline void DispatchList(DrawEntry* list, uint32_t count,
+                         Backend::CommandBuffer* cmdBuf, void* dstTexture,
+                         int width, int height) {
     for (uint32_t i = 0; i < count; ++i) {
         DrawEntry& e = list[i];
         if (!e.inUse || !e.fn) continue;
@@ -166,12 +172,18 @@ inline void RunDrawList(DrawEntry* list, uint32_t count, Backend::CommandBuffer*
 }
 
 // The one callback the module sees. Everything a mod registered runs from here.
-inline void DispatchDraw(Backend::CommandBuffer* cmdBuf, void* dstTexture, int width, int height) {
-    RunDrawList(g_Draws, g_DrawCount, cmdBuf, dstTexture, width, height);
+inline void DispatchDraw(Backend::CommandBuffer* cmdBuf, void* dstTexture,
+                         int width, int height) {
+    DispatchList(g_Draws, g_DrawCount, cmdBuf, dstTexture, width, height);
+}
+
+inline void DispatchPreHudDraw(Backend::CommandBuffer* cmdBuf, void* dstTexture,
+                               int width, int height) {
+    DispatchList(g_PreHudDraws, g_PreHudDrawCount, cmdBuf, dstTexture, width, height);
 }
 
 inline void DispatchPreUi(Backend::CommandBuffer* cmdBuf, void* dstTexture, int width, int height) {
-    RunDrawList(g_PreUiDraws, g_PreUiCount, cmdBuf, dstTexture, width, height);
+    DispatchList(g_PreUiDraws, g_PreUiCount, cmdBuf, dstTexture, width, height);
 }
 
 // --- texture handles -------------------------------------------------------
@@ -201,6 +213,12 @@ inline MeshSlot g_Meshes[kMaxMeshes];
 inline uint32_t StoreTexture(Backend::TextureHandle native) {
     if (!native) return 0;
     const char* owner = WiiXLaunch::ModContext::Current();
+
+    for (uint32_t i = 0; i < kMaxTextures; ++i) {
+        const TexSlot& s = g_Textures[i];
+        if (s.used && s.native == native)
+            return (static_cast<uint32_t>(s.generation) << 16) | (i + 1u);
+    }
 
     for (uint32_t i = 0; i < kMaxTextures; ++i) {
         if (g_Textures[i].used) continue;
@@ -353,6 +371,59 @@ extern "C" inline uint32_t GfxRegisterDraw(ModDrawFn fn) {
 }
 
 extern "C" inline uint32_t GfxDrawCallbackCount() { return g_DrawCount; }
+
+// Under the HUD rather than over it: the callback runs after the world and its
+// post effects are drawn and before any HUD or menu pane, on the TV image, in a
+// context state of its own. Same arguments and same rules as RegisterDraw -
+// one per module, and cmdBuf/dstTexture are only valid inside the call.
+extern "C" inline uint32_t GfxSupportsDrawBeforeHud() { return kIsGX2 ? 1u : 0u; }
+
+extern "C" inline uint32_t GfxRegisterDrawBeforeHud(ModDrawFn fn) {
+#if WIIXL_SWITCH
+    (void)fn;
+    return 0;
+#else
+    const char* owner = WiiXLaunch::ModContext::Current();
+    if (!owner || owner[0] == '\0') {
+        WIIXL_LOG("botw.gfx: refused - a pre-HUD draw callback belongs to a module "
+                  "and none is running");
+        return 0;
+    }
+    if (!fn) {
+        WIIXL_LOG("botw.gfx: %s passed a null pre-HUD draw callback", owner);
+        return 0;
+    }
+    for (uint32_t i = 0; i < g_PreHudDrawCount; ++i) {
+        if (SameOwner(g_PreHudDraws[i].owner, owner)) {
+            WIIXL_LOG("botw.gfx: %s already has a pre-HUD draw callback", owner);
+            return 0;
+        }
+    }
+    if (g_PreHudDrawCount >= kMaxDrawCallbacks) {
+        WIIXL_LOG("botw.gfx: %s refused - all %u pre-HUD draw slots are taken",
+                  owner, kMaxDrawCallbacks);
+        return 0;
+    }
+
+    // The swap hook still has to run: it builds the pipelines, finds the TV
+    // buffer and turns the vertex ring over each frame.
+    GfxInit();
+    if (!g_PreHudHooked) {
+        g_PreHudHooked = true;
+        Backend::RegisterPreHudDrawCallback(&DispatchPreHudDraw);
+    }
+
+    DrawEntry& e = g_PreHudDraws[g_PreHudDrawCount++];
+    e.fn = fn;
+    e.calls = 0;
+    e.inUse = true;
+    CopyOwner(e.owner, owner);
+
+    WIIXL_LOG("botw.gfx: %s registered a pre-HUD draw callback (%u of %u)",
+              e.owner, g_PreHudDrawCount, kMaxDrawCallbacks);
+    return 1;
+#endif
+}
 
 // --- textures --------------------------------------------------------------
 
@@ -699,10 +770,17 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("BackdropTexture",    &GfxBackdropTexture),
     WIIXL_SURFACE_SYMBOL("AllocMEM1",          &GfxAllocMEM1),
 
+    // v1.2
+    WIIXL_SURFACE_SYMBOL("SupportsDrawBeforeHud", &GfxSupportsDrawBeforeHud),
+    WIIXL_SURFACE_SYMBOL("RegisterDrawBeforeHud", &GfxRegisterDrawBeforeHud),
+
+    // v1.3
     WIIXL_SURFACE_SYMBOL("CreateShaderPass",   &GfxCreateShaderPass),
     WIIXL_SURFACE_SYMBOL("DrawShaderPass",     &GfxDrawShaderPass),
     WIIXL_SURFACE_SYMBOL("SupportsShaderPass", &GfxSupportsShaderPass),
     WIIXL_SURFACE_SYMBOL("SceneDepthReady",    &GfxSceneDepthReady),
+
+    // v1.4
     WIIXL_SURFACE_SYMBOL("RegisterPreUiDraw",  &GfxRegisterPreUiDraw),
     WIIXL_SURFACE_SYMBOL("PreUiReady",         &GfxPreUiReady),
 };
@@ -711,13 +789,18 @@ inline const Surface::Symbol kSymbols[] = {
 
 // Reported at the load point, beside the tick registries.
 inline void LogState() {
-    if (impl::g_DrawCount == 0) {
+    if (impl::g_DrawCount == 0 && impl::g_PreHudDrawCount == 0) {
         WIIXL_LOG("botw.gfx: no module registered a draw callback");
         return;
     }
     WIIXL_LOG("botw.gfx: %u module(s) drawing into the frame", impl::g_DrawCount);
     for (uint32_t i = 0; i < impl::g_DrawCount; ++i) {
         WIIXL_LOG("botw.gfx:   %u. %s", i + 1, impl::g_Draws[i].owner);
+    }
+    if (impl::g_PreHudDrawCount == 0) return;
+    WIIXL_LOG("botw.gfx: %u module(s) drawing under the HUD", impl::g_PreHudDrawCount);
+    for (uint32_t i = 0; i < impl::g_PreHudDrawCount; ++i) {
+        WIIXL_LOG("botw.gfx:   %u. %s", i + 1, impl::g_PreHudDraws[i].owner);
     }
 }
 

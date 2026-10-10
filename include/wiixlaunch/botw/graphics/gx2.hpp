@@ -206,16 +206,21 @@ inline void* GetGraphicsContext() {
     return *reinterpret_cast<void**>(kGraphicsContextSlot);
 }
 
+// Set while drawing from the middle of the game's frame (the pre-HUD
+// callbacks), so every draw path below programs a private context state
+// instead of the game's. See RunPreHud.
+inline void* g_ContextOverride = nullptr;
+
 inline void* GetContextState() {
+    if (g_ContextOverride) return g_ContextOverride;
     void* ctx = GetGraphicsContext();
     if (!ctx) return nullptr;
     return *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(ctx) + kContextStateOffset);
 }
 
-// A mid-frame draw must not leave its register writes in the game's own context state, so it runs through one the
-// host owns and hands the game's back afterwards. Null means draw through the game's, which is right at scan-out.
-inline void* g_ContextOverride = nullptr;
-inline void* DrawContext() { return g_ContextOverride ? g_ContextOverride : GetContextState(); }
+// What every draw path programs: the private context state while a mid-frame draw is running (g_ContextOverride, above),
+// the game's own otherwise. GetContextState() already makes that choice; this is the name the shader-pass code uses.
+inline void* DrawContext() { return GetContextState(); }
 
 using FnSetContextState       = void (*)(void* contextState);
 using FnInvalidate            = void (*)(uint32_t mode, void* buffer, uint32_t size);
@@ -262,6 +267,7 @@ using FnSetupContextStateEx   = void (*)(void* contextState, uint32_t loadDefaul
 
 #if WIIXL_CEMU
 inline FnSetContextState SetContextState() { return WiiXLaunch::Backend::ResolveGx2<FnSetContextState>(WiiXLaunch::Backend::Gx2Import::SetContextState); }
+inline FnSetupContextStateEx SetupContextStateEx() { return WiiXLaunch::Backend::ResolveGx2<FnSetupContextStateEx>(WiiXLaunch::Backend::Gx2Import::SetupContextStateEx); }
 inline FnInvalidate Invalidate() { return WiiXLaunch::Backend::ResolveGx2<FnInvalidate>(WiiXLaunch::Backend::Gx2Import::Invalidate); }
 inline FnSetAttribBuffer SetAttribBuffer() { return WiiXLaunch::Backend::ResolveGx2<FnSetAttribBuffer>(WiiXLaunch::Backend::Gx2Import::SetAttribBuffer); }
 inline FnCalcFetchShaderSizeEx CalcFetchShaderSizeEx() { return WiiXLaunch::Backend::ResolveGx2<FnCalcFetchShaderSizeEx>(WiiXLaunch::Backend::Gx2Import::CalcFetchShaderSizeEx); }
@@ -295,9 +301,9 @@ inline FnInitDepthBufferRegs InitDepthBufferRegs() { return WiiXLaunch::Backend:
 inline FnSetDepthBuffer SetDepthBuffer() { return WiiXLaunch::Backend::ResolveGx2<FnSetDepthBuffer>(WiiXLaunch::Backend::Gx2Import::SetDepthBuffer); }
 inline FnClearDepthStencilEx ClearDepthStencilEx() { return WiiXLaunch::Backend::ResolveGx2<FnClearDepthStencilEx>(WiiXLaunch::Backend::Gx2Import::ClearDepthStencilEx); }
 inline FnSetPixelUniformBlock SetPixelUniformBlock() { return WiiXLaunch::Backend::ResolveGx2<FnSetPixelUniformBlock>(WiiXLaunch::Backend::Gx2Import::SetPixelUniformBlock); }
-inline FnSetupContextStateEx SetupContextStateEx() { return WiiXLaunch::Backend::ResolveGx2<FnSetupContextStateEx>(WiiXLaunch::Backend::Gx2Import::SetupContextStateEx); }
 #elif WIIXL_WIIU
 inline FnSetContextState SetContextState() { return reinterpret_cast<FnSetContextState>(&GX2SetContextState); }
+inline FnSetupContextStateEx SetupContextStateEx() { return reinterpret_cast<FnSetupContextStateEx>(&GX2SetupContextStateEx); }
 inline FnInvalidate Invalidate() { return reinterpret_cast<FnInvalidate>(&GX2Invalidate); }
 inline FnSetAttribBuffer SetAttribBuffer() { return reinterpret_cast<FnSetAttribBuffer>(&GX2SetAttribBuffer); }
 inline FnCalcFetchShaderSizeEx CalcFetchShaderSizeEx() { return reinterpret_cast<FnCalcFetchShaderSizeEx>(&GX2CalcFetchShaderSizeEx); }
@@ -331,7 +337,6 @@ inline FnInitDepthBufferRegs InitDepthBufferRegs() { return reinterpret_cast<FnI
 inline FnSetDepthBuffer SetDepthBuffer() { return reinterpret_cast<FnSetDepthBuffer>(&GX2SetDepthBuffer); }
 inline FnClearDepthStencilEx ClearDepthStencilEx() { return reinterpret_cast<FnClearDepthStencilEx>(&GX2ClearDepthStencilEx); }
 inline FnSetPixelUniformBlock SetPixelUniformBlock() { return reinterpret_cast<FnSetPixelUniformBlock>(&GX2SetPixelUniformBlock); }
-inline FnSetupContextStateEx SetupContextStateEx() { return reinterpret_cast<FnSetupContextStateEx>(&GX2SetupContextStateEx); }
 #endif
 
 inline void* AllocMEM1(uint32_t size, uint32_t align = 256) {
@@ -419,6 +424,9 @@ inline bool g_DepthClearedThisFrame = false;
 constexpr size_t kMaxCallbacks = 16;
 inline DrawCallback g_DrawCallbacks[kMaxCallbacks]{};
 inline size_t g_DrawCallbackCount = 0;
+// Draws that land under the HUD rather than over it - see RunPreHud.
+inline DrawCallback g_PreHudCallbacks[kMaxCallbacks]{};
+inline size_t g_PreHudCallbackCount = 0;
 inline InitCallback g_InitCallbacks[kMaxCallbacks]{};
 inline size_t g_InitCallbackCount = 0;
 inline bool g_PipelineInitialized = false;
@@ -640,6 +648,24 @@ inline void BatchNewFrame() {
     g_BatchDroppedQuads = 0;
 }
 
+// Vertex memory for one draw outside a batch, from the live half of the batch
+// ring - so it lives exactly as long as a flush does, until the frame after
+// next. The backdrop blur used to take 256-byte slots from the 16-slot sprite
+// ring with no sync; two blurs in a frame need more than 16 taps, so taps
+// overwrote vertices the GPU had not read yet and the blur sampled whatever
+// offsets a later tap left there. On screen that is a blur that shakes.
+inline uint8_t* FrameAlloc(size_t bytes) {
+    if (!g_BatchRing) {
+        g_BatchRing = reinterpret_cast<uint8_t*>(AllocMEM1(kBatchRingBytes, 256));
+        if (!g_BatchRing) return nullptr;
+    }
+    bytes = (bytes + 63) & ~static_cast<size_t>(63);
+    if (g_BatchHalfUsed + bytes > kBatchHalfBytes) return nullptr;
+    uint8_t* p = g_BatchRing + (g_BatchFrame & 1) * kBatchHalfBytes + g_BatchHalfUsed;
+    g_BatchHalfUsed += bytes;
+    return p;
+}
+
 inline void BatchFlush() {
     if (g_BatchVertCount == 0 || !g_BatchTexture || !g_BatchRing) {
         g_BatchVertCount = 0;
@@ -800,10 +826,8 @@ inline void BlurTap(GX2Types::ColorBuffer* target, TextureWrapper* src,
         { 1.0f, -1.0f, 0.0f, 1.0f, u1, v1, 1.0f, 1.0f, 1.0f, weight},
     };
 
-    constexpr size_t kSlotSize = 256;
-    constexpr size_t kSlotCount = sizeof(g_SpriteRingBuffer) / kSlotSize;
-    const size_t slot = (g_SpriteRingSlot++) % kSlotCount;
-    uint8_t* dst = g_SpriteRingBuffer + slot * kSlotSize;
+    uint8_t* dst = FrameAlloc(sizeof(verts));
+    if (!dst) return;
     memcpy(dst, verts, sizeof(verts));
     Invalidate()(GX2Types::kInvalidateModeCpuAttributeBuffer, dst, sizeof(verts));
 
@@ -1083,6 +1107,117 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(GameSceneLayoutHook) {
     }
 };
 
+// ---------------------------------------------------------------------------
+// Drawing under the HUD
+// ---------------------------------------------------------------------------
+// The swap hook above sees the finished frame, HUD and menus included, so
+// anything drawn there covers them - a full-screen effect blurs the hearts.
+//
+// The HUD is the agl layer "ForMainUI" (render list id 8, created in
+// FUN_02c490a8 beside "TV_0", the world). Its layer class (ctor 0x033d3a84)
+// pushes a draw method before the layout ("ParticleBeforeLayout") and one
+// after; both run 0x033d40b4, which tail-calls 0x033d3ee0(layer, group,
+// renderInfo) with group 0xa before the layout and 0xb after. renderInfo[5]
+// is the render list id - 0x033d3ee0 itself checks it against 8 and 0xc. So
+// 0x033d3ee0 with group 0xa and id 8 runs once per frame, after the world and
+// its post effects are in the TV buffer and before a single HUD or menu pane.
+// (0x033d40b4 itself cannot be hooked: its displaced prologue holds a bne.)
+//
+// Drawing there is drawing in the middle of the game's frame, so it gets a
+// context state of its own: our register writes go to that state's shadow,
+// and switching back to the game's state reloads the game's registers as the
+// HUD expects them.
+constexpr uintptr_t kHudLayerParticleDraw = 0x033d3ee0;
+constexpr int32_t   kHudGroupBeforeLayout = 0xa;
+constexpr uint32_t  kMainHudLayerId       = 8;
+constexpr uint32_t  kRenderInfoScanWords  = 16;
+
+inline GX2Types::ColorBuffer* g_LastTvColorBuffer = nullptr;
+inline int32_t g_RenderInfoBufferWord = -1;   // which renderInfo word is the RenderBuffer*
+inline void* g_PreHudContextState = nullptr;
+inline bool g_PreHudBroken = false;
+
+inline bool PlausibleGamePtr(uintptr_t p) {
+    return (p & 3u) == 0 &&
+           ((p >= 0x10000000u && p < 0x50000000u) || (p >= 0xF4000000u && p < 0xF6000000u));
+}
+
+// The colour buffer behind a RenderBuffer, the same walk the swap hook does.
+inline GX2Types::ColorBuffer* RenderBufferColor(uintptr_t renderBuffer) {
+    if (!PlausibleGamePtr(renderBuffer)) return nullptr;
+    const uintptr_t rt = *reinterpret_cast<uintptr_t*>(renderBuffer + 0x1c);
+    if (!PlausibleGamePtr(rt)) return nullptr;
+    return reinterpret_cast<GX2Types::ColorBuffer*>(rt + 0xbc);
+}
+
+// renderInfo's layout is not RE'd, so the RenderBuffer* is found rather than
+// assumed: the word whose colour buffer is the one the swap hook was handed
+// last frame. Found once; a frame that is not ready yet just waits.
+inline GX2Types::ColorBuffer* HudColorBuffer(const uint32_t* info) {
+    if (g_RenderInfoBufferWord < 0) {
+        if (!g_LastTvColorBuffer) return nullptr;
+        for (uint32_t i = 1; i < kRenderInfoScanWords; ++i) {
+            if (RenderBufferColor(info[i]) == g_LastTvColorBuffer) {
+                g_RenderInfoBufferWord = static_cast<int32_t>(i);
+                BotW::OSLog("WiiXLaunch: pre-HUD draw - renderInfo word %u is the TV render buffer\n", i);
+                break;
+            }
+        }
+        if (g_RenderInfoBufferWord < 0) {
+            static uint32_t s_misses = 0;
+            if (++s_misses == 120) {
+                BotW::OSLog("WiiXLaunch: pre-HUD draw - no renderInfo word leads to the TV colour buffer %p; "
+                            "pre-HUD callbacks will not run\n", g_LastTvColorBuffer);
+            }
+            return nullptr;
+        }
+    }
+    return RenderBufferColor(info[g_RenderInfoBufferWord]);
+}
+
+inline void RunPreHud(const uint32_t* info) {
+    if (g_PreHudBroken || !g_SpritePipelineReady) return;
+
+    GX2Types::ColorBuffer* dst = HudColorBuffer(info);
+    if (!dst || !dst->surface.image) return;
+
+    void* gameState = GetContextState();
+    if (!gameState) return;
+
+    if (!g_PreHudContextState) {
+        g_PreHudContextState = AllocMEM1(kContextStateSize, 256);
+        if (!g_PreHudContextState) {
+            g_PreHudBroken = true;
+            BotW::OSLog("WiiXLaunch: pre-HUD draw - no memory for a context state; disabled\n");
+            return;
+        }
+        SetupContextStateEx()(g_PreHudContextState, 0);
+    }
+
+    const uint32_t width = dst->surface.width ? dst->surface.width : 1280;
+    const uint32_t height = dst->surface.height ? dst->surface.height : 720;
+
+    g_ContextOverride = g_PreHudContextState;
+    SetContextState()(g_PreHudContextState);
+    for (size_t i = 0; i < g_PreHudCallbackCount; ++i) {
+        if (g_PreHudCallbacks[i]) {
+            g_PreHudCallbacks[i](nullptr, dst, static_cast<int>(width), static_cast<int>(height));
+        }
+    }
+    g_ContextOverride = nullptr;
+    SetContextState()(gameState);
+}
+
+WIIXL_HOOK_DEFINE_TRAMPOLINE(HudLayerDrawHook) {
+    static void Callback(uintptr_t layer, int32_t group, const uint32_t* info) {
+        if (group == kHudGroupBeforeLayout && info && info[5] == kMainHudLayerId &&
+            g_PreHudCallbackCount) {
+            RunPreHud(info);
+        }
+        Orig(layer, group, info);
+    }
+};
+
 WIIXL_HOOK_DEFINE_TRAMPOLINE(AglCopyToScanBufferHook) {
     static void Callback(uintptr_t renderBuffer, uintptr_t param2, int32_t param3) {
             if (renderBuffer) {
@@ -1090,6 +1225,7 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(AglCopyToScanBufferHook) {
             if (rt) {
                 auto* tvColorBuffer = reinterpret_cast<GX2Types::ColorBuffer*>(rt + 0xbc);
                 if (tvColorBuffer && tvColorBuffer->surface.image) {
+                    g_LastTvColorBuffer = tvColorBuffer;
                     InitializeAllPipelines();
 
                     uint32_t width = tvColorBuffer->surface.width ? tvColorBuffer->surface.width : 1280;
@@ -1186,6 +1322,23 @@ inline void Init() {
 inline void RegisterDrawCallback(DrawCallback cb) {
     if (impl::g_DrawCallbackCount < impl::kMaxCallbacks) {
         impl::g_DrawCallbacks[impl::g_DrawCallbackCount++] = cb;
+    }
+}
+
+// Like RegisterDrawCallback, but `cb` runs before the HUD and menus are drawn,
+// so what it draws sits under them. Runs on the TV image only, inside a
+// private context state (see impl::RunPreHud); the swap callbacks still need
+// Init() for the pipelines and the frame tick.
+inline void RegisterPreHudDrawCallback(DrawCallback cb) {
+    static bool installed = false;
+    if (!installed) {
+        installed = true;
+        impl::HudLayerDrawHook::Install(0, impl::kHudLayerParticleDraw);
+        BotW::OSLog("WiiXLaunch: GX2 pre-HUD draw hooked at 0x%08x\n",
+                    static_cast<unsigned int>(impl::kHudLayerParticleDraw));
+    }
+    if (impl::g_PreHudCallbackCount < impl::kMaxCallbacks) {
+        impl::g_PreHudCallbacks[impl::g_PreHudCallbackCount++] = cb;
     }
 }
 
@@ -1914,6 +2067,7 @@ struct MeshData {
 
 inline void Init() {}
 inline void RegisterDrawCallback(void (*)(void*, void*, int, int)) {}
+inline void RegisterPreHudDrawCallback(void (*)(void*, void*, int, int)) {}
 inline void OnInitialized(void (*)()) {}
 inline TextureHandle CreateTexture(const void*, size_t, int = 0, int = 0, int = 0) { return 0; }
 inline TextureHandle LoadTexture(const char*, size_t = 0) { return 0; }
