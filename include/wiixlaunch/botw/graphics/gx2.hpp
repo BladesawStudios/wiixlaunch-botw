@@ -210,9 +210,15 @@ inline void* GetGraphicsContext() {
 // callbacks), so every draw path below programs a private context state
 // instead of the game's. See RunPreHud.
 inline void* g_ContextOverride = nullptr;
+// Set the first time a draw path actually asks for the override, so a
+// pre-HUD pass that draws nothing switches nothing.
+inline bool g_ContextOverrideUsed = false;
 
 inline void* GetContextState() {
-    if (g_ContextOverride) return g_ContextOverride;
+    if (g_ContextOverride) {
+        g_ContextOverrideUsed = true;
+        return g_ContextOverride;
+    }
     void* ctx = GetGraphicsContext();
     if (!ctx) return nullptr;
     return *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(ctx) + kContextStateOffset);
@@ -610,7 +616,12 @@ inline void InitializeAllPipelines() {
 // enough to lose a menu row's label, a button's caption and a key guide while
 // everything around them stayed.
 constexpr size_t kBatchRingBytes = 1024 * 1024;
-constexpr size_t kBatchHalfBytes = kBatchRingBytes / 2;
+// The ring actually got. The host arena is small (about 3 MB on Cemu, shared
+// with fonts and render targets), and allocating lazily, after a backdrop
+// blur's targets, the full megabyte can be refused - and with no ring at all,
+// every batch and every blur tap silently draws nothing. So it steps down: a
+// smaller ring only limits how much text one frame can hold.
+inline size_t g_BatchHalfBytes = 0;
 constexpr uint32_t kBatchMaxQuadsPerFlush = 256;   // 256 quads * 6 verts * 40 B = 60 KB staging
 inline uint8_t* g_BatchRing = nullptr;
 inline uint32_t g_BatchFrame = 0;                  // selects the live half of the ring
@@ -641,6 +652,27 @@ inline void BatchNewFrame() {
     g_BatchDroppedQuads = 0;
 }
 
+inline bool EnsureBatchRing() {
+    if (g_BatchRing) return true;
+    static bool s_failed = false;
+    if (s_failed) return false;
+    for (size_t bytes = kBatchRingBytes; bytes >= 64 * 1024; bytes /= 2) {
+        g_BatchRing = reinterpret_cast<uint8_t*>(AllocMEM1(static_cast<uint32_t>(bytes), 256));
+        if (g_BatchRing) {
+            g_BatchHalfBytes = bytes / 2;
+            if (bytes != kBatchRingBytes) {
+                BotW::OSLog("WiiXLaunch: GX2 batch ring is %u KB, not %u - the arena is short\n",
+                            static_cast<unsigned int>(bytes / 1024),
+                            static_cast<unsigned int>(kBatchRingBytes / 1024));
+            }
+            return true;
+        }
+    }
+    s_failed = true;
+    BotW::OSLog("WiiXLaunch: GX2 batch ring could not be allocated at any size - batches and blur will not draw\n");
+    return false;
+}
+
 // Vertex memory for one draw outside a batch, from the live half of the batch
 // ring - so it lives exactly as long as a flush does, until the frame after
 // next. The backdrop blur used to take 256-byte slots from the 16-slot sprite
@@ -648,13 +680,10 @@ inline void BatchNewFrame() {
 // overwrote vertices the GPU had not read yet and the blur sampled whatever
 // offsets a later tap left there. On screen that is a blur that shakes.
 inline uint8_t* FrameAlloc(size_t bytes) {
-    if (!g_BatchRing) {
-        g_BatchRing = reinterpret_cast<uint8_t*>(AllocMEM1(kBatchRingBytes, 256));
-        if (!g_BatchRing) return nullptr;
-    }
+    if (!EnsureBatchRing()) return nullptr;
     bytes = (bytes + 63) & ~static_cast<size_t>(63);
-    if (g_BatchHalfUsed + bytes > kBatchHalfBytes) return nullptr;
-    uint8_t* p = g_BatchRing + (g_BatchFrame & 1) * kBatchHalfBytes + g_BatchHalfUsed;
+    if (g_BatchHalfUsed + bytes > g_BatchHalfBytes) return nullptr;
+    uint8_t* p = g_BatchRing + (g_BatchFrame & 1) * g_BatchHalfBytes + g_BatchHalfUsed;
     g_BatchHalfUsed += bytes;
     return p;
 }
@@ -665,7 +694,7 @@ inline void BatchFlush() {
         return;
     }
     const size_t bytes = g_BatchVertCount * sizeof(TextureVertex);
-    if (g_BatchHalfUsed + bytes > kBatchHalfBytes) {
+    if (g_BatchHalfUsed + bytes > g_BatchHalfBytes) {
         // Frame budget exhausted: drop rather than scribble over vertices
         // the GPU may still be reading from the previous frame. Said once, so
         // this is diagnosable instead of just looking like missing text.
@@ -674,12 +703,12 @@ inline void BatchFlush() {
         if (!s_warned) {
             s_warned = true;
             BotW::OSLog("WiiXLaunch: GX2 batch ring full (%u bytes a frame) - dropping quads\n",
-                        static_cast<unsigned int>(kBatchHalfBytes));
+                        static_cast<unsigned int>(g_BatchHalfBytes));
         }
         g_BatchVertCount = 0;
         return;
     }
-    uint8_t* dst = g_BatchRing + (g_BatchFrame & 1) * kBatchHalfBytes + g_BatchHalfUsed;
+    uint8_t* dst = g_BatchRing + (g_BatchFrame & 1) * g_BatchHalfBytes + g_BatchHalfUsed;
     memcpy(dst, g_BatchVerts, bytes);
     Invalidate()(GX2Types::kInvalidateModeCpuAttributeBuffer, dst, static_cast<uint32_t>(bytes));
 
@@ -884,53 +913,111 @@ constexpr uintptr_t kHudLayerParticleDraw = 0x033d3ee0;
 constexpr int32_t   kHudGroupBeforeLayout = 0xa;
 constexpr uint32_t  kMainHudLayerId       = 8;
 constexpr uint32_t  kContextStateSize     = 0xa100;   // sizeof(GX2ContextState)
-constexpr uint32_t  kRenderInfoScanWords  = 16;
 
-inline GX2Types::ColorBuffer* g_LastTvColorBuffer = nullptr;
-inline int32_t g_RenderInfoBufferWord = -1;   // which renderInfo word is the RenderBuffer*
 inline void* g_PreHudContextState = nullptr;
 inline bool g_PreHudBroken = false;
 
+// MEM2 as the title sees it runs well past 0x50000000 - BotW's render
+// buffers sit around 0x61000000 and its cameras near 0x6b000000 - so this
+// takes the same range botw.camera's Plausible does, plus MEM1.
 inline bool PlausibleGamePtr(uintptr_t p) {
     return (p & 3u) == 0 &&
-           ((p >= 0x10000000u && p < 0x50000000u) || (p >= 0xF4000000u && p < 0xF6000000u));
+           ((p >= 0x10000000u && p < 0xA0000000u) || (p >= 0xF4000000u && p < 0xF6000000u));
 }
 
-// The colour buffer behind a RenderBuffer, the same walk the swap hook does.
-inline GX2Types::ColorBuffer* RenderBufferColor(uintptr_t renderBuffer) {
-    if (!PlausibleGamePtr(renderBuffer)) return nullptr;
-    const uintptr_t rt = *reinterpret_cast<uintptr_t*>(renderBuffer + 0x1c);
-    if (!PlausibleGamePtr(rt)) return nullptr;
-    return reinterpret_cast<GX2Types::ColorBuffer*>(rt + 0xbc);
+// agl::lyr::RenderInfo, from its constructor in the Switch build
+// (RenderInfo(DrawContext*, int, FrameworkType, const RenderBuffer*, bool,
+// const Layer*) at 0x7100b63c88) narrowed to 32-bit pointers:
+//   +0x00 draw method index   +0x04 display type   +0x08 framework type (u8)
+//   +0x0c RenderBuffer*       +0x10 Layer*         +0x14 render list id
+//   +0x18 Camera*             +0x1c Projection*    +0x20 Viewport*
+//   +0x24 bool                +0x28 DrawContext*
+// The id at +0x14 and the projection at +0x1c are the two words 0x033d3ee0
+// itself reads, which is what pins the narrowing down.
+//
+constexpr uint32_t kRenderInfoRenderBuffer = 3;
+
+// Where agl::RenderBuffer keeps its first colour target (a RenderTargetColor*,
+// whose GX2ColorBuffer is at +0xbc) is not RE'd for Wii U, and +0x1c - what
+// the swap hook reads off ITS argument - is not it. So it is found: the first
+// word of the RenderBuffer pointing at something with a believable colour
+// buffer at +0xbc. Measured once, then fixed.
+constexpr uint32_t kRenderBufferScanWords = 64;
+inline int32_t g_ColorTargetWord = -1;
+
+inline bool SaneColorBuffer(const GX2Types::ColorBuffer* cb) {
+    return cb && PlausibleGamePtr(reinterpret_cast<uintptr_t>(cb->surface.image)) &&
+           cb->surface.width >= 64 && cb->surface.width <= 8192 &&
+           cb->surface.height >= 64 && cb->surface.height <= 8192 &&
+           cb->surface.dim == GX2Types::kSurfaceDimTexture2D;
 }
 
-// renderInfo's layout is not RE'd, so the RenderBuffer* is found rather than
-// assumed: the word whose colour buffer is the one the swap hook was handed
-// last frame. Found once; a frame that is not ready yet just waits.
+inline GX2Types::ColorBuffer* TargetColor(uintptr_t target) {
+    if (!PlausibleGamePtr(target)) return nullptr;
+    auto* cb = reinterpret_cast<GX2Types::ColorBuffer*>(target + 0xbc);
+    return SaneColorBuffer(cb) ? cb : nullptr;
+}
+
 inline GX2Types::ColorBuffer* HudColorBuffer(const uint32_t* info) {
-    if (g_RenderInfoBufferWord < 0) {
-        if (!g_LastTvColorBuffer) return nullptr;
-        for (uint32_t i = 1; i < kRenderInfoScanWords; ++i) {
-            if (RenderBufferColor(info[i]) == g_LastTvColorBuffer) {
-                g_RenderInfoBufferWord = static_cast<int32_t>(i);
-                BotW::OSLog("WiiXLaunch: pre-HUD draw - renderInfo word %u is the TV render buffer\n", i);
+    const uintptr_t rb = info[kRenderInfoRenderBuffer];
+    if (!PlausibleGamePtr(rb)) {
+        static uint32_t s_bad = 0;
+        if ((s_bad++ % 600) == 0) {
+            BotW::OSLog("WiiXLaunch: pre-HUD draw - renderInfo +0x0c is %08x, not a RenderBuffer\n",
+                        static_cast<unsigned int>(rb));
+        }
+        return nullptr;
+    }
+    const uint32_t* words = reinterpret_cast<const uint32_t*>(rb);
+
+    if (g_ColorTargetWord < 0) {
+        for (uint32_t i = 0; i < kRenderBufferScanWords; ++i) {
+            if (GX2Types::ColorBuffer* cb = TargetColor(words[i])) {
+                g_ColorTargetWord = static_cast<int32_t>(i);
+                BotW::OSLog("WiiXLaunch: pre-HUD draw - RenderBuffer %08x +0x%x is the colour target; "
+                            "drawing into %p (%ux%u, format 0x%x)\n", static_cast<unsigned int>(rb),
+                            i * 4, cb, cb->surface.width, cb->surface.height, cb->surface.format);
                 break;
             }
         }
-        if (g_RenderInfoBufferWord < 0) {
+        if (g_ColorTargetWord < 0) {
+            // Said now and then rather than once: the first frames are a boot
+            // screen, and a buffer that only appears later is not a failure.
             static uint32_t s_misses = 0;
-            if (++s_misses == 120) {
-                BotW::OSLog("WiiXLaunch: pre-HUD draw - no renderInfo word leads to the TV colour buffer %p; "
-                            "pre-HUD callbacks will not run\n", g_LastTvColorBuffer);
+            if ((s_misses++ % 600) == 0) {
+                BotW::OSLog("WiiXLaunch: pre-HUD draw - no colour target found in RenderBuffer %08x yet\n",
+                            static_cast<unsigned int>(rb));
             }
             return nullptr;
         }
     }
-    return RenderBufferColor(info[g_RenderInfoBufferWord]);
+    return TargetColor(words[g_ColorTargetWord]);
+}
+
+// The private context state is made at the END of a frame, from the swap
+// hook, never from inside the HUD layer. GX2SetupContextStateEx records the
+// state's defaults through a display list of its own, and the HUD layer is
+// drawn while agl is recording the game's display list for it: setting up
+// there nested the two, and Cemu was left executing a command buffer 1 GB
+// long. It hung on the loading screen logging command-buffer errors.
+inline void EnsurePreHudContextState() {
+    if (g_PreHudContextState || g_PreHudBroken) return;
+    void* gameState = GetContextState();
+    if (!gameState) return;
+
+    g_PreHudContextState = AllocMEM1(kContextStateSize, 256);
+    if (!g_PreHudContextState) {
+        g_PreHudBroken = true;
+        BotW::OSLog("WiiXLaunch: pre-HUD draw - no memory for a context state; disabled\n");
+        return;
+    }
+    SetupContextStateEx()(g_PreHudContextState, 0);
+    SetContextState()(gameState);
+    BotW::OSLog("WiiXLaunch: pre-HUD draw - private context state ready at %p\n", g_PreHudContextState);
 }
 
 inline void RunPreHud(const uint32_t* info) {
-    if (g_PreHudBroken || !g_SpritePipelineReady) return;
+    if (g_PreHudBroken || !g_SpritePipelineReady || !g_PreHudContextState) return;
 
     GX2Types::ColorBuffer* dst = HudColorBuffer(info);
     if (!dst || !dst->surface.image) return;
@@ -938,28 +1025,21 @@ inline void RunPreHud(const uint32_t* info) {
     void* gameState = GetContextState();
     if (!gameState) return;
 
-    if (!g_PreHudContextState) {
-        g_PreHudContextState = AllocMEM1(kContextStateSize, 256);
-        if (!g_PreHudContextState) {
-            g_PreHudBroken = true;
-            BotW::OSLog("WiiXLaunch: pre-HUD draw - no memory for a context state; disabled\n");
-            return;
-        }
-        SetupContextStateEx()(g_PreHudContextState, 0);
-    }
-
     const uint32_t width = dst->surface.width ? dst->surface.width : 1280;
     const uint32_t height = dst->surface.height ? dst->surface.height : 720;
 
+    // Every draw path starts with SetContextState(GetContextState()), so it
+    // switches to the private state itself - and only if it draws. A frame
+    // where the callbacks draw nothing sends no commands at all.
     g_ContextOverride = g_PreHudContextState;
-    SetContextState()(g_PreHudContextState);
+    g_ContextOverrideUsed = false;
     for (size_t i = 0; i < g_PreHudCallbackCount; ++i) {
         if (g_PreHudCallbacks[i]) {
             g_PreHudCallbacks[i](nullptr, dst, static_cast<int>(width), static_cast<int>(height));
         }
     }
     g_ContextOverride = nullptr;
-    SetContextState()(gameState);
+    if (g_ContextOverrideUsed) SetContextState()(gameState);
 }
 
 WIIXL_HOOK_DEFINE_TRAMPOLINE(HudLayerDrawHook) {
@@ -979,8 +1059,8 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(AglCopyToScanBufferHook) {
             if (rt) {
                 auto* tvColorBuffer = reinterpret_cast<GX2Types::ColorBuffer*>(rt + 0xbc);
                 if (tvColorBuffer && tvColorBuffer->surface.image) {
-                    g_LastTvColorBuffer = tvColorBuffer;
                     InitializeAllPipelines();
+                    if (g_PreHudCallbackCount) EnsurePreHudContextState();
 
                     uint32_t width = tvColorBuffer->surface.width ? tvColorBuffer->surface.width : 1280;
                     uint32_t height = tvColorBuffer->surface.height ? tvColorBuffer->surface.height : 720;
@@ -1277,10 +1357,7 @@ inline void BeginBatch(void* dstTexture) {
     void* contextState = impl::GetContextState();
     if (!contextState) return;
 
-    if (!impl::g_BatchRing) {
-        impl::g_BatchRing = reinterpret_cast<uint8_t*>(impl::AllocMEM1(impl::kBatchRingBytes, 256));
-        if (!impl::g_BatchRing) return;
-    }
+    if (!impl::EnsureBatchRing()) return;
 
     uint32_t dispW = colorBuf->surface.width ? colorBuf->surface.width : 1280;
     uint32_t dispH = colorBuf->surface.height ? colorBuf->surface.height : 720;
