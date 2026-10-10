@@ -188,6 +188,12 @@ inline uint32_t StoreTexture(Backend::TextureHandle native) {
     const char* owner = WiiXLaunch::ModContext::Current();
 
     for (uint32_t i = 0; i < kMaxTextures; ++i) {
+        const TexSlot& s = g_Textures[i];
+        if (s.used && s.native == native)
+            return (static_cast<uint32_t>(s.generation) << 16) | (i + 1u);
+    }
+
+    for (uint32_t i = 0; i < kMaxTextures; ++i) {
         if (g_Textures[i].used) continue;
         TexSlot& s = g_Textures[i];
         s.native = native;
