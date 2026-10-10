@@ -1159,7 +1159,7 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(GameSceneLayoutHook) {
 constexpr uintptr_t kHudLayerParticleDraw = 0x033d3ee0;
 constexpr int32_t   kHudGroupBeforeLayout = 0xa;
 constexpr uint32_t  kMainHudLayerId       = 8;
-constexpr uint32_t  kContextStateSize     = 0xa100;   // sizeof(GX2ContextState)
+// kContextStateSize is the one above, beside kGameSceneLayout.
 constexpr uint32_t  kRenderInfoScanWords  = 16;
 
 inline void* g_PreHudContextState = nullptr;
