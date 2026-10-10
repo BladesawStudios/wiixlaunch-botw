@@ -48,8 +48,10 @@ namespace WiiXLaunch::BotW::Surfaces::GfxSurface {
 constexpr const char* kName = "botw.gfx";
 constexpr uint16_t kVersionMajor = 1;
 // 1.1 appends OnInitialized. Appending bumps the MINOR, so every mod built
-// against v1.0 still resolves.
-constexpr uint16_t kVersionMinor = 1;
+// against v1.0 still resolves. 1.2 appends the shader pass: CreateShaderPass,
+// DrawShaderPass and SupportsShaderPass. 1.3 appends SceneDepthReady, and DrawShaderPass then binds the scene's
+// depth as texture 1. 1.4 appends RegisterPreUiDraw and PreUiReady.
+constexpr uint16_t kVersionMinor = 4;
 
 #if WIIXL_SWITCH
 namespace Backend = WiiXLaunch::BotW::NVN;
@@ -79,6 +81,10 @@ struct DrawEntry {
 
 inline DrawEntry g_Draws[kMaxDrawCallbacks];
 inline uint32_t g_DrawCount = 0;
+// The same, for callbacks that run before the HUD is drawn.
+inline DrawEntry g_PreUiDraws[kMaxDrawCallbacks];
+inline uint32_t g_PreUiCount = 0;
+inline bool g_PreUiHooked = false;
 
 // Modules waiting for the graphics device to exist.
 //
@@ -135,11 +141,11 @@ inline bool SameOwner(const char* a, const char* b) {
     return true;
 }
 
-// The one callback the module sees. Everything a mod registered runs from here.
-inline void DispatchDraw(Backend::CommandBuffer* cmdBuf, void* dstTexture,
-                         int width, int height) {
-    for (uint32_t i = 0; i < g_DrawCount; ++i) {
-        DrawEntry& e = g_Draws[i];
+// Runs one list of mod draw callbacks, each attributed. A frozen frame names the module that froze it.
+inline void RunDrawList(DrawEntry* list, uint32_t count, Backend::CommandBuffer* cmdBuf, void* dstTexture,
+                        int width, int height) {
+    for (uint32_t i = 0; i < count; ++i) {
+        DrawEntry& e = list[i];
         if (!e.inUse || !e.fn) continue;
 
         // BEFORE the call, so a frozen frame names the module that froze it.
@@ -157,6 +163,15 @@ inline void DispatchDraw(Backend::CommandBuffer* cmdBuf, void* dstTexture,
         g_InFlight.owner[0] = '\0';
         e.calls++;
     }
+}
+
+// The one callback the module sees. Everything a mod registered runs from here.
+inline void DispatchDraw(Backend::CommandBuffer* cmdBuf, void* dstTexture, int width, int height) {
+    RunDrawList(g_Draws, g_DrawCount, cmdBuf, dstTexture, width, height);
+}
+
+inline void DispatchPreUi(Backend::CommandBuffer* cmdBuf, void* dstTexture, int width, int height) {
+    RunDrawList(g_PreUiDraws, g_PreUiCount, cmdBuf, dstTexture, width, height);
 }
 
 // --- texture handles -------------------------------------------------------
@@ -559,6 +574,102 @@ extern "C" inline uint32_t GfxBlurBackdrop(uintptr_t dstColorBuffer,
 #endif
 }
 
+// --- shader passes ---------------------------------------------------------
+//
+// A mod's own full-screen pixel shader, which the fixed sprite and mesh pipelines above cannot be.
+// The shader is a GFD as CafeGLSL writes it: one vertex shader taking a vec2 position and then up to 12 vec4
+// parameters as attributes, and one pixel shader. The host copies it into its own memory, so a mod can hand over bytes in its read-only data and forget them.
+
+// Builds a shader pass from a GFD. Returns a pass handle, or 0 when the GFD would not parse or no slot is free.
+extern "C" inline uint32_t GfxCreateShaderPass(const void* gsh, uint32_t size) {
+#if WIIXL_SWITCH
+    (void)gsh; (void)size;
+    return 0;
+#else
+    if (!gsh || size == 0) return 0;
+    return Backend::CreateShaderPass(gsh, size);
+#endif
+}
+
+// Draws a shader pass over the rectangle (x, y, w, h) of dstTexture, in pixels from the top left, blending the result
+// over what is there. `uniforms` are the pass's vec4 parameters (16 bytes each, exactly as many as the vertex shader has
+// attributes after the position), streamed with the vertices; the frame so far is texture 0. Only the rectangle is shaded, so it is the pass's whole cost. dstTexture comes from the draw callback.
+extern "C" inline uint32_t GfxDrawShaderPass(uintptr_t dstTexture, uint32_t pass,
+                                             const void* uniforms, uint32_t uniformSize,
+                                             int32_t x, int32_t y, int32_t w, int32_t h) {
+#if WIIXL_SWITCH
+    (void)dstTexture; (void)pass; (void)uniforms; (void)uniformSize; (void)x; (void)y; (void)w; (void)h;
+    return 0;
+#else
+    if (!dstTexture) return 0;
+    return Backend::DrawShaderPass(reinterpret_cast<void*>(dstTexture), pass, uniforms, uniformSize, x, y, w, h) ? 1u : 0u;
+#endif
+}
+
+// 1 while this frame has a scene depth buffer, which DrawShaderPass binds as texture 1 of the pass: point filtered, the
+// raw [0,1] depth the game wrote, 1 where nothing was drawn (sky). Ask from the draw callback.
+extern "C" inline uint32_t GfxSceneDepthReady() {
+#if WIIXL_SWITCH
+    return 0;
+#else
+    return Backend::SceneDepthReady() ? 1u : 0u;
+#endif
+}
+
+// Like RegisterDraw, but the callback runs before the HUD is drawn, into the scene's finished colour buffer, through a
+// private context state. A draw at scan-out lies over the HUD and menus; this one does not. It runs only on frames
+// PreUiReady allows, so keep a RegisterDraw callback for the frames it does not, and skip it when this one drew.
+extern "C" inline uint32_t GfxRegisterPreUiDraw(ModDrawFn fn) {
+#if WIIXL_SWITCH
+    (void)fn;
+    return 0;
+#else
+    const char* owner = WiiXLaunch::ModContext::Current();
+    if (!owner || owner[0] == '\0') {
+        WIIXL_LOG("botw.gfx: refused - a pre-UI draw callback belongs to a module and none is running");
+        return 0;
+    }
+    if (!fn) return 0;
+    for (uint32_t i = 0; i < g_PreUiCount; ++i) {
+        if (SameOwner(g_PreUiDraws[i].owner, owner)) {
+            WIIXL_LOG("botw.gfx: %s already has a pre-UI draw callback", owner);
+            return 0;
+        }
+    }
+    if (g_PreUiCount >= kMaxDrawCallbacks) {
+        WIIXL_LOG("botw.gfx: %s refused - all %u pre-UI draw slots are taken", owner, kMaxDrawCallbacks);
+        return 0;
+    }
+
+    GfxInit();
+    if (!g_PreUiHooked) {
+        g_PreUiHooked = true;
+        Backend::RegisterPreUiDrawCallback(reinterpret_cast<void (*)(void*, void*, int, int)>(&DispatchPreUi));
+    }
+
+    DrawEntry& e = g_PreUiDraws[g_PreUiCount++];
+    e.fn = fn;
+    e.calls = 0;
+    e.inUse = true;
+    CopyOwner(e.owner, owner);
+    WIIXL_LOG("botw.gfx: %s registered a pre-UI draw callback", owner);
+    return 1;
+#endif
+}
+
+// 1 once pre-UI drawing is armed. Before that, and wherever it cannot be (no memory for the private context state,
+// Switch), only the scan-out callback runs.
+extern "C" inline uint32_t GfxPreUiReady() {
+#if WIIXL_SWITCH
+    return 0;
+#else
+    return Backend::PreUiReady() ? 1u : 0u;
+#endif
+}
+
+// GX2 only for now: NVN wants its own compiled shader binaries, which a CafeGLSL GFD is not.
+extern "C" inline uint32_t GfxSupportsShaderPass() { return kIsGX2 ? 1u : 0u; }
+
 // --- the table -------------------------------------------------------------
 inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("IsGX2",              &GfxIsGX2),
@@ -587,6 +698,13 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("BackdropReady",      &GfxBackdropReady),
     WIIXL_SURFACE_SYMBOL("BackdropTexture",    &GfxBackdropTexture),
     WIIXL_SURFACE_SYMBOL("AllocMEM1",          &GfxAllocMEM1),
+
+    WIIXL_SURFACE_SYMBOL("CreateShaderPass",   &GfxCreateShaderPass),
+    WIIXL_SURFACE_SYMBOL("DrawShaderPass",     &GfxDrawShaderPass),
+    WIIXL_SURFACE_SYMBOL("SupportsShaderPass", &GfxSupportsShaderPass),
+    WIIXL_SURFACE_SYMBOL("SceneDepthReady",    &GfxSceneDepthReady),
+    WIIXL_SURFACE_SYMBOL("RegisterPreUiDraw",  &GfxRegisterPreUiDraw),
+    WIIXL_SURFACE_SYMBOL("PreUiReady",         &GfxPreUiReady),
 };
 
 } // namespace impl

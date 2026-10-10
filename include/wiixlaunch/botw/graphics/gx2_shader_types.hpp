@@ -275,6 +275,8 @@ constexpr uint32_t kEndianSwapDefault = 3;
 constexpr uint32_t kFetchShaderTessellationNone = 0;
 constexpr uint32_t kTessellationModeDiscrete = 0;
 constexpr uint32_t kShaderModeUniformRegister = 0;
+// Shaders built by CafeGLSL read every uniform from a buffer, so they only run in this mode.
+constexpr uint32_t kShaderModeUniformBlock = 1;
 constexpr uint32_t kPrimitiveModeTriangles = 4;
 constexpr uint32_t kPrimitiveModeTriangleStrip = 6;
 // GX2InvalidateMode: ATTRIBUTE_BUFFER 1<<0, TEXTURE 1<<1, UNIFORM_BLOCK
@@ -286,6 +288,7 @@ constexpr uint32_t kPrimitiveModeTriangleStrip = 6;
 constexpr uint32_t kInvalidateModeCpuAttributeBuffer = (1 << 6) | (1 << 0);
 constexpr uint32_t kInvalidateModeCpuTexture = (1 << 6) | (1 << 1);
 constexpr uint32_t kInvalidateModeCpuShader = (1 << 6) | (1 << 3);
+constexpr uint32_t kInvalidateModeCpuUniformBlock = (1 << 6) | (1 << 2);
 constexpr uint32_t kInvalidateModeTexture = (1 << 1);
 constexpr uint32_t kInvalidateModeColorBuffer = (1 << 4);
 constexpr uint32_t kCompareFuncLessEqual = 3;

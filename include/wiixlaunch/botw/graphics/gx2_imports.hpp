@@ -102,6 +102,8 @@ enum class Gx2Import : uint32_t {
     InitDepthBufferRegs,
     SetDepthBuffer,
     ClearDepthStencilEx,
+    // --- Added for custom shader passes (uniform-block shaders) ---
+    SetPixelUniformBlock,
     Count
 };
 
