@@ -99,13 +99,25 @@ extern "C" inline int32_t AcQuery(int32_t kind, const char* name, uint32_t exact
         if (h != H::kInvalid) g_Results[g_ResultCount++] = h;
     };
 
+    // Walked with the iterators, not the helpers that return a std::vector. This payload links newlib's malloc but has
+    // no _sbrk, so the first push_back sends malloc to address 0 - the start of the payload, which is the boot stub -
+    // and the game's file-system constructor is then resumed with an allocation size for its `this`.
     const bool exact = exactMatch != 0;
+    const bool filtered = name && name[0] != '\0';
+    auto visit = [&](const Actor& a) {
+        if (filtered) {
+            const char* actorName = a.GetName();
+            const bool match = exact ? std::strcmp(actorName, name) == 0 : std::strstr(actorName, name) != nullptr;
+            if (!match) return;
+        }
+        take(a);
+    };
     if (kind == 0) {
-        for (const Actor& a : Actor::QueryDynamicActors(name, exact)) take(a);
+        Actor::ForEachDynamic(visit);
     } else if (kind == 1) {
-        for (const Actor& a : Actor::QueryStaticActors(name, exact)) take(a);
+        Actor::ForEachStatic(visit);
     } else {
-        for (const Actor& a : Actor::GetAllActors(name, exact)) take(a);
+        Actor::ForEach(visit);
     }
 
     if (g_LastQueryMatched > g_ResultCount) {

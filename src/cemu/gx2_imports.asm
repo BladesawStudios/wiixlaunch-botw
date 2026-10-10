@@ -56,6 +56,7 @@ wiixlaunch_gx2_shim_table:
   .int wiixlaunch_gx2_shim_InitDepthBufferRegs
   .int wiixlaunch_gx2_shim_SetDepthBuffer
   .int wiixlaunch_gx2_shim_ClearDepthStencilEx
+  .int wiixlaunch_gx2_shim_SetPixelUniformBlock
 
 wiixlaunch_gx2_shim_Init:
   b import.gx2.GX2Init
@@ -131,3 +132,5 @@ wiixlaunch_gx2_shim_SetDepthBuffer:
   b import.gx2.GX2SetDepthBuffer
 wiixlaunch_gx2_shim_ClearDepthStencilEx:
   b import.gx2.GX2ClearDepthStencilEx
+wiixlaunch_gx2_shim_SetPixelUniformBlock:
+  b import.gx2.GX2SetPixelUniformBlock

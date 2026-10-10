@@ -224,8 +224,11 @@ inline void* GetContextState() {
     return *reinterpret_cast<void**>(reinterpret_cast<uintptr_t>(ctx) + kContextStateOffset);
 }
 
+// What every draw path programs: the private context state while a mid-frame draw is running (g_ContextOverride, above),
+// the game's own otherwise. GetContextState() already makes that choice; this is the name the shader-pass code uses.
+inline void* DrawContext() { return GetContextState(); }
+
 using FnSetContextState       = void (*)(void* contextState);
-using FnSetupContextStateEx   = void (*)(void* contextState, uint32_t enableProfiling);
 using FnInvalidate            = void (*)(uint32_t mode, void* buffer, uint32_t size);
 using FnSetAttribBuffer        = void (*)(uint32_t index, uint32_t size, uint32_t stride, const void* buffer);
 using FnCalcFetchShaderSizeEx  = uint32_t (*)(uint32_t attribCount, uint32_t fetchShaderType, uint32_t tessMode);
@@ -265,6 +268,8 @@ using FnSetPixelSampler       = void (*)(const GX2Types::Sampler* sampler, uint3
 using FnInitDepthBufferRegs   = void (*)(GX2Types::DepthBuffer* depthBuffer);
 using FnSetDepthBuffer         = void (*)(GX2Types::DepthBuffer* depthBuffer);
 using FnClearDepthStencilEx   = void (*)(GX2Types::DepthBuffer* depthBuffer, float depth, uint8_t stencil, uint32_t clearFlags);
+using FnSetPixelUniformBlock  = void (*)(uint32_t location, uint32_t size, const void* data);
+using FnSetupContextStateEx   = void (*)(void* contextState, uint32_t loadDefaults);
 
 #if WIIXL_CEMU
 inline FnSetContextState SetContextState() { return WiiXLaunch::Backend::ResolveGx2<FnSetContextState>(WiiXLaunch::Backend::Gx2Import::SetContextState); }
@@ -301,6 +306,7 @@ inline FnSetPixelSampler SetPixelSampler() { return WiiXLaunch::Backend::Resolve
 inline FnInitDepthBufferRegs InitDepthBufferRegs() { return WiiXLaunch::Backend::ResolveGx2<FnInitDepthBufferRegs>(WiiXLaunch::Backend::Gx2Import::InitDepthBufferRegs); }
 inline FnSetDepthBuffer SetDepthBuffer() { return WiiXLaunch::Backend::ResolveGx2<FnSetDepthBuffer>(WiiXLaunch::Backend::Gx2Import::SetDepthBuffer); }
 inline FnClearDepthStencilEx ClearDepthStencilEx() { return WiiXLaunch::Backend::ResolveGx2<FnClearDepthStencilEx>(WiiXLaunch::Backend::Gx2Import::ClearDepthStencilEx); }
+inline FnSetPixelUniformBlock SetPixelUniformBlock() { return WiiXLaunch::Backend::ResolveGx2<FnSetPixelUniformBlock>(WiiXLaunch::Backend::Gx2Import::SetPixelUniformBlock); }
 #elif WIIXL_WIIU
 inline FnSetContextState SetContextState() { return reinterpret_cast<FnSetContextState>(&GX2SetContextState); }
 inline FnSetupContextStateEx SetupContextStateEx() { return reinterpret_cast<FnSetupContextStateEx>(&GX2SetupContextStateEx); }
@@ -336,6 +342,7 @@ inline FnSetPixelSampler SetPixelSampler() { return reinterpret_cast<FnSetPixelS
 inline FnInitDepthBufferRegs InitDepthBufferRegs() { return reinterpret_cast<FnInitDepthBufferRegs>(&GX2InitDepthBufferRegs); }
 inline FnSetDepthBuffer SetDepthBuffer() { return reinterpret_cast<FnSetDepthBuffer>(&GX2SetDepthBuffer); }
 inline FnClearDepthStencilEx ClearDepthStencilEx() { return reinterpret_cast<FnClearDepthStencilEx>(&GX2ClearDepthStencilEx); }
+inline FnSetPixelUniformBlock SetPixelUniformBlock() { return reinterpret_cast<FnSetPixelUniformBlock>(&GX2SetPixelUniformBlock); }
 #endif
 
 inline void* AllocMEM1(uint32_t size, uint32_t align = 256) {
@@ -769,7 +776,8 @@ inline uint32_t g_BlurHeight = 0;
 inline bool g_BlurAvailable = false;
 inline bool g_BlurTried = false;
 
-inline bool EnsureBlurTarget(BlurTarget& t, uint32_t w, uint32_t h) {
+inline bool EnsureBlurTarget(BlurTarget& t, uint32_t w, uint32_t h,
+                             uint32_t format = GX2Types::kSurfaceFormatUnormR8G8B8A8) {
     if (t.ready) return true;
 
     t.color.surface.dim = GX2Types::kSurfaceDimTexture2D;
@@ -777,7 +785,7 @@ inline bool EnsureBlurTarget(BlurTarget& t, uint32_t w, uint32_t h) {
     t.color.surface.height = h;
     t.color.surface.depth = 1;
     t.color.surface.mipLevels = 1;
-    t.color.surface.format = GX2Types::kSurfaceFormatUnormR8G8B8A8;
+    t.color.surface.format = format;
     t.color.surface.aa = GX2Types::kAaMode1x;
     t.color.surface.use = GX2Types::kSurfaceUseTextureColorBuffer;
     t.color.surface.tileMode = GX2Types::kTileModeTiled2DThin1;
@@ -835,7 +843,7 @@ inline void AliasScene(GX2Types::ColorBuffer* scene) {
 // to it, so four taps at a quarter each average out to a box blur.
 inline void BlurTap(GX2Types::ColorBuffer* target, TextureWrapper* src,
                     float du, float dv, float weight, bool first) {
-    void* contextState = GetContextState();
+    void* contextState = DrawContext();
     if (!contextState || !target->surface.image) return;
 
     const float u0 = du, u1 = 1.0f + du;
@@ -890,6 +898,245 @@ inline void BlurPass(GX2Types::ColorBuffer* target, TextureWrapper* src, float r
 }
 
 // ---------------------------------------------------------------------------
+// Shader passes: a mod's own full-screen pixel shader
+// ---------------------------------------------------------------------------
+// The mod hands over a GFD (what CafeGLSL writes) and the host parses it into its own memory, builds the one-attribute
+// fetch shader a full-screen quad needs, and draws it over the frame. The pass samples the frame as texture 0, which
+// cannot be the buffer it is drawing into, so the frame is copied into a private target first. Parameters travel as
+// float4 vertex attributes, the same on all four vertices, which the vertex shader hands on as varyings: there is no
+// uniform block to set up, and the shader runs in the same register mode as the host's own.
+constexpr size_t kMaxShaderPasses = 4;
+constexpr size_t kPassMaxVec4 = 12;           // float4 parameters a pass may stream with its vertices
+constexpr size_t kPassSlotBytes = 1024;       // room for four vertices of a position and kPassMaxVec4 parameters
+constexpr size_t kPassSlots = 8;              // one per pass per frame, so the GPU never reads a slot being rewritten
+
+struct ShaderPass {
+    GX2Types::VertexShader* vs = nullptr;
+    GX2Types::PixelShader* ps = nullptr;
+    GX2Types::FetchShader fetch{};
+    uint32_t dataVec4 = 0;      // float4 parameters streamed with each vertex: the vertex shader's attributes less its position
+    bool used = false;
+};
+
+inline ShaderPass g_Passes[kMaxShaderPasses];
+inline BlurTarget g_PassScene;                // the frame as it was before the pass, sampled as texture 0
+inline bool g_PassSceneTried = false;
+inline uint32_t g_PassEvent = 0;                       // which HUD pass the pre-UI callbacks are running in
+inline uint32_t g_PassSceneEvent = 0xFFFFFFFFu;        // the HUD pass whose frame the scene copy holds
+inline bool g_PassSceneReady = false;
+alignas(256) inline uint8_t g_PassVertices[kPassSlots * kPassSlotBytes];
+inline size_t g_PassSlot = 0;
+
+// The frame copy a pass samples. Full size would be most of the code-cave arena, which also holds the host's textures and
+// every mod's memory, and the game's own heaps are not safe to render into from here, so it takes the largest of a few
+// fractions of the frame that fits what the arena has free. A smaller copy softens the background inside the lens.
+inline bool EnsurePassScene(const GX2Types::ColorBuffer* dst) {
+    if (g_PassSceneTried) return g_PassSceneReady;
+    g_PassSceneTried = true;
+
+    constexpr uint32_t kFractions[][2] = {{1, 1}, {3, 4}, {1, 2}, {1, 3}, {1, 4}};
+    constexpr uint32_t kHeadroom = 192u * 1024u;
+    for (const auto& f : kFractions) {
+        const uint32_t w = dst->surface.width * f[0] / f[1];
+        const uint32_t h = dst->surface.height * f[0] / f[1];
+#if WIIXL_CEMU
+        if (WiiXLaunch::Arena::Free() < w * h * 4u + kHeadroom) continue;
+#endif
+        // sRGB like the game's own target, so what the pass samples and what it writes are both linear.
+        if (EnsureBlurTarget(g_PassScene, w, h, GX2Types::kSurfaceFormatSrgbR8G8B8A8)) {
+            g_PassSceneReady = true;
+            BotW::OSLog("WiiXLaunch: shader pass scene copy %ux%u (frame %ux%u)\n", w, h,
+                        dst->surface.width, dst->surface.height);
+            break;
+        }
+    }
+    if (!g_PassSceneReady) BotW::OSLog("WiiXLaunch: shader pass scene copy: nothing fit\n");
+    return g_PassSceneReady;
+}
+
+inline void* AllocPassBuffer(uint32_t size, uint32_t align) {
+    return size ? AllocMEM1(size, align) : nullptr;
+}
+
+// ---------------------------------------------------------------------------
+// The scene's depth buffer
+// ---------------------------------------------------------------------------
+// agl binds its render targets through one function, and a render buffer holds eight colour target pointers from +0x1c
+// and the depth target at +0x3c; a target's GX2 buffer struct is at +0xbc. Many 1280x720 depth targets are bound in a
+// frame, and only the FIRST full-resolution 3D bind holds the world: the sun-flare occlusion query binds a second one,
+// near zero everywhere, which is why a depth taken "from the last bind" collapses the moment sky enters the frame.
+// So the first one is latched for the frame and nothing later may take it. This is the rule the underwater mod found.
+constexpr uintptr_t kAglBindRenderTargets = 0x03a76e18;
+constexpr uint32_t kRbColorTargetOffset = 0x1c;
+constexpr uint32_t kRbDepthTargetOffset = 0x3c;
+constexpr uint32_t kRenderTargetBufferOffset = 0xbc;
+constexpr uint32_t kSceneWidth = 1280;       // the game's own 3D resolution; a graphic pack's upscale happens below GX2
+constexpr uint32_t kSceneHeight = 720;
+constexpr uint32_t kTvMinWidth = 1000;       // the GamePad scan-out is 854x480; only the TV one ends a frame
+
+inline GX2Types::DepthBuffer* g_SceneDepth = nullptr;
+inline bool g_SceneDepthLatched = false;
+// How often each stage runs, logged every few seconds. Scan-out fires on every vsync and a new frame is rendered far
+// less often, which is the first thing to know about anything drawn at either point.
+inline uint32_t g_StatScanOuts = 0;
+inline uint32_t g_StatScenes = 0;
+inline uint32_t g_StatLayouts = 0;
+inline uint32_t g_StatHuds = 0;
+inline uint32_t g_StatPreUi = 0;
+inline uint32_t g_StatSkipDone = 0;
+inline uint32_t g_StatSkipTarget = 0;
+inline uint32_t g_StatSkipSize = 0;
+inline uint32_t g_StatSizeLogs = 0;
+inline TextureWrapper g_SceneDepthTex{};
+
+inline bool PlausibleTarget(uintptr_t p) { return p >= 0x10000000u && p < 0xE0000000u && (p & 3u) == 0; }
+
+WIIXL_HOOK_DEFINE_TRAMPOLINE(AglBindRenderTargetsHook) {
+    static void Callback(uintptr_t renderBuffer, uint32_t a2, uint32_t a3) {
+        Orig(renderBuffer, a2, a3);
+        if (g_SceneDepthLatched || !PlausibleTarget(renderBuffer)) return;
+
+        const uintptr_t colorTarget = *reinterpret_cast<uintptr_t*>(renderBuffer + kRbColorTargetOffset);
+        const uintptr_t depthTarget = *reinterpret_cast<uintptr_t*>(renderBuffer + kRbDepthTargetOffset);
+        if (!PlausibleTarget(colorTarget) || !PlausibleTarget(depthTarget)) return;
+
+        auto* color = reinterpret_cast<GX2Types::ColorBuffer*>(colorTarget + kRenderTargetBufferOffset);
+        auto* depth = reinterpret_cast<GX2Types::DepthBuffer*>(depthTarget + kRenderTargetBufferOffset);
+        if (!color->surface.image || !depth->surface.image) return;
+        if (color->surface.width != kSceneWidth || color->surface.height != kSceneHeight) return;
+        if (depth->surface.width != kSceneWidth || depth->surface.height != kSceneHeight) return;
+
+        g_SceneDepth = depth;
+        g_SceneDepthLatched = true;
+        ++g_StatScenes;
+
+        static uintptr_t s_lastLogged = 0;
+        static uint32_t s_logs = 0;
+        if (reinterpret_cast<uintptr_t>(depth) != s_lastLogged && s_logs < 6) {
+            s_lastLogged = reinterpret_cast<uintptr_t>(depth);
+            ++s_logs;
+            BotW::OSLog("WiiXLaunch: scene depth %p: format %u, tile mode %u, %ux%u, pitch %u, use %u, image %p, %u bytes\n",
+                        depth, depth->surface.format, depth->surface.tileMode, depth->surface.width, depth->surface.height,
+                        depth->surface.pitch, depth->surface.use, depth->surface.image, depth->surface.imageSize);
+        }
+    }
+};
+
+// Describes the latched depth buffer as a texture a pass can sample. Point filtered and clamped: interpolating depth
+// across a silhouette gives positions that lie on no surface.
+inline bool AliasSceneDepth() {
+    if (!g_SceneDepth || !g_SceneDepth->surface.image) return false;
+    g_SceneDepthTex.texture.surface = g_SceneDepth->surface;
+    g_SceneDepthTex.texture.surface.use |= GX2Types::kSurfaceUseTexture;
+    g_SceneDepthTex.texture.viewFirstMip = 0;
+    g_SceneDepthTex.texture.viewNumMips = 1;
+    g_SceneDepthTex.texture.viewFirstSlice = 0;
+    g_SceneDepthTex.texture.viewNumSlices = 1;
+    g_SceneDepthTex.texture.compMap = GX2Types::kCompMapRGBA;
+    InitTextureRegs()(&g_SceneDepthTex.texture);
+    InitSampler()(&g_SceneDepthTex.sampler, GX2Types::kTexClampModeClamp, GX2Types::kTexXYFilterModePoint);
+    InitSamplerClamping()(&g_SceneDepthTex.sampler, GX2Types::kTexClampModeClamp, GX2Types::kTexClampModeClamp,
+                          GX2Types::kTexClampModeClamp);
+    return true;
+}
+
+// ---------------------------------------------------------------------------
+// Drawing before the UI
+// ---------------------------------------------------------------------------
+// Scan-out is after the HUD is composited, so an effect drawn there lies over hearts and menus. GameScene_Layout
+// (0x0304a898) is the game's HUD-compositing draw delegate: with pass 8 and step 1 the 3D scene is finished and
+// post-processed and the UI has not been drawn. A draw there goes through a context state the host owns, because
+// state written into the game's would be the game's next draw's problem.
+//
+// That context is built at scan-out and never anywhere else. GX2SetupContextStateEx writes default GPU state, so
+// calling it mid-frame lands on whatever the engine had configured, and the engine's next draw runs against state it
+// never set - a crash on boot, which moved around as the call site did.
+constexpr uintptr_t kGameSceneLayout = 0x0304a898;
+constexpr int32_t kLayoutPassHud = 8;
+constexpr int32_t kLayoutStepDraw = 1;
+constexpr uint32_t kContextStateSize = 0xA100;   // sizeof(GX2ContextState), fixed by the ABI
+
+inline void* g_PassContext = nullptr;
+inline bool g_PassContextTried = false;
+inline DrawCallback g_PreUiCallbacks[kMaxCallbacks]{};
+inline size_t g_PreUiCallbackCount = 0;
+inline bool g_PreUiDoneThisFrame = false;
+
+inline void EnsurePassContext() {
+    if (g_PassContextTried) return;
+    g_PassContextTried = true;
+
+    void* game = GetContextState();
+    void* ctx = AllocMEM1(kContextStateSize, 256);
+    if (!ctx || !game) {
+        BotW::OSLog("WiiXLaunch: pre-UI draw unavailable - no memory for a private context state\n");
+        return;
+    }
+    SetupContextStateEx()(ctx, 0);
+    // Setting a context up writes default state; the engine's own goes straight back.
+    SetContextState()(game);
+    g_PassContext = ctx;
+    BotW::OSLog("WiiXLaunch: private GX2 context ready - pre-UI draw armed\n");
+}
+
+// Everything a pass needs that must exist before it first draws mid-frame, built at scan-out.
+inline void PrimePassResources(const GX2Types::ColorBuffer* tv) {
+    bool anyPass = false;
+    for (const ShaderPass& p : g_Passes) anyPass = anyPass || p.used;
+    if (!anyPass || g_PreUiCallbackCount == 0) return;
+    EnsurePassScene(tv);
+    EnsurePassContext();
+}
+
+WIIXL_HOOK_DEFINE_TRAMPOLINE(GameSceneLayoutHook) {
+    static void Callback(void* userPtr, int* step) {
+        ++g_StatLayouts;
+        const bool hud = step && step[5] == kLayoutPassHud && step[0] == kLayoutStepDraw;
+        if (hud) ++g_StatHuds;
+
+        // Every HUD pass, not only those that follow a freshly rendered scene: the game composites about twice per scene
+        // and each composite is its own image, so a lens drawn into one is not in the next.
+        if (hud && g_PassContext && g_PreUiCallbackCount) {
+            if (g_PreUiDoneThisFrame) {
+                ++g_StatSkipDone;
+            } else {
+                const uintptr_t renderBuffer = static_cast<uintptr_t>(static_cast<uint32_t>(step[3]));
+                const uintptr_t colorTarget = PlausibleTarget(renderBuffer)
+                    ? *reinterpret_cast<uintptr_t*>(renderBuffer + kRbColorTargetOffset) : 0;
+                auto* color = PlausibleTarget(colorTarget)
+                    ? reinterpret_cast<GX2Types::ColorBuffer*>(colorTarget + kRenderTargetBufferOffset) : nullptr;
+
+                if (!color || !color->surface.image) {
+                    ++g_StatSkipTarget;
+                } else if (color->surface.width < kTvMinWidth) {
+                    // The GamePad's HUD pass, or something that is not the TV.
+                    ++g_StatSkipSize;
+                    if (g_StatSizeLogs < 4) {
+                        ++g_StatSizeLogs;
+                        BotW::OSLog("WiiXLaunch: HUD pass skipped, target %ux%u\n", color->surface.width, color->surface.height);
+                    }
+                } else {
+                    void* game = GetContextState();
+                    g_ContextOverride = g_PassContext;
+                    ++g_PassEvent;
+                    for (size_t i = 0; i < g_PreUiCallbackCount; ++i) {
+                        if (g_PreUiCallbacks[i]) {
+                            g_PreUiCallbacks[i](nullptr, color, static_cast<int>(color->surface.width),
+                                                static_cast<int>(color->surface.height));
+                        }
+                    }
+                    g_ContextOverride = nullptr;
+                    if (game) SetContextState()(game);
+                    g_PreUiDoneThisFrame = true;
+                    ++g_StatPreUi;
+                }
+            }
+        }
+        Orig(userPtr, step);
+    }
+};
+
+// ---------------------------------------------------------------------------
 // Drawing under the HUD
 // ---------------------------------------------------------------------------
 // The swap hook above sees the finished frame, HUD and menus included, so
@@ -913,6 +1160,7 @@ constexpr uintptr_t kHudLayerParticleDraw = 0x033d3ee0;
 constexpr int32_t   kHudGroupBeforeLayout = 0xa;
 constexpr uint32_t  kMainHudLayerId       = 8;
 constexpr uint32_t  kContextStateSize     = 0xa100;   // sizeof(GX2ContextState)
+constexpr uint32_t  kRenderInfoScanWords  = 16;
 
 inline void* g_PreHudContextState = nullptr;
 inline bool g_PreHudBroken = false;
@@ -1067,6 +1315,7 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(AglCopyToScanBufferHook) {
 
                     g_DepthClearedThisFrame = false;
                     BatchNewFrame();
+                    if (width >= kTvMinWidth) PrimePassResources(tvColorBuffer);
 
                     static uint32_t s_count = 0;
                     if ((s_count++ % 300) == 0) {
@@ -1088,6 +1337,20 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(AglCopyToScanBufferHook) {
                     // After the host's own draw callbacks, so a mod's tick sees a
                     // frame the host has already drawn into rather than racing it.
                     WiiXLaunch::Tick::RunAll();
+
+                    // The next frame's first scene bind claims the depth again. Only the TV scan-out ends a frame:
+                    // the GamePad's comes from the same one.
+                    if (width >= kTvMinWidth) {
+                        g_SceneDepthLatched = false;
+                        g_PreUiDoneThisFrame = false;
+                        if ((++g_StatScanOuts % 1200u) == 0) {
+                            BotW::OSLog("WiiXLaunch: per 1200 scan-outs: %u scenes rendered, %u layout events, %u HUD passes, %u pre-UI draws (skipped: %u already drawn, %u no target, %u not the TV)\n",
+                                        g_StatScenes, g_StatLayouts, g_StatHuds, g_StatPreUi, g_StatSkipDone,
+                                        g_StatSkipTarget, g_StatSkipSize);
+                            g_StatScenes = g_StatLayouts = g_StatHuds = g_StatPreUi = 0;
+                            g_StatSkipDone = g_StatSkipTarget = g_StatSkipSize = 0;
+                        }
+                    }
                 }
             }
         }
@@ -1109,6 +1372,8 @@ inline void Init() {
 
     BotW::OSLog("WiiXLaunch: GX2::Init() calling Install on 0x03a75d48\n");
     impl::AglCopyToScanBufferHook::Install(0, 0x03a75d48);
+    impl::AglBindRenderTargetsHook::Install(0, impl::kAglBindRenderTargets);
+    impl::GameSceneLayoutHook::Install(0, impl::kGameSceneLayout);
     BotW::OSLog("WiiXLaunch: GX2::Init() hook installed successfully\n");
 
     // Tell base where a frame happens. It cannot know - a frame is a graphics
@@ -1470,6 +1735,195 @@ inline TextureHandle BackdropTexture() {
 
 inline bool BackdropReady() { return impl::g_BlurAvailable; }
 
+// Callbacks like DrawCallback, run before the HUD is drawn: the target is the scene's finished colour buffer and the
+// draw goes through a private context state. Only called on frames the pre-UI draw is available (PreUiReady), so a
+// mod keeps its scan-out callback for the frames it is not and skips that one when this ran.
+inline void RegisterPreUiDrawCallback(DrawCallback cb) {
+    if (cb && impl::g_PreUiCallbackCount < impl::kMaxCallbacks) impl::g_PreUiCallbacks[impl::g_PreUiCallbackCount++] = cb;
+}
+
+// True once the private context state exists, which is the first scan-out after a shader pass and a pre-UI
+// callback are both registered.
+inline bool PreUiReady() { return impl::g_PassContext != nullptr; }
+
+// True once a scene's depth buffer has been seen, which DrawShaderPass then binds as texture 1 (point filtered, raw
+// [0,1] depth as the game wrote it). It outlives the frame that latched it: the game composites about twice per scene
+// it renders, and the composite that follows a scene-less vsync still shows the last scene's depth.
+inline bool SceneDepthReady() {
+    return impl::g_SceneDepth && impl::g_SceneDepth->surface.image;
+}
+
+// Builds a shader pass from a GFD holding one vertex shader (a float2 position, then up to 12 float4 parameters, all
+// attributes) and one pixel shader.
+// The bytes are copied into host memory, so the caller's copy need not outlive the call. Returns 0 on failure.
+using ShaderPassHandle = uint32_t;
+
+inline ShaderPassHandle CreateShaderPass(const void* gsh, size_t size) {
+    constexpr uint32_t kVsHeader = GFD::kBlockTypeVertexShaderHeader;
+    constexpr uint32_t kVsProgram = GFD::kBlockTypeVertexShaderProgram;
+    constexpr uint32_t kPsHeader = GFD::kBlockTypePixelShaderHeader;
+    constexpr uint32_t kPsProgram = GFD::kBlockTypePixelShaderProgram;
+
+    size_t slot = 0;
+    while (slot < impl::kMaxShaderPasses && impl::g_Passes[slot].used) ++slot;
+    if (slot == impl::kMaxShaderPasses) {
+        BotW::OSLog("WiiXLaunch: shader pass refused - all %u slots are held\n", static_cast<unsigned>(impl::kMaxShaderPasses));
+        return 0;
+    }
+
+    const uint32_t vsHeaderSize = GFD::BlockDataSize(gsh, size, kVsHeader);
+    const uint32_t vsProgramSize = GFD::BlockDataSize(gsh, size, kVsProgram);
+    const uint32_t psHeaderSize = GFD::BlockDataSize(gsh, size, kPsHeader);
+    const uint32_t psProgramSize = GFD::BlockDataSize(gsh, size, kPsProgram);
+    if (!vsHeaderSize || !vsProgramSize || !psHeaderSize || !psProgramSize) {
+        BotW::OSLog("WiiXLaunch: shader pass refused - the GFD lacks a vertex or pixel shader block\n");
+        return 0;
+    }
+
+    auto* vsHeader = static_cast<uint8_t*>(impl::AllocPassBuffer(vsHeaderSize, 256));
+    auto* psHeader = static_cast<uint8_t*>(impl::AllocPassBuffer(psHeaderSize, 256));
+    auto* vsProgram = static_cast<uint8_t*>(impl::AllocPassBuffer(vsProgramSize, GX2Types::kShaderProgramAlignment));
+    auto* psProgram = static_cast<uint8_t*>(impl::AllocPassBuffer(psProgramSize, GX2Types::kShaderProgramAlignment));
+    if (!vsHeader || !psHeader || !vsProgram || !psProgram) {
+        BotW::OSLog("WiiXLaunch: shader pass refused - out of memory\n");
+        return 0;
+    }
+
+    impl::ShaderPass& pass = impl::g_Passes[slot];
+    pass.vs = GFD::GetShader<GX2Types::VertexShader>(gsh, kVsHeader, kVsProgram, vsHeader, vsHeaderSize, vsProgram, vsProgramSize);
+    pass.ps = GFD::GetShader<GX2Types::PixelShader>(gsh, kPsHeader, kPsProgram, psHeader, psHeaderSize, psProgram, psProgramSize);
+    if (!pass.vs || !pass.ps) {
+        BotW::OSLog("WiiXLaunch: shader pass refused - the GFD would not parse (vs=%p ps=%p)\n", pass.vs, pass.ps);
+        return 0;
+    }
+    // A float2 position, then float4 parameters. Their number is whatever the vertex shader declares.
+    const uint32_t attribCount = pass.vs->attribVarCount;
+    if (attribCount < 1 || attribCount > 1 + impl::kPassMaxVec4) {
+        BotW::OSLog("WiiXLaunch: shader pass refused - the vertex shader has %u attributes, a pass takes a position and up to %u float4s\n",
+                    attribCount, static_cast<unsigned>(impl::kPassMaxVec4));
+        return 0;
+    }
+    pass.dataVec4 = attribCount - 1;
+
+    GX2Types::AttribStream attribs[1 + impl::kPassMaxVec4]{};
+    for (uint32_t i = 0; i < attribCount; ++i) {
+        attribs[i].location = i;
+        attribs[i].buffer = 0;
+        attribs[i].offset = i == 0 ? 0u : 8u + 16u * (i - 1);
+        attribs[i].format = i == 0 ? GX2Types::kAttribFormatFloat32x2 : GX2Types::kAttribFormatFloat32x4;
+        attribs[i].type = GX2Types::kAttribIndexPerVertex;
+        attribs[i].aluDivisor = 0;
+        attribs[i].mask = i == 0 ? 0x00010405u : 0x00010203u;
+        attribs[i].endianSwap = GX2Types::kEndianSwapDefault;
+    }
+
+    const uint32_t fetchSize = impl::CalcFetchShaderSizeEx()(attribCount, GX2Types::kFetchShaderTessellationNone,
+                                                              GX2Types::kTessellationModeDiscrete);
+    auto* fetchProgram = static_cast<uint8_t*>(impl::AllocPassBuffer(fetchSize, GX2Types::kShaderProgramAlignment));
+    if (!fetchProgram) {
+        BotW::OSLog("WiiXLaunch: shader pass refused - out of memory for the fetch shader\n");
+        return 0;
+    }
+    impl::InitFetchShaderEx()(&pass.fetch, fetchProgram, attribCount, attribs, GX2Types::kFetchShaderTessellationNone,
+                              GX2Types::kTessellationModeDiscrete);
+
+    impl::Invalidate()(GX2Types::kInvalidateModeCpuShader, vsProgram, vsProgramSize);
+    impl::Invalidate()(GX2Types::kInvalidateModeCpuShader, psProgram, psProgramSize);
+    impl::Invalidate()(GX2Types::kInvalidateModeCpuShader, fetchProgram, fetchSize);
+
+    pass.used = true;
+    BotW::OSLog("WiiXLaunch: shader pass %u ready (vs %u B, ps %u B)\n", static_cast<unsigned>(slot + 1), vsProgramSize, psProgramSize);
+    return static_cast<ShaderPassHandle>(slot + 1);
+}
+
+// Draws `pass` over the rectangle (x, y, w, h) of `dstTexture`, in pixels from the top left. `uniforms` are the
+// pass's float4 parameters, exactly as many as its vertex shader has attributes beyond the position, and the frame so far is texture 0. The rectangle is the pass's whole cost: pixels
+// outside it are never shaded, so a mod that knows where its effect is should say so.
+inline bool DrawShaderPass(void* dstTexture, ShaderPassHandle handle, const void* uniforms, uint32_t uniformSize,
+                           int32_t x, int32_t y, int32_t w, int32_t h) {
+    auto* dst = reinterpret_cast<GX2Types::ColorBuffer*>(dstTexture);
+    if (!dst || !dst->surface.image || handle == 0 || handle > impl::kMaxShaderPasses) return false;
+    impl::ShaderPass& pass = impl::g_Passes[handle - 1];
+    if (!pass.used || uniformSize != pass.dataVec4 * 16u || (uniformSize && !uniforms)) return false;
+
+    void* contextState = impl::DrawContext();
+    if (!contextState || !impl::EnsurePassScene(dst)) {
+        static bool s_loggedRefusal = false;
+        if (!s_loggedRefusal) {
+            s_loggedRefusal = true;
+            BotW::OSLog("WiiXLaunch: shader pass draw refused - %s\n",
+                        contextState ? "no scene copy" : "no context state");
+        }
+        return false;
+    }
+
+    const int32_t dstW = static_cast<int32_t>(dst->surface.width);
+    const int32_t dstH = static_cast<int32_t>(dst->surface.height);
+    const int32_t x0 = x < 0 ? 0 : x;
+    const int32_t y0 = y < 0 ? 0 : y;
+    const int32_t x1 = (x + w) > dstW ? dstW : (x + w);
+    const int32_t y1 = (y + h) > dstH ? dstH : (y + h);
+    if (x1 <= x0 || y1 <= y0) return true;    // nothing on screen is not a failure
+
+    static bool s_loggedFirstDraw = false;
+    if (!s_loggedFirstDraw) {
+        s_loggedFirstDraw = true;
+        BotW::OSLog("WiiXLaunch: shader pass first draw: rect %u,%u %ux%u on %ux%u, %s context, depth %s\n",
+                    static_cast<uint32_t>(x0), static_cast<uint32_t>(y0), static_cast<uint32_t>(x1 - x0),
+                    static_cast<uint32_t>(y1 - y0), static_cast<uint32_t>(dstW), static_cast<uint32_t>(dstH),
+                    impl::g_ContextOverride ? "private" : "game", SceneDepthReady() ? "bound" : "missing");
+    }
+
+    // The pass cannot sample the buffer it is blending into. Passes drawn in one HUD pass all sample the frame as it was
+    // before the first of them, so it is copied once.
+    if (!impl::g_ContextOverride || impl::g_PassSceneEvent != impl::g_PassEvent) {
+        impl::AliasScene(dst);
+        impl::BlurTap(&impl::g_PassScene.color, &impl::g_SceneAlias, 0.0f, 0.0f, 1.0f, true);
+        impl::Invalidate()(GX2Types::kInvalidateModeColorBuffer | GX2Types::kInvalidateModeTexture,
+                           impl::g_PassScene.color.surface.image, impl::g_PassScene.color.surface.imageSize);
+        impl::g_PassSceneEvent = impl::g_PassEvent;
+    }
+
+    // Four vertices, each a position and the same parameters.
+    static const float kCorners[4][2] = {{-1.0f, -1.0f}, {1.0f, -1.0f}, {-1.0f, 1.0f}, {1.0f, 1.0f}};
+    const uint32_t stride = 8u + pass.dataVec4 * 16u;
+    uint8_t* vertices = impl::g_PassVertices + (impl::g_PassSlot++ % impl::kPassSlots) * impl::kPassSlotBytes;
+    for (uint32_t i = 0; i < 4; ++i) {
+        uint8_t* vertex = vertices + i * stride;
+        memcpy(vertex, kCorners[i], 8);
+        if (uniformSize) memcpy(vertex + 8, uniforms, uniformSize);
+    }
+    impl::Invalidate()(GX2Types::kInvalidateModeCpuAttributeBuffer, vertices, 4u * stride);
+
+    impl::SetContextState()(contextState);
+    impl::SetShaderModeEx()(GX2Types::kShaderModeUniformRegister, 0x30, 0x40, 0x0, 0x0, 0xc8, 0xc0);
+    impl::SetColorBuffer()(dst, 0);
+    impl::SetTargetChannelMasks()(0x0F, 0, 0, 0, 0, 0, 0, 0);
+    impl::SetViewport()(0.0f, 0.0f, static_cast<float>(dstW), static_cast<float>(dstH), 0.0f, 1.0f);
+    impl::SetScissor()(static_cast<uint32_t>(x0), static_cast<uint32_t>(y0),
+                       static_cast<uint32_t>(x1 - x0), static_cast<uint32_t>(y1 - y0));
+    impl::SetDepthOnlyControl()(0, 0, GX2Types::kCompareFuncAlways);
+    impl::SetCullOnlyControl()(GX2Types::kFrontFaceCcw, 0, 0);
+    impl::SetColorControl()(GX2Types::kLogicOpCopy, 1, 0, 1);
+    impl::SetBlendControl()(0, 4, 5, 0, 0, 1, 0, 0);
+
+    impl::SetPixelTexture()(&impl::g_PassScene.tex.texture, 0);
+    impl::SetPixelSampler()(&impl::g_PassScene.tex.sampler, 0);
+    // The scene's depth as texture 1 when this frame has one (SceneDepthReady says so).
+    if (impl::AliasSceneDepth()) {
+        impl::SetPixelTexture()(&impl::g_SceneDepthTex.texture, 1);
+        impl::SetPixelSampler()(&impl::g_SceneDepthTex.sampler, 1);
+    }
+
+    impl::SetFetchShader()(&pass.fetch);
+    impl::SetVertexShader()(pass.vs);
+    impl::SetPixelShader()(pass.ps);
+    impl::SetAttribBuffer()(0, 4u * stride, stride, vertices);
+    impl::DrawEx()(GX2Types::kPrimitiveModeTriangleStrip, 4, 0, 1);
+    return true;
+}
+
+
 // Reads a texture packaged by scripts/pack_resources.py/pack_texture_gx2.py
 // (16-byte big-endian header: width, height, format, dataSize, followed by
 // raw RGBA8 pixels) straight off disk and hands it to CreateTexture - the
@@ -1728,6 +2182,12 @@ namespace Blend {
 inline TextureHandle BlurBackdrop(void*, uint32_t = 4, uint32_t = 2) { return 0; }
 inline TextureHandle BackdropTexture() { return 0; }
 inline bool BackdropReady() { return false; }
+using ShaderPassHandle = uint32_t;
+inline ShaderPassHandle CreateShaderPass(const void*, size_t) { return 0; }
+inline bool SceneDepthReady() { return false; }
+inline void RegisterPreUiDrawCallback(void (*)(void*, void*, int, int)) {}
+inline bool PreUiReady() { return false; }
+inline bool DrawShaderPass(void*, ShaderPassHandle, const void*, uint32_t, int32_t, int32_t, int32_t, int32_t) { return false; }
 inline void BeginBatch(void*) {}
 inline void BatchQuad(TextureHandle, const TextureVertex*, const BlendState& = Blend::Alpha) {}
 inline void EndBatch() {}

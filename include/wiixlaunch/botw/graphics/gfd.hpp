@@ -127,6 +127,26 @@ inline bool RelocateBlock(const BlockHeader* blockHeader, const uint8_t* blockDa
     return true;
 }
 
+// Size of the first block of `blockType` in a GFD file, or 0 when there is none - how a caller sizes the buffers
+// GetShader fills. `fileSize` bounds the walk, so a truncated or hostile file ends it rather than running off the end.
+inline uint32_t BlockDataSize(const void* file, size_t fileSize, uint32_t blockType) {
+    if (!file || fileSize < sizeof(Header)) return 0;
+    auto* fileHeader = reinterpret_cast<const Header*>(file);
+    if (fileHeader->magic != kHeaderMagic) return 0;
+
+    size_t offset = fileHeader->headerSize;
+    while (offset + sizeof(BlockHeader) <= fileSize) {
+        auto* blockHeader = reinterpret_cast<const BlockHeader*>(static_cast<const uint8_t*>(file) + offset);
+        if (blockHeader->magic != kBlockHeaderMagic || blockHeader->majorVersion != kBlockVersionMajor) return 0;
+        if (blockHeader->type == blockType) {
+            return offset + blockHeader->headerSize + blockHeader->dataSize <= fileSize ? blockHeader->dataSize : 0;
+        }
+        if (blockHeader->type == kBlockTypeEndOfFile) return 0;
+        offset += static_cast<size_t>(blockHeader->headerSize) + blockHeader->dataSize;
+    }
+    return 0;
+}
+
 // headerBuffer must be at least as large as the real file's block dataSize
 // (not just sizeof(ShaderT) - see the file-level comment above); 2KB covers
 // any shader simple enough not to need GX2R buffers. programBuffer must be
