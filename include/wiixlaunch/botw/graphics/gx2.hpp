@@ -909,13 +909,23 @@ constexpr size_t kMaxShaderPasses = 4;
 constexpr size_t kPassMaxVec4 = 12;           // float4 parameters a pass may stream with its vertices
 constexpr size_t kPassSlotBytes = 1024;       // room for four vertices of a position and kPassMaxVec4 parameters
 constexpr size_t kPassSlots = 8;              // one per pass per frame, so the GPU never reads a slot being rewritten
+constexpr uint32_t kPassDataMaxSide = 256;    // a pass's data texture, at most this many texels each way
 
+// A pass's data texture: RGBA8 texels the mod writes and the pass samples as texture 2, for whatever does not fit in
+// twelve float4s - a lookup table, a mask, a list. Linear rather than tiled so the CPU can write it in place, and two of
+// them, written alternately, so an update never lands in the one a draw already queued is about to read.
 struct ShaderPass {
     GX2Types::VertexShader* vs = nullptr;
     GX2Types::PixelShader* ps = nullptr;
     GX2Types::FetchShader fetch{};
     uint32_t dataVec4 = 0;      // float4 parameters streamed with each vertex: the vertex shader's attributes less its position
     bool used = false;
+
+    TextureWrapper data[2]{};
+    uint32_t dataWidth = 0;     // fixed by the first SetShaderPassData: the textures come from the arena, which never frees
+    uint32_t dataHeight = 0;
+    uint32_t dataCurrent = 0;   // the one the next draw binds
+    bool hasData = false;
 };
 
 inline ShaderPass g_Passes[kMaxShaderPasses];
@@ -1914,12 +1924,81 @@ inline bool DrawShaderPass(void* dstTexture, ShaderPassHandle handle, const void
         impl::SetPixelTexture()(&impl::g_SceneDepthTex.texture, 1);
         impl::SetPixelSampler()(&impl::g_SceneDepthTex.sampler, 1);
     }
+    // The pass's own data as texture 2, once the mod has given it some.
+    if (pass.hasData) {
+        impl::SetPixelTexture()(&pass.data[pass.dataCurrent].texture, 2);
+        impl::SetPixelSampler()(&pass.data[pass.dataCurrent].sampler, 2);
+    }
 
     impl::SetFetchShader()(&pass.fetch);
     impl::SetVertexShader()(pass.vs);
     impl::SetPixelShader()(pass.ps);
     impl::SetAttribBuffer()(0, 4u * stride, stride, vertices);
     impl::DrawEx()(GX2Types::kPrimitiveModeTriangleStrip, 4, 0, 1);
+    return true;
+}
+
+// Gives `pass` a data texture: width x height RGBA8 texels, row by row from the top, which every later draw of the pass
+// binds as texture 2 - unorm, point filtered, clamped, so texel (x, y) reads back exactly at its centre. Call it again
+// whenever the data changes; the size is fixed by the first call. Returns false for a bad pass or size, or no memory.
+inline bool SetShaderPassData(ShaderPassHandle handle, const void* rgba, uint32_t width, uint32_t height) {
+    if (handle == 0 || handle > impl::kMaxShaderPasses || !rgba || width == 0 || height == 0 ||
+        width > impl::kPassDataMaxSide || height > impl::kPassDataMaxSide) {
+        return false;
+    }
+    impl::ShaderPass& pass = impl::g_Passes[handle - 1];
+    if (!pass.used) return false;
+
+    if (!pass.hasData) {
+        for (auto& t : pass.data) {
+            t.texture.surface.dim = GX2Types::kSurfaceDimTexture2D;
+            t.texture.surface.width = width;
+            t.texture.surface.height = height;
+            t.texture.surface.depth = 1;
+            t.texture.surface.mipLevels = 1;
+            t.texture.surface.format = GX2Types::kSurfaceFormatUnormR8G8B8A8;
+            t.texture.surface.aa = GX2Types::kAaMode1x;
+            t.texture.surface.use = GX2Types::kSurfaceUseTexture;
+            t.texture.surface.tileMode = GX2Types::kTileModeLinearAligned;
+            impl::CalcSurfaceSizeAndAlignment()(&t.texture.surface);
+            t.texture.surface.image = impl::AllocPassBuffer(t.texture.surface.imageSize, t.texture.surface.alignment);
+            if (!t.texture.surface.image) {
+                BotW::OSLog("WiiXLaunch: shader pass %u data refused - out of memory (%u bytes)\n",
+                            static_cast<unsigned>(handle), t.texture.surface.imageSize);
+                return false;
+            }
+            memset(t.texture.surface.image, 0, t.texture.surface.imageSize);
+            t.texture.viewFirstMip = 0;
+            t.texture.viewNumMips = 1;
+            t.texture.viewFirstSlice = 0;
+            t.texture.viewNumSlices = 1;
+            t.texture.compMap = GX2Types::kCompMapRGBA;
+            impl::InitTextureRegs()(&t.texture);
+            impl::InitSampler()(&t.sampler, GX2Types::kTexClampModeClamp, GX2Types::kTexXYFilterModePoint);
+            impl::InitSamplerClamping()(&t.sampler, GX2Types::kTexClampModeClamp, GX2Types::kTexClampModeClamp,
+                                        GX2Types::kTexClampModeClamp);
+        }
+        pass.dataWidth = width;
+        pass.dataHeight = height;
+        pass.hasData = true;
+        BotW::OSLog("WiiXLaunch: shader pass %u data %ux%u (pitch %u)\n", static_cast<unsigned>(handle), width, height,
+                    pass.data[0].texture.surface.pitch);
+    } else if (width != pass.dataWidth || height != pass.dataHeight) {
+        BotW::OSLog("WiiXLaunch: shader pass %u data refused - %ux%u, but it was created %ux%u\n",
+                    static_cast<unsigned>(handle), width, height, pass.dataWidth, pass.dataHeight);
+        return false;
+    }
+
+    // Into the one the last draw did not bind, then make it current.
+    const uint32_t next = pass.dataCurrent ^ 1u;
+    GX2Types::Texture& tex = pass.data[next].texture;
+    auto* dstRows = static_cast<uint8_t*>(tex.surface.image);
+    const auto* srcRows = static_cast<const uint8_t*>(rgba);
+    const uint32_t rowBytes = width * 4u;
+    const uint32_t pitchBytes = tex.surface.pitch * 4u;
+    for (uint32_t y = 0; y < height; ++y) memcpy(dstRows + y * pitchBytes, srcRows + y * rowBytes, rowBytes);
+    impl::Invalidate()(GX2Types::kInvalidateModeCpuTexture, tex.surface.image, tex.surface.imageSize);
+    pass.dataCurrent = next;
     return true;
 }
 
@@ -2188,6 +2267,7 @@ inline bool SceneDepthReady() { return false; }
 inline void RegisterPreUiDrawCallback(void (*)(void*, void*, int, int)) {}
 inline bool PreUiReady() { return false; }
 inline bool DrawShaderPass(void*, ShaderPassHandle, const void*, uint32_t, int32_t, int32_t, int32_t, int32_t) { return false; }
+inline bool SetShaderPassData(ShaderPassHandle, const void*, uint32_t, uint32_t) { return false; }
 inline void BeginBatch(void*) {}
 inline void BatchQuad(TextureHandle, const TextureVertex*, const BlendState& = Blend::Alpha) {}
 inline void EndBatch() {}

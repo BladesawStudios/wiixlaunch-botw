@@ -52,7 +52,8 @@ constexpr uint16_t kVersionMajor = 1;
 // run from the HUD layer's own draw). 1.3 appends the shader pass - CreateShaderPass, DrawShaderPass and
 // SupportsShaderPass - and SceneDepthReady, after which DrawShaderPass binds the scene's depth as texture 1. 1.4 appends
 // RegisterPreUiDraw and PreUiReady: a callback run on every HUD composite, with a private context state, for passes.
-constexpr uint16_t kVersionMinor = 4;
+// 1.5 appends SetShaderPassData: a pass's own RGBA8 data texture, bound as texture 2.
+constexpr uint16_t kVersionMinor = 5;
 
 #if WIIXL_SWITCH
 namespace Backend = WiiXLaunch::BotW::NVN;
@@ -741,6 +742,19 @@ extern "C" inline uint32_t GfxPreUiReady() {
 // GX2 only for now: NVN wants its own compiled shader binaries, which a CafeGLSL GFD is not.
 extern "C" inline uint32_t GfxSupportsShaderPass() { return kIsGX2 ? 1u : 0u; }
 
+// Gives a pass a data texture, for what does not fit in its twelve vec4 parameters: width x height RGBA8 texels, row by
+// row from the top (at most 256 each way). Every later draw of the pass binds it as texture 2 - unorm, point filtered,
+// clamped - so the shader reads texel (x, y) at its centre, ((x, y) + 0.5) / size. Call again whenever the data changes;
+// the size is fixed by the first call. Double-buffered in the host, so an update never disturbs a draw already queued.
+extern "C" inline uint32_t GfxSetShaderPassData(uint32_t pass, const void* rgba, uint32_t width, uint32_t height) {
+#if WIIXL_SWITCH
+    (void)pass; (void)rgba; (void)width; (void)height;
+    return 0;
+#else
+    return Backend::SetShaderPassData(pass, rgba, width, height) ? 1u : 0u;
+#endif
+}
+
 // --- the table -------------------------------------------------------------
 inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("IsGX2",              &GfxIsGX2),
@@ -783,6 +797,9 @@ inline const Surface::Symbol kSymbols[] = {
     // v1.4
     WIIXL_SURFACE_SYMBOL("RegisterPreUiDraw",  &GfxRegisterPreUiDraw),
     WIIXL_SURFACE_SYMBOL("PreUiReady",         &GfxPreUiReady),
+
+    // v1.5
+    WIIXL_SURFACE_SYMBOL("SetShaderPassData",  &GfxSetShaderPassData),
 };
 
 } // namespace impl
