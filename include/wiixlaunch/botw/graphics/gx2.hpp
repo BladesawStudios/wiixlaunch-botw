@@ -912,8 +912,18 @@ constexpr size_t kPassSlots = 8;              // one per pass per frame, so the 
 constexpr uint32_t kPassDataMaxSide = 256;    // a pass's data texture, at most this many texels each way
 
 // A pass's data texture: RGBA8 texels the mod writes and the pass samples as texture 2, for whatever does not fit in
-// twelve float4s - a lookup table, a mask, a list. Linear rather than tiled so the CPU can write it in place, and two of
-// them, written alternately, so an update never lands in the one a draw already queued is about to read.
+// twelve float4s - a lookup table, a mask, a list. Linear rather than tiled so the CPU can write it in place.
+//
+// ONE texture, rewritten in place; an update racing a queued draw costs at most one frame showing the new data early.
+//
+// CEMU DOES NOT SEE A REWRITE ON ITS OWN. Its texture cache re-uploads a texture only when a hash of its memory changes,
+// and for a small uncompressed texture that hash reads every 4th 32-bit word (LatteTexture_CalculateTextureDataHash) -
+// GX2Invalidate only re-arms the check. An update that changes a texel the hash skips (one tile of a mask, say) is never
+// uploaded: the pass keeps reading what the texture held when Cemu first saw it. So every row is allocated with at least
+// four texels of padding past its width, which the shader never samples, and each update stamps a new counter into all of
+// it - so every update changes words the hash reads. (Double-buffering failed the same way, once per buffer.)
+constexpr uint32_t kPassDataPadding = 4;
+
 struct ShaderPass {
     GX2Types::VertexShader* vs = nullptr;
     GX2Types::PixelShader* ps = nullptr;
@@ -921,10 +931,10 @@ struct ShaderPass {
     uint32_t dataVec4 = 0;      // float4 parameters streamed with each vertex: the vertex shader's attributes less its position
     bool used = false;
 
-    TextureWrapper data[2]{};
-    uint32_t dataWidth = 0;     // fixed by the first SetShaderPassData: the textures come from the arena, which never frees
+    TextureWrapper data{};
+    uint32_t dataWidth = 0;     // fixed by the first SetShaderPassData: the texture comes from the arena, which never frees
     uint32_t dataHeight = 0;
-    uint32_t dataCurrent = 0;   // the one the next draw binds
+    uint32_t dataStamp = 0;     // written into the row padding on every update, so Cemu's hash sees the change
     bool hasData = false;
 };
 
@@ -1926,8 +1936,8 @@ inline bool DrawShaderPass(void* dstTexture, ShaderPassHandle handle, const void
     }
     // The pass's own data as texture 2, once the mod has given it some.
     if (pass.hasData) {
-        impl::SetPixelTexture()(&pass.data[pass.dataCurrent].texture, 2);
-        impl::SetPixelSampler()(&pass.data[pass.dataCurrent].sampler, 2);
+        impl::SetPixelTexture()(&pass.data.texture, 2);
+        impl::SetPixelSampler()(&pass.data.sampler, 2);
     }
 
     impl::SetFetchShader()(&pass.fetch);
@@ -1941,6 +1951,7 @@ inline bool DrawShaderPass(void* dstTexture, ShaderPassHandle handle, const void
 // Gives `pass` a data texture: width x height RGBA8 texels, row by row from the top, which every later draw of the pass
 // binds as texture 2 - unorm, point filtered, clamped, so texel (x, y) reads back exactly at its centre. Call it again
 // whenever the data changes; the size is fixed by the first call. Returns false for a bad pass or size, or no memory.
+// The texels are written in place, with the row-padding stamp that makes Cemu notice (see kPassDataPadding).
 inline bool SetShaderPassData(ShaderPassHandle handle, const void* rgba, uint32_t width, uint32_t height) {
     if (handle == 0 || handle > impl::kMaxShaderPasses || !rgba || width == 0 || height == 0 ||
         width > impl::kPassDataMaxSide || height > impl::kPassDataMaxSide) {
@@ -1950,7 +1961,8 @@ inline bool SetShaderPassData(ShaderPassHandle handle, const void* rgba, uint32_
     if (!pass.used) return false;
 
     if (!pass.hasData) {
-        for (auto& t : pass.data) {
+        {
+            impl::TextureWrapper& t = pass.data;
             t.texture.surface.dim = GX2Types::kSurfaceDimTexture2D;
             t.texture.surface.width = width;
             t.texture.surface.height = height;
@@ -1960,7 +1972,11 @@ inline bool SetShaderPassData(ShaderPassHandle handle, const void* rgba, uint32_
             t.texture.surface.aa = GX2Types::kAaMode1x;
             t.texture.surface.use = GX2Types::kSurfaceUseTexture;
             t.texture.surface.tileMode = GX2Types::kTileModeLinearAligned;
+            // Sized as if kPassDataPadding texels wider, which guarantees every row that much padding past the width
+            // (see kPassDataPadding); the texture itself keeps the real width, so the shader never sees the padding.
+            t.texture.surface.width = width + impl::kPassDataPadding;
             impl::CalcSurfaceSizeAndAlignment()(&t.texture.surface);
+            t.texture.surface.width = width;
             t.texture.surface.image = impl::AllocPassBuffer(t.texture.surface.imageSize, t.texture.surface.alignment);
             if (!t.texture.surface.image) {
                 BotW::OSLog("WiiXLaunch: shader pass %u data refused - out of memory (%u bytes)\n",
@@ -1981,24 +1997,29 @@ inline bool SetShaderPassData(ShaderPassHandle handle, const void* rgba, uint32_
         pass.dataWidth = width;
         pass.dataHeight = height;
         pass.hasData = true;
-        BotW::OSLog("WiiXLaunch: shader pass %u data %ux%u (pitch %u)\n", static_cast<unsigned>(handle), width, height,
-                    pass.data[0].texture.surface.pitch);
+        BotW::OSLog("WiiXLaunch: shader pass %u data %ux%u (pitch %u, %u bytes at %p)\n", static_cast<unsigned>(handle),
+                    width, height, pass.data.texture.surface.pitch, pass.data.texture.surface.imageSize,
+                    pass.data.texture.surface.image);
     } else if (width != pass.dataWidth || height != pass.dataHeight) {
         BotW::OSLog("WiiXLaunch: shader pass %u data refused - %ux%u, but it was created %ux%u\n",
                     static_cast<unsigned>(handle), width, height, pass.dataWidth, pass.dataHeight);
         return false;
     }
 
-    // Into the one the last draw did not bind, then make it current.
-    const uint32_t next = pass.dataCurrent ^ 1u;
-    GX2Types::Texture& tex = pass.data[next].texture;
+    GX2Types::Texture& tex = pass.data.texture;
     auto* dstRows = static_cast<uint8_t*>(tex.surface.image);
     const auto* srcRows = static_cast<const uint8_t*>(rgba);
     const uint32_t rowBytes = width * 4u;
     const uint32_t pitchBytes = tex.surface.pitch * 4u;
-    for (uint32_t y = 0; y < height; ++y) memcpy(dstRows + y * pitchBytes, srcRows + y * rowBytes, rowBytes);
+    // Each row's texels, then a fresh stamp across its padding, so this update changes words Cemu's hash reads.
+    const uint32_t stamp = ++pass.dataStamp;
+    for (uint32_t y = 0; y < height; ++y) {
+        uint8_t* row = dstRows + y * pitchBytes;
+        memcpy(row, srcRows + y * rowBytes, rowBytes);
+        auto* padding = reinterpret_cast<uint32_t*>(row + rowBytes);
+        for (uint32_t x = width; x < tex.surface.pitch; ++x) *padding++ = stamp;
+    }
     impl::Invalidate()(GX2Types::kInvalidateModeCpuTexture, tex.surface.image, tex.surface.imageSize);
-    pass.dataCurrent = next;
     return true;
 }
 

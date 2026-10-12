@@ -745,7 +745,7 @@ extern "C" inline uint32_t GfxSupportsShaderPass() { return kIsGX2 ? 1u : 0u; }
 // Gives a pass a data texture, for what does not fit in its twelve vec4 parameters: width x height RGBA8 texels, row by
 // row from the top (at most 256 each way). Every later draw of the pass binds it as texture 2 - unorm, point filtered,
 // clamped - so the shader reads texel (x, y) at its centre, ((x, y) + 0.5) / size. Call again whenever the data changes;
-// the size is fixed by the first call. Double-buffered in the host, so an update never disturbs a draw already queued.
+// the size is fixed by the first call.
 extern "C" inline uint32_t GfxSetShaderPassData(uint32_t pass, const void* rgba, uint32_t width, uint32_t height) {
 #if WIIXL_SWITCH
     (void)pass; (void)rgba; (void)width; (void)height;
