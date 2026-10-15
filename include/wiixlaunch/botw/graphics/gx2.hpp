@@ -2,6 +2,7 @@
 
 #include <wiixlaunch/platform.hpp>
 #include <wiixlaunch/loader/arena.hpp>
+#include <wiixlaunch/mem.hpp>
 #include <wiixlaunch/tick.hpp>
 #include <wiixlaunch/hook.hpp>
 #include <wiixlaunch/debug_log.hpp>
@@ -360,16 +361,23 @@ inline void* AllocMEM1(uint32_t size, uint32_t align = 256) {
     // by where module grants begin, so a font sheet cannot eat memory a loaded
     // .wxlm was promised.
     void* p = WiiXLaunch::Arena::AllocHost(size, align);
-    if (!p) {
-        static bool s_loggedOom = false;
-        if (!s_loggedOom) {
-            s_loggedOom = true;
-            BotW::OSLog("WiiXLaunch: arena exhausted for the host - %u bytes refused "
-                        "(%u of %u used, %u free, %u granted to modules). Load fewer "
-                        "fonts, or move host allocation with Mem::UseCoreinitHeap.\n",
-                        size, WiiXLaunch::Arena::HostUsed(), WiiXLaunch::Arena::Total(),
-                        WiiXLaunch::Arena::Free(), WiiXLaunch::Arena::ModuleCarved());
-        }
+    if (p) return p;
+
+    // The arena is full - shader passes, their scene copy, data textures and
+    // the GUI's art between them use it up - so the rest comes out of the
+    // game's own MEM2 heap. Cemu's GPU reads guest memory wherever it is, and
+    // these are taken once, at load, and kept: the game's heap never sees them
+    // churn. Before this, the GUI's first font sheet was simply refused and
+    // every mod's text drew nothing.
+    void* heap = WiiXLaunch::Mem::GetBaseHeapHandle(WiiXLaunch::Mem::BaseHeap::MEM2);
+    p = WiiXLaunch::Mem::AllocFromExpHeap(heap, size, static_cast<int32_t>(align));
+    static uint32_t s_overflowLogs = 0;
+    if (s_overflowLogs < 8) {
+        ++s_overflowLogs;
+        BotW::OSLog("WiiXLaunch: arena full for the host (%u of %u used, %u free, %u granted to modules) - "
+                    "%u bytes %s the game's MEM2 heap\n",
+                    WiiXLaunch::Arena::HostUsed(), WiiXLaunch::Arena::Total(), WiiXLaunch::Arena::Free(),
+                    WiiXLaunch::Arena::ModuleCarved(), size, p ? "taken from" : "refused by");
     }
     return p;
 #elif WIIXL_WIIU
