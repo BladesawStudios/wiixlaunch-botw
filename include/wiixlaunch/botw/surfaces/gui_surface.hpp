@@ -37,6 +37,7 @@
 #include <wiixlaunch/debug_log.hpp>
 #include <wiixlaunch/mod_context.hpp>
 #include <wiixlaunch/botw/gui/gui.hpp>
+#include <wiixlaunch/botw/gui/map_layer.hpp>
 
 #include <cstdint>
 
@@ -47,7 +48,10 @@ constexpr uint16_t kVersionMajor = 1;
 // 1.1 appends ImageEx, which is the first way a mod can reach orientation,
 // blending or rotation on a sprite. Appending bumps the MINOR, so every mod
 // built against v1.0 still resolves.
-constexpr uint16_t kVersionMinor = 1;
+//
+// 1.2 appends SetLayer: a module can draw into the map, over it and under its
+// icons and frame, instead of over everything (gui/map_layer.hpp).
+constexpr uint16_t kVersionMinor = 2;
 
 constexpr uint32_t kMaxFrameCallbacks = 8;
 constexpr uint32_t kMaxStyles = 32;
@@ -110,6 +114,7 @@ inline void DispatchFrame(GUI::Canvas& canvas) {
         WiiXLaunch::ModContext::SetCurrent(e.owner);
 
         e.fn();
+        GUI::SetLayer(GUI::impl::kLayerTop);   // one module's layer never leaks into the next's
 
         WiiXLaunch::ModContext::SetCurrent(nullptr);
         g_InFlight.depth--;
@@ -570,6 +575,17 @@ extern "C" inline uint32_t GuiImageEx(int32_t sprite, float x, float y, float w,
     return 1;
 }
 
+// Where what this module draws next goes, until it calls this again or its
+// frame callback returns: 0 over everything (the default), 1 into the map -
+// over the map itself, under its icons, cursor and the Sheikah Slate frame,
+// drawn only while the map is. Anything else is refused.
+extern "C" inline uint32_t GuiSetLayer(uint32_t layer) {
+    if (!g_Canvas || layer >= GUI::impl::kLayerCount) return 0;
+    if (layer == GUI::impl::kLayerMap) GUI::MapLayer::Enable();
+    GUI::SetLayer(static_cast<uint8_t>(layer));
+    return 1;
+}
+
 extern "C" inline uint32_t GuiSpriteReady(int32_t sprite) {
     return g_Canvas && g_Canvas->SpriteReady(static_cast<GUI::Sprite>(sprite)) ? 1u : 0u;
 }
@@ -936,6 +952,8 @@ inline const Surface::Symbol kSymbols[] = {
 
     WIIXL_SURFACE_SYMBOL("SetFocus",            &GuiSetFocus),
     WIIXL_SURFACE_SYMBOL("ClaimFocus",          &GuiClaimFocus),
+
+    WIIXL_SURFACE_SYMBOL("SetLayer",            &GuiSetLayer),
 };
 
 } // namespace impl

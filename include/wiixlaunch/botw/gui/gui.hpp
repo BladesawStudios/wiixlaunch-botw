@@ -1303,6 +1303,8 @@ inline void BuildFrame() {
     }
 
     g_RecordCount = 0;
+    for (uint32_t i = 0; i < kLayerCount; ++i) g_RecordLayerQuads[i] = 0;
+    g_RecordLayer = kLayerTop;
     g_RecordBlendCount = 0;
     g_RecordOverflowed = false;
     g_BlurRequested = false;
@@ -1314,7 +1316,10 @@ inline void BuildFrame() {
     if (g_FrameCallback) g_FrameCallback(g_Canvas);
     g_FrameOpen = false;
     g_Recording = false;
+    g_RecordLayer = kLayerTop;
     ResetAlpha();   // a callback that pushed without popping must not leak into the next frame
+
+    PublishRecord();
 
     g_FocusCountLast = g_FocusCount;
     if (g_FocusIndex >= g_FocusCount) g_FocusIndex = g_FocusCount > 0 ? g_FocusCount - 1 : 0;
@@ -1357,7 +1362,24 @@ inline void OnDraw(Backend::CommandBuffer*, void* dst, int width, int height) {
     ReplayRecord(dst);
 }
 
+// Draws one layer of the frame last built into `dst`, now - for a layer drawn
+// from inside the game's own frame rather than at present time. The caller
+// owns the GPU state around it (see gui/map_layer.hpp).
+inline void ReplayLayerNow(void* dst, uint32_t width, uint32_t height, uint8_t layer) {
+    if (!g_Initialized || !g_PipelineReady || !dst) return;
+    if (layer >= kLayerCount || g_ShownLayerQuads[layer] == 0) return;
+    UpdateViewport(width, height);
+    ReplayRecord(dst, layer);
+}
+
 } // namespace impl
+
+// Quads drawn from here on, until the frame ends or this is called again, go
+// into `layer`: impl::kLayerTop (the default, over everything) or
+// impl::kLayerMap (over the map, under its icons and frame).
+inline void SetLayer(uint8_t layer) {
+    impl::g_RecordLayer = layer < impl::kLayerCount ? layer : impl::kLayerTop;
+}
 
 // Installs the GX2 frame hook (Backend::Init) and starts loading the game's
 // fonts and UI art as soon as the graphics pipeline is up. Call once from
@@ -1625,6 +1647,7 @@ inline float GetEffectiveOutputAspect() { return 16.0f / 9.0f; }
 inline float FramesPerSecond() { return 0.0f; }
 inline void SetBackdropBlur(bool, uint32_t = 4, uint32_t = 2) {}
 inline bool IsBackdropBlurEnabled() { return false; }
+inline void SetLayer(uint8_t) {}
 
 } // namespace WiiXLaunch::BotW::GUI
 

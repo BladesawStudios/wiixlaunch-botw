@@ -660,6 +660,16 @@ inline void ApplyBlend(const BlendState& b) {
     g_BatchBlendValid = true;
 }
 
+// A second ring for draws made from inside the game's own frame (gui/map_layer.hpp). Those go into the game's command
+// list, which the GPU runs a frame or more later - long after the main ring's half has been handed to the next scan-out
+// and rewritten, so the GPU read whatever the next frame had put there and the layer flickered. This one is not tied to
+// scan-outs at all: it is written straight through and wraps, and is big enough that a wrap comes many frames after the
+// vertices it reuses were drawn.
+constexpr uint32_t kLateRingBytes = 2u * 1024u * 1024u;
+inline uint8_t* g_LateRing = nullptr;
+inline size_t g_LateRingUsed = 0;
+inline bool g_BatchLate = false;   // set around a late draw: BatchFlush writes to the late ring
+
 inline void BatchNewFrame() {
     g_BatchFrame++;
     g_BatchHalfUsed = 0;
@@ -709,7 +719,16 @@ inline void BatchFlush() {
         return;
     }
     const size_t bytes = g_BatchVertCount * sizeof(TextureVertex);
-    if (g_BatchHalfUsed + bytes > g_BatchHalfBytes) {
+    uint8_t* dst = nullptr;
+    if (g_BatchLate) {
+        if (!g_LateRing || bytes > kLateRingBytes) {
+            g_BatchVertCount = 0;
+            return;
+        }
+        if (g_LateRingUsed + bytes > kLateRingBytes) g_LateRingUsed = 0;
+        dst = g_LateRing + g_LateRingUsed;
+        g_LateRingUsed += (bytes + 255u) & ~static_cast<size_t>(255u);
+    } else if (g_BatchHalfUsed + bytes > g_BatchHalfBytes) {
         // Frame budget exhausted: drop rather than scribble over vertices
         // the GPU may still be reading from the previous frame. Said once, so
         // this is diagnosable instead of just looking like missing text.
@@ -723,7 +742,7 @@ inline void BatchFlush() {
         g_BatchVertCount = 0;
         return;
     }
-    uint8_t* dst = g_BatchRing + (g_BatchFrame & 1) * g_BatchHalfBytes + g_BatchHalfUsed;
+    if (!dst) dst = g_BatchRing + (g_BatchFrame & 1) * g_BatchHalfBytes + g_BatchHalfUsed;
     memcpy(dst, g_BatchVerts, bytes);
     Invalidate()(GX2Types::kInvalidateModeCpuAttributeBuffer, dst, static_cast<uint32_t>(bytes));
 
@@ -735,7 +754,7 @@ inline void BatchFlush() {
 
     // 64 is enough for an attribute buffer, and rounding to 256 wasted most
     // of a kilobyte across a frame's worth of small flushes.
-    g_BatchHalfUsed += (bytes + 63) & ~static_cast<size_t>(63);
+    if (!g_BatchLate) g_BatchHalfUsed += (bytes + 63) & ~static_cast<size_t>(63);
     g_BatchVertCount = 0;
     g_BatchDrawCalls++;
 }
@@ -964,11 +983,25 @@ inline bool EnsurePassScene(const GX2Types::ColorBuffer* dst) {
 
     constexpr uint32_t kFractions[][2] = {{1, 1}, {3, 4}, {1, 2}, {1, 3}, {1, 4}};
     constexpr uint32_t kHeadroom = 192u * 1024u;
+    // The whole world is drawn through this copy wherever a pass shades it, so a small one is the world at a small
+    // resolution. Which size the arena has room for depended on what else had loaded by the first frame (the GUI's
+    // font archive is read into the arena at about the same moment), so the world came up at 1/3 resolution on some
+    // boots. Rather than fall that far, 3/4 may come from the game's MEM2 heap - as AllocMEM1 does for anything the
+    // arena cannot hold - provided the heap keeps a wide margin for the game.
+    constexpr uint32_t kHeapMargin = 16u * 1024u * 1024u;
+#if WIIXL_CEMU
+    void* mem2 = WiiXLaunch::Mem::GetBaseHeapHandle(WiiXLaunch::Mem::BaseHeap::MEM2);
+    const uint32_t heapFree = mem2 ? WiiXLaunch::Mem::GetAllocatableSize(mem2, 256) : 0u;
+    BotW::OSLog("WiiXLaunch: shader pass scene copy - arena has %u free, the game's MEM2 heap %u\n",
+                WiiXLaunch::Arena::Free(), heapFree);
+#endif
     for (const auto& f : kFractions) {
         const uint32_t w = dst->surface.width * f[0] / f[1];
         const uint32_t h = dst->surface.height * f[0] / f[1];
 #if WIIXL_CEMU
-        if (WiiXLaunch::Arena::Free() < w * h * 4u + kHeadroom) continue;
+        const bool arenaFits = WiiXLaunch::Arena::Free() >= w * h * 4u + kHeadroom;
+        const bool heapFits = f[0] == 3 && f[1] == 4 && heapFree >= w * h * 4u + kHeapMargin;
+        if (!arenaFits && !heapFits) continue;
 #endif
         // sRGB like the game's own target, so what the pass samples and what it writes are both linear.
         if (EnsureBlurTarget(g_PassScene, w, h, GX2Types::kSurfaceFormatSrgbR8G8B8A8)) {
@@ -1016,12 +1049,22 @@ inline uint32_t g_StatSkipTarget = 0;
 inline uint32_t g_StatSkipSize = 0;
 inline uint32_t g_StatSizeLogs = 0;
 inline TextureWrapper g_SceneDepthTex{};
+// The colour buffer agl bound last, whatever it is: where the game's draws are
+// landing right now. A draw made from inside the game's own drawing (a layout
+// pane's, say) goes here, so it lands in the same image the game is building.
+inline GX2Types::ColorBuffer* g_BoundColor = nullptr;
 
 inline bool PlausibleTarget(uintptr_t p) { return p >= 0x10000000u && p < 0xE0000000u && (p & 3u) == 0; }
 
 WIIXL_HOOK_DEFINE_TRAMPOLINE(AglBindRenderTargetsHook) {
     static void Callback(uintptr_t renderBuffer, uint32_t a2, uint32_t a3) {
         Orig(renderBuffer, a2, a3);
+        if (PlausibleTarget(renderBuffer)) {
+            const uintptr_t boundColor = *reinterpret_cast<uintptr_t*>(renderBuffer + kRbColorTargetOffset);
+            auto* bound = PlausibleTarget(boundColor)
+                ? reinterpret_cast<GX2Types::ColorBuffer*>(boundColor + kRenderTargetBufferOffset) : nullptr;
+            g_BoundColor = bound && bound->surface.image ? bound : nullptr;
+        }
         if (g_SceneDepthLatched || !PlausibleTarget(renderBuffer)) return;
 
         const uintptr_t colorTarget = *reinterpret_cast<uintptr_t*>(renderBuffer + kRbColorTargetOffset);
@@ -1116,6 +1159,11 @@ inline void PrimePassResources(const GX2Types::ColorBuffer* tv) {
     EnsurePassContext();
 }
 
+// The colour target of the layout pass being drawn right now (a draw step of the game-scene layout callback), or null
+// outside one. What a draw from inside the game's UI should land in: the last target agl bound is not it - the UI binds
+// small targets of its own mid-pass (100x20 was seen) and goes back to the pass's target without that bind being seen.
+inline GX2Types::ColorBuffer* g_LayoutPassColor = nullptr;
+
 WIIXL_HOOK_DEFINE_TRAMPOLINE(GameSceneLayoutHook) {
     static void Callback(void* userPtr, int* step) {
         ++g_StatLayouts;
@@ -1160,7 +1208,16 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(GameSceneLayoutHook) {
                 }
             }
         }
+        GX2Types::ColorBuffer* const outer = g_LayoutPassColor;
+        if (step && step[0] == kLayoutStepDraw) {
+            const uintptr_t rb = static_cast<uintptr_t>(static_cast<uint32_t>(step[3]));
+            const uintptr_t target = PlausibleTarget(rb) ? *reinterpret_cast<uintptr_t*>(rb + kRbColorTargetOffset) : 0;
+            auto* color = PlausibleTarget(target)
+                ? reinterpret_cast<GX2Types::ColorBuffer*>(target + kRenderTargetBufferOffset) : nullptr;
+            g_LayoutPassColor = color && color->surface.image ? color : nullptr;
+        }
         Orig(userPtr, step);
+        g_LayoutPassColor = outer;
     }
 };
 
@@ -1292,6 +1349,29 @@ inline void EnsurePreHudContextState() {
     BotW::OSLog("WiiXLaunch: pre-HUD draw - private context state ready at %p\n", g_PreHudContextState);
 }
 
+// A private context state for drawing from inside the game's layout draw
+// (gui/map_layer.hpp). Made at scan-out, for the reason above; asked for by
+// setting g_MidLayoutContextWanted.
+inline void* g_MidLayoutContext = nullptr;
+inline bool g_MidLayoutContextWanted = false;
+inline bool g_MidLayoutContextFailed = false;
+
+inline void EnsureMidLayoutContext() {
+    if (g_MidLayoutContext || g_MidLayoutContextFailed || !g_MidLayoutContextWanted) return;
+    void* gameState = GetContextState();
+    if (!gameState) return;
+    g_MidLayoutContext = AllocMEM1(kContextStateSize, 256);
+    if (!g_MidLayoutContext) {
+        g_MidLayoutContextFailed = true;
+        BotW::OSLog("WiiXLaunch: mid-layout draw - no memory for a context state; disabled\n");
+        return;
+    }
+    if (!g_LateRing) g_LateRing = static_cast<uint8_t*>(AllocMEM1(kLateRingBytes, 256));
+    SetupContextStateEx()(g_MidLayoutContext, 0);
+    SetContextState()(gameState);
+    BotW::OSLog("WiiXLaunch: mid-layout draw - private context state ready at %p\n", g_MidLayoutContext);
+}
+
 inline void RunPreHud(const uint32_t* info) {
     if (g_PreHudBroken || !g_SpritePipelineReady || !g_PreHudContextState) return;
 
@@ -1337,6 +1417,7 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(AglCopyToScanBufferHook) {
                 if (tvColorBuffer && tvColorBuffer->surface.image) {
                     InitializeAllPipelines();
                     if (g_PreHudCallbackCount) EnsurePreHudContextState();
+                    EnsureMidLayoutContext();
 
                     uint32_t width = tvColorBuffer->surface.width ? tvColorBuffer->surface.width : 1280;
                     uint32_t height = tvColorBuffer->surface.height ? tvColorBuffer->surface.height : 720;

@@ -414,6 +414,7 @@ struct RecordedQuad {
     Backend::TextureHandle tex;
     uint8_t blendIndex;
     uint8_t snap;
+    uint8_t layer;    // which pass replays it - see kLayerTop/kLayerMap
     float x[4], y[4];
     float u[4], v[4];
     Color color[4];
@@ -421,6 +422,14 @@ struct RecordedQuad {
 
 constexpr uint32_t kMaxRecordedQuads = 2048;   // ~180 KB, allocated once
 constexpr uint32_t kMaxRecordedBlends = 8;
+
+// Where a recorded quad is drawn. Most of a frame is drawn on top of
+// everything, at present time. The map layer is drawn from inside the game's
+// own layout draw instead - over the map, under the map's icons and the
+// Sheikah Slate frame (gui/map_layer.hpp) - and only while the map is drawn.
+constexpr uint8_t kLayerTop = 0;
+constexpr uint8_t kLayerMap = 1;
+constexpr uint8_t kLayerCount = 2;
 
 // Backdrop blur. Off unless a mod turns it on: it costs two render targets
 // and a handful of full-screen draws per frame it is used. g_BlurRequested is
@@ -437,11 +446,36 @@ inline bool g_RecordOverflowed = false;
 inline Backend::BlendState g_RecordBlends[kMaxRecordedBlends]{};
 inline uint32_t g_RecordBlendCount = 0;
 inline bool g_Recording = false;
+// The layer quads are recorded into now, and how many each layer holds.
+inline uint8_t g_RecordLayer = kLayerTop;
+inline uint32_t g_RecordLayerQuads[kLayerCount]{};
+
+// The last finished frame, which is what every replay draws. A frame is
+// recorded into g_Record and only then published here, by swapping the two
+// buffers: the map layer replays from the game's render thread in the middle
+// of its frame, while the next frame is being recorded, and replaying the
+// buffer being recorded showed whatever part of it was written so far - the
+// map overlay flickered.
+inline RecordedQuad* g_Shown = nullptr;
+inline uint32_t g_ShownCount = 0;
+inline uint32_t g_ShownLayerQuads[kLayerCount]{};
+inline Backend::BlendState g_ShownBlends[kMaxRecordedBlends]{};
 
 inline bool EnsureRecord() {
-    if (g_Record) return true;
-    g_Record = reinterpret_cast<RecordedQuad*>(Heap::Alloc(sizeof(RecordedQuad) * kMaxRecordedQuads, 64));
-    return g_Record != nullptr;
+    if (g_Record && g_Shown) return true;
+    if (!g_Record) g_Record = reinterpret_cast<RecordedQuad*>(Heap::Alloc(sizeof(RecordedQuad) * kMaxRecordedQuads, 64));
+    if (!g_Shown) g_Shown = reinterpret_cast<RecordedQuad*>(Heap::Alloc(sizeof(RecordedQuad) * kMaxRecordedQuads, 64));
+    return g_Record != nullptr && g_Shown != nullptr;
+}
+
+// Makes the frame just recorded the one replays draw.
+inline void PublishRecord() {
+    RecordedQuad* done = g_Record;
+    g_Record = g_Shown;
+    for (uint32_t i = 0; i < kMaxRecordedBlends; ++i) g_ShownBlends[i] = g_RecordBlends[i];
+    for (uint32_t i = 0; i < kLayerCount; ++i) g_ShownLayerQuads[i] = g_RecordLayerQuads[i];
+    g_ShownCount = g_RecordCount;
+    g_Shown = done;
 }
 
 inline uint8_t RecordBlend(const Backend::BlendState& blend) {
@@ -547,6 +581,7 @@ inline void EmitQuad(Backend::TextureHandle tex, float x0, float y0, float x1, f
     q.tex = tex;
     q.blendIndex = RecordBlend(blend);
     q.snap = snap ? 1 : 0;
+    q.layer = g_RecordLayer < kLayerCount ? g_RecordLayer : kLayerTop;
     for (int i = 0; i < 4; ++i) {
         q.x[i] = px[i];
         q.y[i] = py[i];
@@ -555,13 +590,14 @@ inline void EmitQuad(Backend::TextureHandle tex, float x0, float y0, float x1, f
         q.color[i] = corners[i];
     }
     g_RecordCount++;
+    g_RecordLayerQuads[q.layer]++;
     g_QuadsThisFrame++;
 }
 
 // Hands the frame the input hook built to the GPU. Runs in the present hook,
 // where a context state and a colour buffer exist.
-inline void ReplayRecord(void* dst) {
-    if (!g_Record || g_RecordCount == 0) return;
+inline void ReplayRecord(void* dst, uint8_t layer = kLayerTop) {
+    if (!g_Shown || g_ShownCount == 0 || layer >= kLayerCount || g_ShownLayerQuads[layer] == 0) return;
     // Before anything is drawn: the blur samples the colour buffer as it
     // stands and retargets rendering while it runs, so it has to happen
     // before the batch sets itself up. The recorded quads that use it already
@@ -570,7 +606,7 @@ inline void ReplayRecord(void* dst) {
     // be sized from a real colour buffer, and Canvas::BlurBehind() will not
     // ask for a blur until they exist. Without this the two wait on each
     // other forever.
-    if (g_BlurEnabled && (g_BlurRequested || !Backend::BackdropReady())) {
+    if (layer == kLayerTop && g_BlurEnabled && (g_BlurRequested || !Backend::BackdropReady())) {
         Backend::BlurBackdrop(dst, g_BlurDownscale, g_BlurPasses);
     }
     Backend::BeginBatch(dst);
@@ -579,13 +615,14 @@ inline void ReplayRecord(void* dst) {
     g_AlphaStack[0] = 1.0f;
     const size_t savedDepth = g_AlphaDepth;
     g_AlphaDepth = 0;
-    for (uint32_t i = 0; i < g_RecordCount; ++i) {
-        const RecordedQuad& q = g_Record[i];
+    for (uint32_t i = 0; i < g_ShownCount; ++i) {
+        const RecordedQuad& q = g_Shown[i];
+        if (q.layer != layer) continue;
         Backend::TextureVertex verts[4];
         for (int k = 0; k < 4; ++k) {
             FillVertex(verts[k], q.x[k], q.y[k], q.u[k], q.v[k], q.color[k], q.snap != 0);
         }
-        Backend::BatchQuad(q.tex, verts, g_RecordBlends[q.blendIndex]);
+        Backend::BatchQuad(q.tex, verts, g_ShownBlends[q.blendIndex]);
     }
     Backend::EndBatch();
     g_AlphaStack[0] = saved;
