@@ -342,6 +342,39 @@ inline void TickCapture() {
     if (frames != 0 && frames != kCaptureIndefinitely) frames--;
 }
 
+// Button capture: the same idea as capture, for chosen buttons only. A debug
+// tool that wants the scope's A press for itself has to stop it dropping a map
+// pin, and blanking the whole pad for that would freeze the scope's aim with
+// it. The mask is canonical bits (ButtonBit), translated per source where it
+// is applied, so it covers a Pro Controller or Wii Remote as well as the
+// GamePad.
+//
+// Masks from several callers are OR'd and share one countdown, which runs
+// while any of them keeps re-arming it; when it reaches zero the mask clears.
+// A countdown and not a flag for the reason capture is one: a caller that
+// stops - or crashes - gives the buttons back on its own. Ticked once per
+// frame, from the same place TickCapture is.
+struct ButtonCapture {
+    uint32_t mask = 0;
+    uint32_t frames = 0;
+};
+
+inline ButtonCapture& ButtonCaptureRef() {
+    static ButtonCapture capture;
+    return capture;
+}
+
+inline uint32_t ButtonCaptureMask() {
+    const ButtonCapture& c = ButtonCaptureRef();
+    return c.frames != 0 ? c.mask : 0u;
+}
+
+inline void TickButtonCapture() {
+    ButtonCapture& c = ButtonCaptureRef();
+    if (c.frames == 0) return;
+    if (--c.frames == 0) c.mask = 0;
+}
+
 #if WIIXL_SWITCH
 
 struct NpadState {
@@ -378,7 +411,11 @@ inline void ProcessNpadState(NpadState* state) {
         state->RStickX = 0;
         state->RStickY = 0;
         TickCapture();
+    } else {
+        // Canonical bits ARE npad bits here, so the mask applies as is.
+        state->Buttons &= ~static_cast<uint64_t>(ButtonCaptureMask());
     }
+    TickButtonCapture();
 }
 
 // nn::hid::GetNpadStates returns void, so there's no result to gate on -
@@ -583,7 +620,22 @@ inline uint32_t& GameVisibleHold() {
 // stored for our own use.
 inline void ApplyCapture(uint8_t* vpad) {
     if (!CaptureActive()) {
-        GameVisibleHold() = *reinterpret_cast<uint32_t*>(vpad + kVpadHoldOffset);
+        uint32_t& hold = *reinterpret_cast<uint32_t*>(vpad + kVpadHoldOffset);
+        // Injected buttons survive it, as they survive whole capture.
+        const Injection& injection = InjectionRef();
+        const uint32_t injected = injection.framesRemaining > 0 ? injection.buttons : 0u;
+        const uint32_t mask = ButtonCaptureMask() & ~injected;
+        if (mask != 0) {
+            // VPAD bits are canonical, so the mask applies as is. A masked
+            // button the game last saw held gets its release edge, as whole
+            // capture gives one; otherwise it never sees a press or release.
+            uint32_t& trigger = *reinterpret_cast<uint32_t*>(vpad + kVpadTriggerOffset);
+            uint32_t& release = *reinterpret_cast<uint32_t*>(vpad + kVpadReleaseOffset);
+            hold &= ~mask;
+            trigger &= ~mask;
+            release = (release & ~mask) | (GameVisibleHold() & mask);
+        }
+        GameVisibleHold() = hold;
         return;
     }
 
@@ -641,6 +693,48 @@ inline void ApplyCaptureKpad(uint8_t* kpad) {
     }
 }
 
+// The native bits of `src` that translate into any of `canonicalMask` - the
+// inverse of TranslateToCanonical, found by asking it about each bit rather
+// than keeping a second table that could drift from the first.
+inline uint32_t NativeMask(uint32_t canonicalMask, PadSource src) {
+    uint32_t out = 0;
+    for (uint32_t bit = 0; bit < 32; ++bit) {
+        const uint32_t native = 1u << bit;
+        if (TranslateToCanonical(native, src) & canonicalMask) out |= native;
+    }
+    return out;
+}
+
+inline uint32_t NunchukNativeMask(uint32_t canonicalMask) {
+    uint32_t out = 0;
+    for (uint32_t bit = 0; bit < 32; ++bit) {
+        const uint32_t native = 1u << bit;
+        if (NunchukExtraBits(native) & canonicalMask) out |= native;
+    }
+    return out;
+}
+
+// Clears one word triple - hold, trigger, release - of the masked bits.
+inline void ClearKpadButtons(uint8_t* words, uint32_t nativeMask) {
+    if (nativeMask == 0) return;
+    for (uint32_t o = 0; o < 0x0C; o += 4) *reinterpret_cast<uint32_t*>(words + o) &= ~nativeMask;
+}
+
+// Button capture for one KPADStatus. The Wii Remote's own buttons are always
+// at 0x00; a Pro Controller's and a Nunchuk's are in the 0x60 union. A Classic
+// Controller is not read anywhere in this file, so it has no translation to
+// invert and is left alone - whole capture still blanks it.
+inline void ApplyButtonCaptureKpad(uint8_t* kpad, uint32_t canonicalMask) {
+    ClearKpadButtons(kpad + 0x00, NativeMask(canonicalMask, PadSource::WPAD_CORE));
+
+    const uint8_t extensionType = *reinterpret_cast<uint8_t*>(kpad + 0x5C);
+    if (extensionType == kExtProController) {
+        ClearKpadButtons(kpad + 0x60, NativeMask(canonicalMask, PadSource::WPAD_PRO));
+    } else if (extensionType == kExtNunchuk || extensionType == kExtMplusNunchuk) {
+        ClearKpadButtons(kpad + 0x7C, NunchukNativeMask(canonicalMask));
+    }
+}
+
 #endif
 
 WIIXL_HOOK_DEFINE_TRAMPOLINE(VPADReadWrapperHook) {
@@ -673,6 +767,7 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(VPADReadWrapperHook) {
         // from us, and after ApplyInjection, so injected buttons survive it.
         ApplyCapture(vpad);
         TickCapture();
+        TickButtonCapture();
 
         if (FrameCallback callback = FrameCallbackRef()) callback();
     }
@@ -734,6 +829,10 @@ WIIXL_HOOK_DEFINE_TRAMPOLINE(KPADReadExWrapperHook) {
         if (CaptureActive()) {
             for (int i = 0; i < 4; i++) {
                 ApplyCaptureKpad(static_cast<uint8_t*>(obj) + 0x1118 + (i * 0xF08));
+            }
+        } else if (const uint32_t mask = ButtonCaptureMask()) {
+            for (int i = 0; i < 4; i++) {
+                ApplyButtonCaptureKpad(static_cast<uint8_t*>(obj) + 0x1118 + (i * 0xF08), mask);
             }
         }
     }
@@ -841,6 +940,23 @@ public:
         uint32_t& current = impl::CaptureFramesRef();
         if (current != impl::kCaptureIndefinitely && frames > current) current = frames;
     }
+
+    // Hides only the buttons in `mask` (MaskFor bits) from the game, for the
+    // next `frames` game frames; call again every frame it should stay on.
+    // This module's own accessors still see them. Several callers' masks
+    // combine, and share one countdown - see ButtonCapture.
+    //
+    // Arm it BEFORE the press it should hide: like capture, it takes effect
+    // from the next input read, so a mask set in reaction to a press lets
+    // that press's first frame through.
+    static void HoldButtonCapture(uint32_t mask, uint32_t frames = 8) {
+        if (mask == 0 || frames == 0) return;
+        impl::ButtonCapture& c = impl::ButtonCaptureRef();
+        c.mask = c.frames != 0 ? (c.mask | mask) : mask;
+        if (frames > c.frames) c.frames = frames;
+    }
+
+    static uint32_t ButtonCaptureMask() { return impl::ButtonCaptureMask(); }
 
     static bool IsInputCaptured() { return impl::CaptureActive(); }
 

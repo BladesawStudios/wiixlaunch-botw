@@ -31,10 +31,11 @@ namespace WiiXLaunch::BotW::Surfaces::InputSurface {
 
 constexpr const char* kName = "botw.input";
 constexpr uint16_t kVersionMajor = 1;
+// 1.3 appends HoldButtonCapture and ButtonCaptureMask.
 // 1.2 appends GetPhysicalRightStick.
 // 1.1 appends RegisterFrame and the two calls that report it. Appending bumps
 // the MINOR, so every mod built against v1.0 still resolves.
-constexpr uint16_t kVersionMinor = 2;
+constexpr uint16_t kVersionMinor = 3;
 
 namespace impl {
 
@@ -399,6 +400,31 @@ extern "C" inline uint32_t IIsInputCaptured() {
     return Controller::IsInputCaptured() ? 1u : 0u;
 }
 
+// v1.3. Capture for chosen buttons only: hides the buttons in `mask` (MaskFor
+// bits, OR'd together) from the game for `frames` game frames, 8 if 0, on the
+// GamePad, a Pro Controller and a Wii Remote alike. This mod - and every
+// other - still reads them through IsPressed and HeldButtons.
+//
+// For a mod that wants a button for itself without the game also acting on
+// it: the debug tool keeps A masked while the scope is up, so pressing A to
+// dump an actor does not also drop a map pin. Whole capture would do that
+// too, and freeze the scope's aim with it.
+//
+// Arm it before the press it should hide, and re-arm it every frame it should
+// stay on - it takes effect from the next input read, so a mask set in
+// reaction to a press lets that press's first frame through. Masks from
+// several mods combine and share one countdown.
+extern "C" inline uint32_t IHoldButtonCapture(uint32_t mask, uint32_t frames) {
+    if (mask == 0) return 0;
+    Controller::HoldButtonCapture(mask, frames ? frames : 8u);
+    return 1;
+}
+
+// v1.3. The buttons hidden from the game right now, 0 when none are.
+extern "C" inline uint32_t IButtonCaptureMask() {
+    return Controller::ButtonCaptureMask();
+}
+
 // --- the table -------------------------------------------------------------
 inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("SupportsInjection", &ISupportsInjection),
@@ -427,6 +453,10 @@ inline const Surface::Symbol kSymbols[] = {
 
     // v1.2
     WIIXL_SURFACE_SYMBOL("GetPhysicalRightStick", &IGetPhysicalRightStick),
+
+    // v1.3
+    WIIXL_SURFACE_SYMBOL("HoldButtonCapture",  &IHoldButtonCapture),
+    WIIXL_SURFACE_SYMBOL("ButtonCaptureMask",  &IButtonCaptureMask),
 };
 
 } // namespace impl

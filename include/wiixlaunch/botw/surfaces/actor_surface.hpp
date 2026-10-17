@@ -31,6 +31,23 @@
 // ---------------------------------------------------------------------------
 // VECTORS CROSS AS float[3], MATRICES AS float[12]. Same rule as everywhere
 // else: no struct, and the caller owns the storage.
+//
+// ---------------------------------------------------------------------------
+// 1.1 appends QueryRay, QueryScanned and GetPhysicsObject - what an actor
+// picker needs, found by porting one (the BotW debug tool) to a .wxlm.
+//
+// A picker has to consider every actor in the world, live and placed - over
+// 4000 on the field - and keep the handful near an aim line. Query cannot do
+// that: it caps at 256 and filters only by name, so a mod would be choosing
+// which 256 of 4000 to look at before it knew where any of them were. QueryRay
+// does the geometry on this side, inside the walk, and hands back only what
+// the ray passes close to.
+//
+// A mod that also needs fields no surface names - the debug tool dumps HashId
+// and the map-object link, which are research, not API - takes the actor's
+// address through botw.player's ActorUnsafeRawPointer. It accepts any actor
+// handle, since the handle table is shared, and logs who used it; there is
+// deliberately no second, unlogged way to get one here.
 
 #include <wiixlaunch/platform.hpp>
 #include <wiixlaunch/loader/surface.hpp>
@@ -44,7 +61,7 @@ namespace WiiXLaunch::BotW::Surfaces::ActorSurface {
 
 constexpr const char* kName = "botw.actor";
 constexpr uint16_t kVersionMajor = 1;
-constexpr uint16_t kVersionMinor = 0;
+constexpr uint16_t kVersionMinor = 1;
 
 // A query can match more actors than this; the count reported is what was
 // stored, and the log says when matches were dropped.
@@ -57,6 +74,7 @@ namespace impl {
 inline H::Handle g_Results[kMaxQueryResults];
 inline uint32_t g_ResultCount = 0;
 inline uint32_t g_LastQueryMatched = 0;   // before the cap
+inline uint32_t g_LastQueryScanned = 0;   // visited at all, matched or not
 
 inline uint32_t CopyOut(const char* src, char* out, uint32_t cap) {
     if (!out || cap == 0) return 0;
@@ -91,6 +109,7 @@ extern "C" inline int32_t AcCount() {
 extern "C" inline int32_t AcQuery(int32_t kind, const char* name, uint32_t exactMatch) {
     g_ResultCount = 0;
     g_LastQueryMatched = 0;
+    g_LastQueryScanned = 0;
 
     auto take = [&](const Actor& a) {
         ++g_LastQueryMatched;
@@ -105,6 +124,7 @@ extern "C" inline int32_t AcQuery(int32_t kind, const char* name, uint32_t exact
     const bool exact = exactMatch != 0;
     const bool filtered = name && name[0] != '\0';
     auto visit = [&](const Actor& a) {
+        ++g_LastQueryScanned;
         if (filtered) {
             const char* actorName = a.GetName();
             const bool match = exact ? std::strcmp(actorName, name) == 0 : std::strstr(actorName, name) != nullptr;
@@ -137,6 +157,121 @@ extern "C" inline int32_t AcQueryMatched() {
 extern "C" inline uint32_t AcQueryAt(int32_t index) {
     if (index < 0 || static_cast<uint32_t>(index) >= g_ResultCount) return H::kInvalid;
     return g_Results[index];
+}
+
+// QueryRay's flags.
+constexpr uint32_t kRayHorizontal = 1u;   // measure in the XZ plane, ignore height
+constexpr uint32_t kRaySkipOrigin = 2u;   // drop actors sitting exactly at (0,0,0)
+
+// Kept nearest-first while the walk runs, then turned into handles.
+struct RayHit {
+    void* ptr;
+    uint8_t kind;
+    float along;
+};
+inline RayHit g_RayHits[kMaxQueryResults];
+
+// v1.1. Every actor the ray passes within maxMiss of, between minAlong and
+// maxAlong along it, NEAREST FIRST - the order matters more than it looks:
+// when more than kMaxQueryResults match, the farthest are the ones dropped,
+// so the cap costs a picker the actors it was least likely to want.
+//
+// origin3/dir3 are float[3]; dir need not be unit length, it is normalised
+// here. kind is Query's selector (0 dynamic, 1 static, 2 all). Read the
+// results with QueryAt, QueryMatched and QueryScanned, exactly as Query's.
+//
+// flags is a mask. 1 (kRayHorizontal) flattens both the ray and each offset
+// onto the ground plane, for an aim direction that has a yaw and no pitch: the
+// miss is then measured sideways only, and height is the mod's to judge.
+//
+// 2 (kRaySkipOrigin) exists because the cap would otherwise be spent on noise.
+// Event tags, system actors and anything never placed report (0,0,0), and
+// they are most of the live list - one debug-tool dump found 3380 of 4278
+// actors "on the ray" because the player faced the map centre. A real actor
+// at exactly the origin is lost with them.
+//
+// The handles are made after the walk, outside the proc manager's lock, so an
+// actor can die between being measured and being handed out. That is the same
+// promise every handle makes - a generation check, not a liveness guarantee -
+// and IsValid answers the rest.
+extern "C" inline int32_t AcQueryRay(const float* origin3, const float* dir3,
+                                     float minAlong, float maxAlong, float maxMiss,
+                                     int32_t kind, uint32_t flags) {
+    g_ResultCount = 0;
+    g_LastQueryMatched = 0;
+    g_LastQueryScanned = 0;
+    if (!origin3 || !dir3 || !(maxMiss >= 0.0f) || !(maxAlong >= minAlong)) return 0;
+
+    const bool horizontal = (flags & kRayHorizontal) != 0;
+    const bool skipOrigin = (flags & kRaySkipOrigin) != 0;
+
+    float dx = dir3[0], dy = horizontal ? 0.0f : dir3[1], dz = dir3[2];
+    const float length = std::sqrt(dx * dx + dy * dy + dz * dz);
+    if (!(length > 0.0001f)) return 0;
+    dx /= length; dy /= length; dz /= length;
+
+    const float ox = origin3[0], oy = origin3[1], oz = origin3[2];
+    const float maxMissSq = maxMiss * maxMiss;
+    uint32_t kept = 0;
+
+    auto visit = [&](const Actor& a) {
+        ++g_LastQueryScanned;
+
+        float x, y, z;
+        if (!a.GetPosition(x, y, z)) return;
+        // NaN fails every comparison below, so a torn transform drops out.
+        if (skipOrigin && x > -0.001f && x < 0.001f && y > -0.001f && y < 0.001f &&
+            z > -0.001f && z < 0.001f) {
+            return;
+        }
+
+        const float vx = x - ox, vy = horizontal ? 0.0f : y - oy, vz = z - oz;
+        const float along = vx * dx + vy * dy + vz * dz;
+        if (!(along >= minAlong) || !(along <= maxAlong)) return;
+
+        const float px = vx - along * dx, py = vy - along * dy, pz = vz - along * dz;
+        if (!(px * px + py * py + pz * pz <= maxMissSq)) return;
+
+        ++g_LastQueryMatched;
+
+        // Insertion into a sorted run. A full run drops whichever is farthest,
+        // which may be the newcomer.
+        uint32_t slot = kept;
+        while (slot > 0 && g_RayHits[slot - 1].along > along) --slot;
+        if (slot >= kMaxQueryResults) return;
+        const uint32_t last = kept < kMaxQueryResults ? kept : kMaxQueryResults - 1;
+        for (uint32_t i = last; i > slot; --i) g_RayHits[i] = g_RayHits[i - 1];
+        g_RayHits[slot] = RayHit{a.GetRaw(), static_cast<uint8_t>(a.GetKind()), along};
+        if (kept < kMaxQueryResults) ++kept;
+    };
+
+    if (kind == 0) {
+        Actor::ForEachDynamic(visit);
+    } else if (kind == 1) {
+        Actor::ForEachStatic(visit);
+    } else {
+        Actor::ForEach(visit);
+    }
+
+    for (uint32_t i = 0; i < kept; ++i) {
+        const H::Handle h = H::Store(Actor(g_RayHits[i].ptr,
+                                           static_cast<Actor::Kind>(g_RayHits[i].kind)));
+        if (h != H::kInvalid) g_Results[g_ResultCount++] = h;
+    }
+
+    if (g_LastQueryMatched > g_ResultCount) {
+        WIIXL_LOG("botw.actor: ray query matched %u actor(s), %u returned - the "
+                  "farthest were dropped at the result cap", g_LastQueryMatched, g_ResultCount);
+    }
+    return static_cast<int32_t>(g_ResultCount);
+}
+
+// v1.1. How many actors the last Query or QueryRay visited, matched or not. A
+// picker reporting "nothing on the ray" needs to say whether it looked at
+// four thousand actors or at none - an empty world and a broken walk give the
+// same empty result otherwise.
+extern "C" inline int32_t AcQueryScanned() {
+    return static_cast<int32_t>(g_LastQueryScanned);
 }
 
 // The single-result lookups, which do not disturb the query buffer - a mod
@@ -204,6 +339,16 @@ extern "C" inline uint32_t AcIsDynamic(uint32_t handle) {
 }
 extern "C" inline uint32_t AcIsPlacement(uint32_t handle) {
     Actor a; return H::Load(handle, a) && a.IsPlacement() ? 1u : 0u;
+}
+
+// v1.1. The physics object behind a live actor, from the actor's own vtable
+// slot 0x30C - a game call, which is why it is here and not left to a mod
+// holding a raw pointer. 0 for a placement, a dead handle, or an actor
+// without physics.
+extern "C" inline uintptr_t AcGetPhysicsObject(uint32_t handle) {
+    Actor a;
+    if (!H::Load(handle, a)) return 0;
+    return reinterpret_cast<uintptr_t>(a.GetPhysicsObject());
 }
 
 // --- transform -------------------------------------------------------------
@@ -467,6 +612,11 @@ inline const Surface::Symbol kSymbols[] = {
     WIIXL_SURFACE_SYMBOL("Spawn",               &AcSpawn),
     WIIXL_SURFACE_SYMBOL("SpawnScaled",         &AcSpawnScaled),
     WIIXL_SURFACE_SYMBOL("Delete",              &AcDelete),
+
+    // v1.1. Appended, never inserted.
+    WIIXL_SURFACE_SYMBOL("QueryRay",            &AcQueryRay),
+    WIIXL_SURFACE_SYMBOL("QueryScanned",        &AcQueryScanned),
+    WIIXL_SURFACE_SYMBOL("GetPhysicsObject",    &AcGetPhysicsObject),
 };
 
 } // namespace impl
