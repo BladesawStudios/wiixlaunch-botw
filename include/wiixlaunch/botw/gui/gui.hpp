@@ -1647,6 +1647,15 @@ inline float GetEffectiveOutputAspect() { return 16.0f / 9.0f; }
 inline float FramesPerSecond() { return 0.0f; }
 inline void SetBackdropBlur(bool, uint32_t = 4, uint32_t = 2) {}
 inline bool IsBackdropBlurEnabled() { return false; }
+
+// The layer ids are part of the botw.gui surface (GuiSetLayer takes them), so
+// they exist here too; nothing is ever drawn into either.
+namespace impl {
+constexpr uint8_t kLayerTop = 0;
+constexpr uint8_t kLayerMap = 1;
+constexpr uint8_t kLayerCount = 2;
+} // namespace impl
+
 inline void SetLayer(uint8_t) {}
 
 } // namespace WiiXLaunch::BotW::GUI
