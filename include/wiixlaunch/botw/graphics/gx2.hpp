@@ -1775,6 +1775,12 @@ inline void BatchQuad(TextureHandle textureHandle, const TextureVertex verts[4],
 inline void EndBatch() {
     if (!impl::g_BatchActive) return;
     impl::BatchFlush();
+    // Leave blending as a batch found it: ordinary alpha. The state is the
+    // game's own when the batch is drawn at scan-out, and the game does not
+    // always set blending before it draws - a batch ending on additive quads
+    // (a mod's glow) left the game rendering additively during a loading
+    // screen, and the water it prepared there came out broken for the session.
+    if (impl::g_BatchBlendValid && !(impl::g_BatchBlendApplied == Blend::Alpha)) impl::ApplyBlend(Blend::Alpha);
     impl::g_BatchTexture = nullptr;
     impl::g_BatchActive = false;
 }
