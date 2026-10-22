@@ -47,6 +47,7 @@
 // instruction past the return address and is left untouched.
 
 #include <wiixlaunch/platform.hpp>
+#include <wiixlaunch/generated_host.hpp>
 #include <wiixlaunch/loader/load_point.hpp>
 #include <wiixlaunch/loader/loader.hpp>
 #include <wiixlaunch/hook_manager.hpp>
@@ -106,10 +107,18 @@ extern "C" __attribute__((used)) inline void WiiXLaunch_LoadPointProbe() {
     // The host READS each target back rather than believing the applier. A
     // refusal is self-evidencing because nothing changed; a success is not.
     //
-    // A host shipping REAL patch mods must delete the RestoreAll call - a patch
-    // is meant to persist. This build ships only demonstration modules.
+    // A patch is meant to persist: the target's `patches.persist` (Host::
+    // PatchesPersist) keeps them, as the Wii U plugin and Switch entry already
+    // did. Off, they are put back after verifying - the demonstration modules'
+    // way. This path restored them unconditionally, so a real patch mod's
+    // patches were undone before its entry ran.
     WiiXLaunch::Patches::VerifyApplied();
-    WiiXLaunch::Patches::RestoreAll();
+    if constexpr (!WiiXLaunch::Host::PatchesPersist) {
+        WiiXLaunch::Patches::RestoreAll();
+    } else {
+        WIIXL_LOG("Patch: this host keeps declared patches (patches.persist), so "
+                  "they are verified and LEFT IN PLACE");
+    }
     WiiXLaunch::Patches::LogState();
 
     if (loaded != 0) {
